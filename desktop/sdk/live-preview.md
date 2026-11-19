@@ -1,0 +1,32 @@
+# 创造模式实时预览
+
+在设计会话的 `interface/` 内生成 SDK 2 界面包。用 `apply_patch` 一次提交可运行的一版，初版可先准备资源，最后补上 `manifest.json`。清单存在时，成功修改包内文件也会提交该版本。使用其他工具写资源时，用 `apply_patch` 更新清单提交试跑。
+
+补丁结果的 `creation_preview` 包含包指纹、检查结果和错误。支持图片输入的模型会同时收到试跑截图。预览使用示例会话。定位问题后继续修改并提交，试跑失败时界面仍显示此前通过的候选。用户点「应用」后安装预览中的快照。
+
+## 用量统计按钮
+
+在内置工作台的聊天顶部添加用量统计按钮时，`interface/manifest.json` 可以只包含以下内容。按钮打开宿主的用量面板。设置 `showRate` 为 `true` 时，生成过程中显示当前估算速度。
+
+```json
+{
+  "id": "example.usage-toolbar",
+  "name": "用量统计工具栏",
+  "version": "1.0.0",
+  "hostApi": 2,
+  "stateVersion": 1,
+  "contributes": [
+    {"id": "usage", "kind": "toolbar", "target": "chat", "action": "usage", "showRate": true}
+  ]
+}
+```
+
+宿主会用示例对话验证按钮能打开用量面板，并用模拟输出验证速度更新。完整工作台插件可以在自己的布局中调整工具栏。
+
+## 检查候选交互
+
+声明 `previewChecks` 可在候选就绪后验证关键按钮。检查作用于候选的首个预览区域，按数组顺序执行，最多五项。填写按钮的可访问名称和点击后新出现的可见文字。
+
+```json
+{"previewChecks": [{"button": "查看详情", "text": "任务详情"}]}
+```

@@ -5,6 +5,7 @@ const { pathToFileURL } = require('node:url');
 const { Backend } = require('./backend.cjs');
 const {applicationMenu} = require('./application-menu.cjs');
 const { PluginHost } = require('./plugins.cjs');
+const { CreationPreview } = require('./creation-preview.cjs');
 const { BrowserHost } = require('./browser.cjs');
 const { FileHost } = require('./files.cjs');
 const fileHost = new FileHost();
@@ -19,7 +20,7 @@ const snippetHost = new SnippetHost({diagnostic:(event,details)=>{
     .catch(error=>console.error('preview_diagnostic_write_failed',error.message));
 }});
 function servePlugin(plugin) {
-  return { ...plugin, html: undefined, url: `cowork-plugin://${plugin.hash}/${plugin.entry}` };
+  return { ...plugin, html: undefined, url: plugin.entry ? `cowork-plugin://${plugin.hash}/${plugin.entry}` : undefined };
 }
 
 app.setName('DeepSeek Cowork');
@@ -47,7 +48,7 @@ allowed.add('host.recovery.get'); allowed.add('host.recovery.save');
 for (const method of ['modes.list', 'modes.enable', 'creation.candidate']) allowed.add(method);
 allowed.add('visualization.get'); allowed.add('visualization.state');
 for (const method of ['workbench.list', 'workbench.profiles', 'workbench.open', 'workbench.close', 'workbench.control', 'workbench.read', 'workbench.input', 'workbench.reply', 'workbench.resize', 'workbench.activate', 'file.save_copy']) allowed.add(method);
-let window, backend, plugins, tray, browserHost, quitting = false, quitPending = false, uiReady = false;
+let window, backend, plugins, tray, browserHost, creationPreview, quitting = false, quitPending = false, uiReady = false;
 let eventQueue = [], batch;
 const startup = new UpdateStartup({installDir: app.isPackaged ? path.dirname(app.getPath('exe')) : root,
   version:app.getVersion(), call:(...args)=>backend.call(...args), diagnostic:(event,details)=>{
@@ -60,6 +61,11 @@ startup.accept(initialStartupRequest);
 let installPending = false;
 function publish(event) {
   if (event.event === 'browser_host') { void browserHost?.handle(event.data); return; }
+  if (event.event === 'creation_preview_request') {
+    void creationPreview.handle(event).catch(error => console.warn('creation_preview_transport_failed', {conversation_id:event.conversation_id,run_id:event.run_id,message:error.message}));
+    return;
+  }
+  if (event.event === 'creation_preview_cancelled') { creationPreview.cancel(event.data.id); return; }
   eventQueue.push(event);
   if (!batch) batch = setTimeout(() => {
     const events = eventQueue; eventQueue = []; batch = null;
@@ -119,6 +125,12 @@ async function createWindow() {
   });
   window.webContents.on('did-start-loading', () => { uiReady = false; startup.ready = false; });
   window.webContents.on('will-navigate', (event, url) => { if (url !== entry) event.preventDefault(); });
+  window.webContents.on('will-frame-navigate', event => {
+    const current = event.frame?.url;
+    if (current?.startsWith('cowork-plugin:') && !event.url.startsWith('cowork-plugin://'+new URL(current).host+'/')) {
+      event.preventDefault();
+    }
+  });
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   window.once('ready-to-show', () => window.show());
   window.on('close', event => {
@@ -171,6 +183,7 @@ else {
     try { backend = new Backend({ root, dataDir, resources: app.isPackaged ? process.resourcesPath : null, publish }); }
     catch (error) { await dialog.showMessageBox({ type: 'error', message: error.message }); quitting = true; app.quit(); return; }
     backend.ready.catch(error => publish({ event: 'service_error', error: error.message }));
+    creationPreview = new CreationPreview({entry,plugins,call:(...args)=>backend.call(...args),publish});
     browserHost = new BrowserHost({ root, backend, getWindow: () => window, diagnostic: (event, details) => {
       void fs.mkdir(path.join(dataDir, 'logs'), {recursive:true})
         .then(() => fs.appendFile(path.join(dataDir, 'logs', 'desktop-browser.log'), `${new Date().toISOString()} ${event} ${JSON.stringify(details)}\n`))
@@ -259,10 +272,13 @@ else {
         console.info('creation_prepared', {conversation_id:session.conversation_id});
         return session;
       }
-      if (method === 'plugins.preview_generated') {
+      if (method === 'creation.preview_state') return creationPreview.state(params.conversation_id);
+      if (method === 'creation.preview_use') return servePlugin(creationPreview.use(params.conversation_id,params.hash));
+      if (method === 'creation.preview_clear') return creationPreview.clear(params.conversation_id,params.hash);
+      if (method === 'creation.preview') {
         const candidate = await backend.call('creation.candidate',params);
-        if (!candidate.path) throw Error('尚未生成界面候选。请先完成设计任务。');
-        return servePlugin(await plugins.preview(candidate.path));
+        await creationPreview.run(params.conversation_id,candidate.path,undefined,new AbortController().signal);
+        return creationPreview.state(params.conversation_id);
       }
       if (method === 'plugins.load') return servePlugin(await plugins.load(params.id));
       if (method === 'plugins.preview') {

@@ -13,7 +13,7 @@
 
 ## 创造模式与模式插件
 
-“+ → 模式 → 创造模式”由内置 `cowork.creation` 插件提供。宿主创建独立设计会话，把 SDK 和工作台示例放在该会话的 `reference/sdk`、`reference/workbench`；模型将完整的 SDK 2 界面包写入 `interface/`，用户通过候选预览应用。设计请求作为该会话的用户任务发送，系统前缀及工具定义不因界面模式切换而变化。
+“+ → 模式 → 创造模式”由内置 `cowork.creation` 插件提供。宿主创建独立设计会话，把 SDK 和工作台示例放在该会话的 `reference/sdk`、`reference/workbench`。AI 用 `apply_patch` 提交 `interface/` 中的候选，宿主试跑该快照并回传实际画面、操作检查和错误。试跑通过的候选出现在预览区，用户可以应用该快照。设计请求作为该会话的用户任务发送。 [实时预览与顶部工具栏](live-preview.md)
 
 内置 `cowork.grilling` 注册运行策略，负责拷问提示、问卷校验及确认执行的状态迁移。`core/mode_plugins.py` 统一提供模式描述和启停目录，插件管理与输入区读取同一目录。启停仅约束新任务，运行实例保留原策略；消息、提交队列、权限和恢复仍由宿主管理。
 
@@ -44,6 +44,7 @@
 | editor | text、html、Office 文件类型或 `*` | 按类型选择，通用实现使用 `*` |
 | command | workspace 等命令区域 | 声明全局唯一 `command`、显示 `title` |
 | menu | workspace 等菜单区域 | 引用已注册 `command` |
+| toolbar | chat | 内置聊天顶部的用量统计按钮，可显示生成速度 |
 
 同一命令 ID 冲突会拒绝安装。清单的能力决定可调用操作以及快照里包含哪些数据。
 

@@ -1,3 +1,5 @@
+.usage-toolbar-button { gap: 5px; flex-shrink: 0; white-space: nowrap; }
+.usage-toolbar-rate { font-variant-numeric: tabular-nums; }
 .usage-popover {
   --usage-accent: color-mix(in srgb, var(--link, var(--primary)) 45%, var(--muted));
   width: 100%;

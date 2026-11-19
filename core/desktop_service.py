@@ -208,7 +208,10 @@ class DesktopService:
             if claim.get("status") != "ok":
                 return
             try:
-                result = self.workbench.agent_request(identity, claim)
+                if claim["action"] == "creation_preview":
+                    result = self.creation.agent_preview(identity, claim)
+                else:
+                    result = self.workbench.agent_request(identity, claim)
             except Exception as exc:
                 log.exception("workbench_action_failed session=%s action=%s", identity["session_id"], claim["action"])
                 result = {"ok": False, "status": getattr(exc, "code", "failed"), "error": str(exc)}

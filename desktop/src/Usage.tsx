@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ChevronRight, X } from 'lucide-react';
+import { useEffect, useId, useMemo, useState, type Ref } from 'react';
+import { ChartColumn, ChevronRight, X } from 'lucide-react';
 import type { RuntimeEvent, Settings } from './types';
 import { generationRates, SPEED_TREND_SECONDS, UsageProjection, type SpeedRequest } from './usageMetrics';
 import './usage.css';
@@ -40,7 +40,7 @@ function RateValue({ value }: { value?: number }) {
   return <div className="usage-rate-value"><strong>{value == null ? '—' : value.toFixed(1)}</strong>{value != null && <small>tok/s</small>}</div>;
 }
 
-function GenerationSpeed({ request, lastSpeed }: { request?: SpeedRequest; lastSpeed?: number }) {
+function useGenerationRates(request?: SpeedRequest) {
   const [now, setNow] = useState(() => Date.now() / 1000);
   const measuring = request?.firstOutputAt != null;
   useEffect(() => {
@@ -50,7 +50,28 @@ function GenerationSpeed({ request, lastSpeed }: { request?: SpeedRequest; lastS
     const timer = window.setInterval(update, 500);
     return () => window.clearInterval(timer);
   }, [measuring]);
-  const rates = generationRates(request, now);
+  return generationRates(request, now);
+}
+
+function useUsage(events: RuntimeEvent[], activeRunId?: string) {
+  const [projection] = useState(() => new UsageProjection());
+  return useMemo(() => projection.project(events, activeRunId), [projection, events, activeRunId]);
+}
+
+export function UsageToolbarButton({ events, activeRunId, showRate, open, onClick, buttonRef }: {
+  events: RuntimeEvent[]; activeRunId?: string; showRate?: boolean; open: boolean;
+  onClick: () => void; buttonRef?: Ref<HTMLButtonElement>;
+}) {
+  const usage = useUsage(events, showRate ? activeRunId : undefined);
+  const rate = useGenerationRates(usage.request).at(-1);
+  return <button ref={buttonRef} className="toolbar-button usage-toolbar-button" title="用量统计" aria-label="用量统计"
+    aria-haspopup="dialog" aria-expanded={open} onClick={onClick}><ChartColumn size={16}/><span>用量统计</span>
+    {rate != null && <small className="usage-toolbar-rate">{rate.toFixed(1)} tok/s</small>}</button>;
+}
+
+function GenerationSpeed({ request, lastSpeed }: { request?: SpeedRequest; lastSpeed?: number }) {
+  const measuring = request?.firstOutputAt != null;
+  const rates = useGenerationRates(request);
   const rate = rates.at(-1);
 
   return <section className="usage-speed">
@@ -70,12 +91,12 @@ function GenerationSpeed({ request, lastSpeed }: { request?: SpeedRequest; lastS
 export default function Usage({ events, activeRunId, settings, onSave, onClose }: {
   events: RuntimeEvent[];
   activeRunId?: string;
-  settings: Settings;
-  onSave: (target: number) => Promise<void>;
+  settings: Pick<Settings, 'context_policy'>;
+  onSave?: (target: number) => Promise<void>;
   onClose: () => void;
 }) {
-  const [projection] = useState(() => new UsageProjection());
-  const usage = useMemo(() => projection.project(events, activeRunId), [projection, events, activeRunId]);
+  const usage = useUsage(events, activeRunId);
+  const targetId = useId();
   const saved = settings.context_policy.enabled ? settings.context_policy.target_tokens : 0;
   const [target, setTarget] = useState(saved);
   const [busy, setBusy] = useState(false);
@@ -91,6 +112,7 @@ export default function Usage({ events, activeRunId, settings, onSave, onClose }
   const hasContext = usage.context?.status === 'available';
 
   async function save() {
+    if (!onSave) return;
     setBusy(true);
     setError('');
     try {
@@ -148,10 +170,10 @@ export default function Usage({ events, activeRunId, settings, onSave, onClose }
       </>}
     </section>
 
-    <section className="usage-section">
+    {onSave && <section className="usage-section">
       <div className="usage-heading usage-limit">
-        <div><label htmlFor="usage-target">目标上限</label><small id="usage-target-note">下次开始任务时生效</small></div>
-        <select id="usage-target" aria-describedby="usage-target-note" value={target} disabled={busy}
+        <div><label htmlFor={targetId}>目标上限</label><small id={targetId+'-note'}>下次开始任务时生效</small></div>
+        <select id={targetId} aria-describedby={targetId+'-note'} value={target} disabled={busy}
           onChange={event => { setTarget(Number(event.target.value)); setError(''); }}>
           <option value={0}>未启用</option><option value={300000}>300K</option><option value={1000000}>1M</option>
         </select>
@@ -161,7 +183,7 @@ export default function Usage({ events, activeRunId, settings, onSave, onClose }
         <button className="primary" disabled={busy} onClick={save}>{busy ? '正在保存…' : '保存'}</button>
       </div>}
       {error && <p className="error-text" role="alert">{error}</p>}
-    </section>
+    </section>}
 
     <details className="usage-section usage-details">
       <summary><ChevronRight size={14} aria-hidden="true"/>统计口径与详情</summary>

@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const {atomicWrite} = require('./platform.cjs');
 
 const validId = /^[a-z][a-z0-9.-]{1,80}$/;
-const kinds = new Set(['workbench','page','panel','editor','command','menu']);
+const kinds = new Set(['workbench','page','panel','editor','command','menu','toolbar']);
 const capabilities = new Set(['document.read','document.edit','conversations.read','conversations.write','runs.control',
   'drafts.read','drafts.write','files.read','files.write','management.read','management.write','navigation','theme','dialogs','desktop']);
 const mime = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8',
@@ -15,9 +15,11 @@ class PluginHost {
   constructor(dataDir, bundled) {
     this.root = path.join(dataDir,'plugins'); this.bundled = bundled;
     this.previews = new Map(); this.packages = new Map(); this.serial = Promise.resolve();
+    this.previewPackages = new Map();
   }
-  async inspect(directory) {
+  async inspect(directory, {cache=true, stayInDirectory=false} = {}) {
     const real = await fs.realpath(directory), files = new Map(); let total = 0;
+    if (stayInDirectory && path.relative(directory,real)) throw new Error('候选界面必须位于设计任务的 interface 目录。');
     const walk = async relative => {
       for (const entry of (await fs.readdir(path.join(real,relative),{withFileTypes:true})).sort((a,b)=>a.name.localeCompare(b.name))) {
         const name = relative ? `${relative}/${entry.name}` : entry.name;
@@ -32,7 +34,15 @@ class PluginHost {
     await walk('');
     const manifest = JSON.parse(files.get('manifest.json')?.toString('utf8') || '{}');
     if (!validId.test(manifest.id) || ![1,2].includes(manifest.hostApi) || !/^\d+\.\d+\.\d+$/.test(manifest.version)) throw new Error('插件标识、版本或宿主接口版本无效。');
-    if (typeof manifest.name !== 'string' || !manifest.name || manifest.name.length > 80 || !files.has(manifest.entry) || !manifest.entry.endsWith('.html')) throw new Error('插件需要名称和包内 HTML 入口。');
+    const toolbarOnly = manifest.hostApi === 2 && Array.isArray(manifest.contributes) &&
+      manifest.contributes.length > 0 && manifest.contributes.every(item => item?.kind === 'toolbar');
+    if (typeof manifest.name !== 'string' || !manifest.name || manifest.name.length > 80 ||
+        (!toolbarOnly || manifest.entry !== undefined) && (!files.has(manifest.entry) || !manifest.entry.endsWith('.html'))) throw new Error('插件需要名称和包内 HTML 入口。');
+    const checks = manifest.previewChecks;
+    if (checks !== undefined && (!Array.isArray(checks) || checks.length > 5 || checks.some(check =>
+      !check || !['button','text'].every(key => typeof check[key] === 'string' && check[key].trim() && check[key].length <= 100)))) {
+      throw new Error('previewChecks 最多包含 5 项，每项需要按钮名 button 和预期可见文字 text。');
+    }
     const caps = manifest.capabilities || [];
     if (!Array.isArray(caps) || caps.some(cap=>!capabilities.has(cap))) throw new Error('插件请求了当前版本不支持的能力。');
     if (manifest.hostApi === 1) {
@@ -41,18 +51,33 @@ class PluginHost {
     } else {
       if (!Number.isInteger(manifest.stateVersion) || manifest.stateVersion < 1 || !Array.isArray(manifest.contributes) || !manifest.contributes.length) throw new Error('hostApi 2 需要状态版本和扩展点声明。');
       const ids = new Set();
+      let toolbar = false;
       for (const item of manifest.contributes) {
         if (!validId.test(item.id) || ids.has(item.id) || !kinds.has(item.kind) || typeof item.target !== 'string' || !/^[a-zA-Z0-9.*_-]{1,80}$/.test(item.target)) throw new Error('插件扩展点声明无效或重复。');
         if (item.entry && (!files.has(item.entry) || !item.entry.endsWith('.html'))) throw new Error('扩展点入口不存在。');
         if (['command','menu'].includes(item.kind) && (!item.command || !validId.test(item.command) || typeof item.title !== 'string')) throw new Error('命令与菜单需要稳定标识和显示名称。');
         if (item.kind === 'panel' && item.mode && !['replace','append'].includes(item.mode)) throw new Error('面板选择方式无效。');
+        if (item.kind === 'toolbar') {
+          if (toolbar || !toolbarOnly || item.target !== 'chat' || item.action !== 'usage' || item.entry !== undefined ||
+              item.showRate !== undefined && typeof item.showRate !== 'boolean') throw new Error('顶部工具栏插件只支持一个 chat 用量统计按钮及可选的 showRate。');
+          toolbar = true;
+        }
         ids.add(item.id);
       }
     }
     const digest = crypto.createHash('sha256');
     for (const [name,bytes] of [...files].sort(([a],[b])=>a.localeCompare(b))) digest.update(name+'\0'+bytes.length+'\0').update(bytes);
     const plugin = {manifest,files,hash:digest.digest('hex'),source:real};
-    this.packages.set(plugin.hash,plugin); return plugin;
+    if (cache) this.packages.set(plugin.hash,plugin);
+    return plugin;
+  }
+  retainPreview(snapshot) {
+    const entry = this.previewPackages.get(snapshot.hash) || {snapshot, references:0};
+    entry.references++;
+    this.previewPackages.set(snapshot.hash,entry);
+    return () => {
+      if (--entry.references === 0) this.previewPackages.delete(snapshot.hash);
+    };
   }
   async bundledPlugins() {
     const list = [await this.inspect(this.bundled)], workbench = path.join(path.dirname(this.bundled),'workbench');
@@ -64,7 +89,10 @@ class PluginHost {
     catch (error) { if (error.code === 'ENOENT') return {schemaVersion:2,versions:{},selected:{}}; throw error; }
   }
   async writeState(state) { await fs.mkdir(this.root,{recursive:true}); await atomicWrite(path.join(this.root,'state.json'),JSON.stringify(state,null,2)); }
-  describe(plugin,extra={}) { return {...plugin.manifest,hash:plugin.hash,html:this.document(plugin.files.get(plugin.manifest.entry).toString('utf8')),...extra}; }
+  describe(plugin,extra={}) {
+    const entry = plugin.files.get(plugin.manifest.entry);
+    return {...plugin.manifest,hash:plugin.hash,html:entry && this.document(entry.toString('utf8')),...extra};
+  }
   async list() {
     const state = await this.state(), list = (await this.bundledPlugins()).map(plugin=>({...plugin.manifest,hash:plugin.hash,builtin:true,enabled:true}));
     for (const [id,item] of Object.entries(state.versions)) {
@@ -100,9 +128,22 @@ class PluginHost {
       commands.set(item.command,plugin.name);
     }
   }
+  checkPlacement(plugin, inventory) {
+    if (plugin.contributes.some(extension => extension.kind === 'toolbar') &&
+        inventory.selected['workbench:main']?.some(ref =>
+          !inventory.plugins.some(item => item.builtin && item.contributes.some(extension => [item.id,extension.id].join('/') === ref)))) {
+      throw new Error('当前完整工作台插件使用自己的布局。请在该工作台插件中直接修改工具栏。');
+    }
+  }
   async preview(directory) {
+    return this.previewSnapshot((await this.inspect(directory)).hash);
+  }
+  previewSnapshot(hash) {
     if (this.previews.size>=8) throw new Error('请先关闭已有预览，再添加插件。');
-    const plugin=await this.inspect(directory),token=crypto.randomUUID(); this.previews.set(token,plugin); return this.describe(plugin,{token});
+    const plugin=this.packages.get(hash) || this.previewPackages.get(hash)?.snapshot;
+    if (!plugin) throw new Error('预览版本已失效，请重新试跑。');
+    this.packages.set(hash,plugin);
+    const token=crypto.randomUUID(); this.previews.set(token,plugin); return this.describe(plugin,{token});
   }
   async stage(token) {
     const plugin=this.previews.get(token); if (!plugin) throw new Error('预览已失效，请重新选择插件。');
@@ -114,7 +155,9 @@ class PluginHost {
     const operation=this.serial.catch(()=>undefined).then(async()=>{
       const plugin=this.previews.get(token); if (!plugin) throw new Error('预览已失效，请重新选择插件。');
       await this.stage(token);
-      const state=await this.state(),id=plugin.manifest.id,old=state.versions[id]?.active,defaults=(await this.inventory()).selected;
+      const state=await this.state(),id=plugin.manifest.id,old=state.versions[id]?.active,inventory=await this.inventory();
+      const defaults=inventory.selected;
+      this.checkPlacement(plugin.manifest, inventory);
       this.checkCommands([...(await this.list()).filter(item=>item.id!==id),{...plugin.manifest,enabled:true}]);
       state.versions[id]={active:plugin.hash,previous:old!==plugin.hash ? old||null : state.versions[id]?.previous||null,enabled:true};
       for (const item of plugin.manifest.contributes) {
@@ -158,7 +201,8 @@ class PluginHost {
     return {path:target};
   }
   asset(hash,name) {
-    const plugin=this.packages.get(hash),bytes=plugin?.files.get(name); if (!bytes) return null;
+    const plugin=this.packages.get(hash) || this.previewPackages.get(hash)?.snapshot;
+    const bytes=plugin?.files.get(name); if (!bytes) return null;
     return {body:name.endsWith('.html') ? this.document(bytes.toString('utf8')) : bytes,type:mime[path.extname(name).toLowerCase()]};
   }
   document(html) { return `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">`+html; }

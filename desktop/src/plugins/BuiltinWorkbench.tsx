@@ -3,7 +3,7 @@ import { ArrowUp, Square, Plus, Search, ChartColumn, History, Settings as Settin
 import type { Attachment, Conversation, FileSession, HostEvent, Message, Plugin, RuntimeEvent, Settings } from '../types';
 import { displayMessages, messageGroups, isActive, mergeEvents, messageText, runErrorSummary, isUserStopped, unwrapEvents, turnTimings, replyParts } from '../runtime';
 import PluginSlot from './PluginSlot';
-import Usage from '../Usage';
+import Usage, {UsageToolbarButton} from '../Usage';
 import { Drafts, type Draft } from '../drafts';
 import DraftRecovery from '../DraftRecovery';
 import Sidebar from '../Sidebar';
@@ -34,22 +34,24 @@ export default function BuiltinWorkbench() {
   const sidebarTools = useCallback((target: HTMLDivElement | null) => {host.set('navigation:sidebarTools', target);}, [host]);
   const [chatToolsOpen, setChatToolsOpen] = useState(false);
   const chatToolsTrigger = useRef<HTMLButtonElement>(null);
+  const usageTrigger = useRef<HTMLButtonElement>(null);
   const chatPanels = useRef<HTMLDivElement>(null);
-  const closeChatPanels = useCallback((focus = false) => {
+  const closeChatPanels = useCallback((focus = false, fromUsage = false) => {
     setShowUsage(false);
     setHeaderPanel('');
-    if (focus) chatToolsTrigger.current?.focus({preventScroll: true});
+    if (focus) (fromUsage && usageTrigger.current || chatToolsTrigger.current)?.focus({preventScroll: true});
   }, [setShowUsage, setHeaderPanel]);
   useEffect(() => {closeChatPanels(); setMessageQuery('');}, [route, current?.id, closeChatPanels, setMessageQuery]);
   useEffect(() => {
     if (!showUsage && !headerPanel) return;
     const outside = (event: PointerEvent) => {
-      if (!chatPanels.current?.contains(event.target as Node) && !chatToolsTrigger.current?.contains(event.target as Node)) closeChatPanels();
+      const target = event.target as Node;
+      if (!chatPanels.current?.contains(target) && !chatToolsTrigger.current?.contains(target) && !usageTrigger.current?.contains(target)) closeChatPanels();
     };
     const escape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector('dialog[open]')) {
         event.preventDefault();
-        closeChatPanels(true);
+        closeChatPanels(true,showUsage);
       }
     };
     document.addEventListener('pointerdown', outside);
@@ -60,6 +62,8 @@ export default function BuiltinWorkbench() {
     };
   }, [showUsage, headerPanel, closeChatPanels]);
   useSyncExternalStore(registry.subscribe,registry.snapshot);
+  const usageToolbar = registry.resolve('toolbar','chat')[0]?.extension;
+  const activeRunId = current?.run?.status === 'running' ? current.run.id : undefined;
   const timings = useMemo(() => turnTimings(events), [events]);
   const groups = useMemo(() => messageGroups(messages, questions), [messages, questions]);
   const runLabel = current?.run?.status === 'stopping' ? '正在停止，保留已完成内容…' : interaction ? '等待你的回答' : '正在处理';
@@ -100,19 +104,21 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
       {route === 'chat' ? rename ? <input autoFocus value={title} onChange={e => setTitle(e.target.value)} onBlur={() => setRename(false)} onKeyDown={async e => { if (e.key === 'Escape') setRename(false); if (e.key === 'Enter' && current) { await call('conversation.rename', { conversation_id: current.id, title }); setCurrent({ ...current, title }); await refreshList(); setRename(false); } }}/> : <button className="title-button" title="点击修改标题" onClick={() => { if (current) { setTitle(current.title); setRename(true); } }}>{current?.has_messages || current?.messages?.length ? current.title : ''}</button> : <h1 className="sr-only">{managementNames[route] || '插件与工作台'}</h1>}
       </div><div className="header-actions">{themeCandidate && !creationOpen && <button className="toolbar-button" title="查看 AI 主题候选" onClick={async () => {try {const value = await call('themes.preview'); setThemeCandidate(value.preview); if (value.preview) setThemePreview(value);} catch (failure) {error((failure as Error).message);}}}><Sparkles size={16}/>主题预览</button>}{route === 'chat' && <>
       {!workspaceOpen && <button className="toolbar-button" onClick={async () => {try {await ensureConversation(); setWorkspaceOpen(true); void refreshFiles();} catch (failure) {error((failure as Error).message);}}}><Folder size={16}/>工作区</button>}
+      {usageToolbar && settings && messages.length > 0 && <UsageToolbarButton key={current?.id} events={events} activeRunId={activeRunId}
+        showRate={usageToolbar.showRate} open={showUsage} buttonRef={usageTrigger} onClick={() => {setShowUsage(!showUsage);setHeaderPanel('');}}/>}
       {messages.length > 0 && <MoreActions key={current?.id} label="更多聊天工具" triggerRef={chatToolsTrigger} onOpenChange={setChatToolsOpen} actions={[
         ['查找当前聊天', Search, async () => {setHeaderPanel('search'); setShowUsage(false);}],
         ['历史提问', History, async () => {setHeaderPanel('history'); setShowUsage(false);}],
-        ['用量统计', ChartColumn, async () => {setShowUsage(true); setHeaderPanel('');}],
+        ...(!usageToolbar ? [['用量统计', ChartColumn, async () => {setShowUsage(true); setHeaderPanel('');}]] as MenuAction[] : []),
       ]} error={error}/>}
       </>}
       </div></header>
       {route === 'chat' && settings && <div className="header-popovers" ref={chatPanels}>{showUsage && <Usage
         key={current?.id}
         events={events}
-        activeRunId={current?.run?.status === 'running' ? current.run.id : undefined}
+        activeRunId={activeRunId}
         settings={settings}
-        onClose={() => closeChatPanels(true)}
+        onClose={() => closeChatPanels(true,true)}
         onSave={async target => setSettings(await call('settings.context', {target_tokens: target}))}
       />} {headerPanel && <section className="history-popover"><div className="navigator-heading"><strong>{headerPanel === 'search' ? '查找当前聊天' : '历史提问'}</strong><button className="icon-button" title="关闭" onClick={() => closeChatPanels(true)}><X size={15}/></button></div>{headerPanel === 'search' && <input autoFocus aria-label="查找当前聊天" placeholder="输入关键词" value={messageQuery} onChange={event => setMessageQuery(event.target.value)}/>}<div>{messages.filter(message => headerPanel === 'history' ? message.role === 'user' : messageQuery.trim() && messageText(message.content).toLowerCase().includes(messageQuery.toLowerCase())).map(message => <button key={message.id} onClick={() => {document.getElementById('message-' + message.id)?.scrollIntoView({block: 'center'}); closeChatPanels(true);}}>{messageText(message.content).slice(0,160)}</button>)}</div>{current?.has_more && <button className="secondary" disabled={olderLoading} onClick={() => void loadOlder()}>载入更早的对话</button>}</section>}</div>}
       {serviceError && <div className="service-error"><strong>本地服务异常</strong><span>{serviceError}</span><button onClick={() => void call('app.reconnect').catch(failure => setServiceError(failure.message))}>重新连接</button><button onClick={() => void call('app.logs')}>查看诊断日志</button></div>}
@@ -172,7 +178,7 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
 }
 
 type MenuAction = [string, React.ElementType, () => Promise<unknown>];
-function MoreActions({label, actions, error, triggerRef, onOpenChange}: {
+export function MoreActions({label, actions, error, triggerRef, onOpenChange}: {
   label: string; actions: MenuAction[]; error: (message: string) => void;
   triggerRef?: RefObject<HTMLButtonElement | null>; onOpenChange?: (open: boolean) => void;
 }) {

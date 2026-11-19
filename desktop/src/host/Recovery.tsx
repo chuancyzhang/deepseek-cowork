@@ -6,6 +6,7 @@ import ThemePreview from '../ThemePreview';
 import {useHostField} from './context';
 import {useWorkbench} from './Host';
 import PluginFrame from '../plugins/PluginFrame';
+import {CandidateView} from '../plugins/creation/WorkbenchPreview';
 import {CandidateProbes,CommandServices} from '../plugins/PluginSlot';
 import type {Plugin} from '../types';
 import PluginMenu from '../plugins/PluginMenu';
@@ -18,7 +19,7 @@ export default function HostRecovery(){
   async function closePreview(){if(registry.switching)return;const token=pluginPreview?.token;setPluginPreview(null);setIndex(0);if(token)await call('plugins.discard',{token});}
   return <>
     <CandidateProbes/><CommandServices/><PluginMenu/>
-    {!c.creationOpen && registry.resolve('workbench','main').some(item=>!item.plugin.builtin) && registry.inventory.modes?.some(item=>item.mode==='creation'&&item.enabled) && <button className="host-creation-toggle" onClick={()=>void c.enterCreation().catch(reason=>error(reason.message))}>创造模式</button>}
+    {!c.loading && !c.creationOpen && registry.resolve('workbench','main').some(item=>!item.plugin.builtin) && registry.inventory.modes?.some(item=>item.mode==='creation'&&item.enabled) && <button className="host-creation-toggle" onClick={()=>void c.enterCreation().catch(reason=>error(reason.message))}>创造模式</button>}
     <button className="host-recovery-toggle" aria-label="界面恢复与诊断" title="界面恢复与诊断" onClick={()=>setOpen(true)}><RefreshCw size={14}/></button>
     {pending&&<div className="query-pending" role="status">正在同步历史记录…</div>}
     {notice&&<div className="notice host-notice" role="status"><span>{notice}</span><button className="icon-button" aria-label="关闭提示" onClick={()=>setNotice('')}><X size={15}/></button></div>}
@@ -29,7 +30,9 @@ export default function HostRecovery(){
     {open&&<Dialog title="界面恢复与诊断" onClose={()=>setOpen(false)}><p>恢复内置界面只替换界面代码。聊天、后台任务和未保存内容会保留。</p>{c.creationOpen&&c.current?.meta.creation_session&&<button className="secondary" onClick={()=>void c.exitCreation().then(()=>setOpen(false)).catch(reason=>error(reason.message))}>退出创造模式</button>}<div className="button-row"><button className="secondary" onClick={()=>void call('app.logs')}>查看诊断日志</button><button className="primary" disabled={registry.switching} onClick={()=>void registry.recover(saves).then(()=>{setFailure('');setOpen(false);}).catch(reason=>error(reason.message))}>恢复内置界面</button></div>{registry.inventory.plugins.filter(plugin=>!plugin.builtin&&plugin.enabled).map(plugin=><div className="recovery-plugin" key={plugin.id}><span>{plugin.name}</span><button className="secondary" onClick={()=>void registry.disable(plugin.id,saves).catch(reason=>error(reason.message))}>停用</button></div>)}</Dialog>}
     {pluginPreview&&!(c.creationOpen&&c.current?.meta.creation_session&&registry.inventory.modes?.some(item=>item.mode==='creation'&&item.enabled))&&<div className="modal-backdrop"><div className="modal preview-modal"><div className="section-heading"><div><h2>{pluginPreview.name}</h2><p>v{pluginPreview.version} · 独立预览使用示例内容</p></div><button className="icon-button" disabled={registry.switching} aria-label="取消预览" onClick={()=>void closePreview()}><X size={18}/></button></div>
       <label>预览区域 <select value={index} disabled={registry.switching} onChange={event=>setIndex(Number(event.target.value))}>{pluginPreview.contributes.map((extension,i)=><option key={extension.id} value={i}>{extension.title||extension.target} · {extension.kind}</option>)}</select></label>
-      <div className="preview-frame"><PluginFrame key={`${pluginPreview.hash}/${index}`} plugin={pluginPreview} extension={pluginPreview.contributes[index]||pluginPreview.contributes[0]} scope={{extensionId:pluginPreview.contributes[index]?.id||'preview'}} mode="preview"/></div>
+      <div className="preview-frame">{pluginPreview.contributes[0].kind === 'toolbar' ?
+        <CandidateView plugin={pluginPreview} extension={pluginPreview.contributes[0]} mode={c.theme}/> :
+        <PluginFrame key={`${pluginPreview.hash}/${index}`} plugin={pluginPreview} extension={pluginPreview.contributes[index]||pluginPreview.contributes[0]} scope={{extensionId:pluginPreview.contributes[index]?.id||'preview'}} mode="preview"/>}</div>
       <div className="button-row"><button className="secondary" disabled={registry.switching} onClick={()=>void closePreview()}>取消</button><button className="primary" disabled={registry.switching} onClick={()=>{const cid=c.selectedId.current;void registry.apply(pluginPreview,saves).then(()=>{host.set(host.sessionKey('pluginPreview',cid),null);setIndex(0);}).catch(reason=>error(reason.message));}}>{registry.switching?'正在加载候选界面…':'应用这个版本'}</button></div>
     </div></div>}
   </>;

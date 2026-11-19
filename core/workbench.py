@@ -174,6 +174,9 @@ class WorkbenchBridge:
         self._serial = threading.Lock()
 
     def call(self, action, arguments, context, timeout=30):
+        if action == "creation_preview":
+            # Isolated previews are coordinated per design session in Electron.
+            return self._guarded_call(action, arguments, context, timeout)
         # Serialize desktop actions, including asynchronous JavaScript callbacks.
         from .execution_authorization import current_authorization
         auth = current_authorization(context)

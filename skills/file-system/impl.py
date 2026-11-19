@@ -80,13 +80,15 @@ def text_file_read(workspace_dir, path, offset=1, limit=None, encoding=None, _co
 
 def apply_patch(workspace_dir, patch, _context=None):
     """Apply a structured plain-text patch inside the current workspace."""
-    return apply_text_patch(
+    from core.desktop_creation import preview_creation_patch
+    result = apply_text_patch(
         workspace_dir,
         patch,
         context=_context,
         confirm_delete=lambda paths: _confirm_patch_deletions(paths, _context),
         action="apply_patch",
     )
+    return preview_creation_patch(workspace_dir, result, _context)
 
 
 def workspace_rename_path(workspace_dir, old_path, new_path, _context=None):

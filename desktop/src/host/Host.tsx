@@ -9,7 +9,8 @@ import {receiveUpdate, type UpdateState} from './updates';
 
 type HostController=WorkbenchController & {registry:PluginRegistry;sdk:HostSDK};
 const ControllerContext=createContext<HostController|null>(null);
-export function useWorkbench(){const value=useContext(ControllerContext);if(!value)throw new Error('宿主尚未启动。');return value;}
+export function useOptionalWorkbench(){return useContext(ControllerContext);}
+export function useWorkbench(){const value=useOptionalWorkbench();if(!value)throw new Error('宿主尚未启动。');return value;}
 function Runtime({children}:{children:ReactNode}) {
   const controller=useWorkbenchController(),{host,saves}=controller;
   const registry=host.get('pluginRegistry',()=>new PluginRegistry());

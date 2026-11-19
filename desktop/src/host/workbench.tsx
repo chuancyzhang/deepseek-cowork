@@ -727,7 +727,7 @@ export function useWorkbenchController() {
     } catch (failure) { error((failure as Error).message); }
   }
   async function enterCreation(tab = 'design') {
-    if (host.get('creation:opening',false)) return;
+    if (host.get('creation:opening',false) || host.get('loading',true)) return;
     host.set('creation:opening',true);
     try {
       if (!await leaveManagement.current()) return;

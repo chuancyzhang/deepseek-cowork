@@ -17,13 +17,37 @@ Object.assign(writeMethods,{'projects.save':'conversations.write','projects.arch
 function text(value:unknown,name:string,max=10*1024*1024):string {if(typeof value!=='string'||value.length>max)throw new Error(`${name}无效。`);return value;}
 function draft(value:any){text(value?.text,'输入');if(!Array.isArray(value.attachments)||value.attachments.some((item:Attachment)=>typeof item.path!=='string'||typeof item.name!=='string'))throw new Error('附件格式无效。');return {text:value.text,attachments:value.attachments as Attachment[]};}
 
+export function previewSnapshot(theme: string) {
+  const title = '整理本周工作';
+  return {conversationId:'preview',route:'chat',theme,conversations:[{id:'preview',title,meta:{}}],
+    conversation:{id:'preview',title,meta:{},messages:[{id:'sample',role:'user',content:'整理本周工作，补充接下来的安排。'}]},
+    draft:{text:'',attachments:[]},editor:{text:'# 示例文稿\n\n继续完善。',saved:'# 示例文稿\n\n继续完善。',
+      file:{name:'预览文稿.md',payload:{untitled:false,start_edit:false}}},state:{},preview:true};
+}
+
+export function previewInvoke(plugin: Plugin, theme: string, method: string) {
+  const sample = previewSnapshot(theme);
+  if (method === 'snapshot') return sample;
+  if (!readMethods[method] || !plugin.capabilities.includes(readMethods[method])) {
+    throw new Error('预览只提供示例内容，不能访问或修改实际数据。');
+  }
+  switch (method) {
+    case 'conversations.list': return sample.conversations;
+    case 'conversations.get': return sample.conversation;
+    case 'drafts.get': return sample.draft;
+    case 'editors.get': return sample.editor;
+    case 'state.get': return sample.state;
+    default: throw new Error('预览中没有此操作的示例数据。');
+  }
+}
+
 export class HostSDK {
   controller!:WorkbenchController & {registry:PluginRegistry};
   readonly store:HostStore;
   constructor(store:HostStore){this.store=store;}
   snapshot(lease:Lease) {
     const c=this.controller,caps=lease.plugin.capabilities,id=lease.scope.conversationId??c.selectedId.current;
-    if(lease.mode==='preview')return {conversationId:'preview',route:'chat',theme:c.theme,conversations:[{id:'preview',title:'示例任务',meta:{}}],conversation:{id:'preview',title:'示例任务',meta:{},messages:[{id:'sample',role:'user',content:'整理资料，写下结论。'}]},draft:{text:'独立预览内容',attachments:[]},editor:{text:'# 示例文稿\n\n继续完善。',file:{name:'预览文稿.md'}},state:{},preview:true};
+    if(lease.mode==='preview')return previewSnapshot(c.theme);
     return {conversationId:id,route:c.route,theme:c.theme,
       ...(caps.includes('conversations.read')?{conversations:c.conversations,conversation:conversationAt(this.store,id),events:this.store.get(this.store.sessionKey('events',id),[])}:{}),
       ...(caps.includes('drafts.read')?{draft:c.drafts.get(id).value}:{}),
@@ -42,18 +66,10 @@ export class HostSDK {
   }
   async invoke(lease:Lease,method:string,params:any={}) {
     this.assert(lease);
+    if(lease.mode==='preview')return previewInvoke(lease.plugin,this.controller.theme,method);
     if(method==='snapshot')return this.snapshot(lease);
     const capability=readMethods[method]||writeMethods[method],mutation=method in writeMethods;
     if(!capability||!lease.plugin.capabilities.includes(capability))throw new Error('插件未声明此操作所需的能力：'+method);
-    if(lease.mode==='preview'){
-      const sample=this.snapshot(lease);
-      if(method==='conversations.list')return sample.conversations;
-      if(method==='conversations.get')return sample.conversation;
-      if(method==='drafts.get')return sample.draft;
-      if(method==='editors.get')return sample.editor;
-      if(method==='state.get')return {};
-      throw new Error('预览只提供示例内容，不能访问或修改实际数据。');
-    }
     this.assert(lease,mutation);
     const operation=this.dispatch(lease,method,params);
     const value=await (mutation?this.controller.registry.track(operation):operation);

@@ -8,16 +8,18 @@ import {fileURLToPath} from 'node:url';
 import {build} from 'vite';
 const require=createRequire(import.meta.url),directory=path.dirname(fileURLToPath(import.meta.url));
 
-test('creation mode uses real IPC, preserves drafts, stages plugins and restores the built-in shell',{timeout:120000},async()=>{
+test('creation mode uses real IPC, preserves drafts, stages plugins and restores the built-in shell',{timeout:120000},async t=>{
   const root=path.resolve(directory,'../../.tmp/creation-implementation');await mkdir(root,{recursive:true});
   const data=await mkdtemp(path.join(root,'ui-'));
   try {
     await build({root:path.resolve(directory,'..'),logLevel:'silent'});
-    const env={...process.env,COWORK_APP_DATA_DIR:data,APPDATA:path.join(data,'roaming'),LOCALAPPDATA:path.join(data,'local'),TEMP:data,TMP:data};
+    const env={...process.env,COWORK_APP_DATA_DIR:data,APPDATA:path.join(data,'roaming'),LOCALAPPDATA:path.join(data,'local'),
+      TEMP:data,TMP:data,NO_PROXY:'127.0.0.1,localhost,::1'};
     delete env.ELECTRON_RUN_AS_NODE;
     const child=spawn(require('electron'),[path.join(directory,'creation-mode.fixture.cjs')],{env,windowsHide:true,stdio:['ignore','pipe','pipe']});
     let output='';child.stdout.on('data',value=>output+=value);child.stderr.on('data',value=>output+=value);
     const code=await new Promise((resolve,reject)=>{child.on('exit',resolve);child.on('error',reject);});
     assert.equal(code,0,output);assert.match(output,/CREATION_MODE_OK/);
+    if (env.COWORK_CREATION_SCREENSHOTS) t.diagnostic(output.match(/CREATION_MODE_OK[^\r\n]*/)?.[0] || 'CREATION_MODE_OK');
   } finally {await rm(data,{recursive:true,force:true,maxRetries:3});}
 });

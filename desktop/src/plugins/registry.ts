@@ -39,19 +39,21 @@ export class PluginRegistry {
     try {
       await Promise.all([...this.pending]);await saves.preserve('plugin');
       const staged=await call<Plugin>('plugins.stage',{token:plugin.token});
-      this.candidate={plugin:staged,ready:new Set(),expected:new Set(),failure:''};this.changed();
-      // Slots and offscreen probes register before readiness is evaluated.
-      await new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())));
-      await new Promise<void>((resolve,reject)=>{
-        const check=()=>{
-          const candidate=this.candidate;
-          if(candidate?.failure){finish(new Error(candidate.failure));return;}
-          if(candidate?.expected.size && [...candidate.expected].every(key=>candidate.ready.has(key)))finish();
-        };
-        const finish=(error?:Error)=>{clearTimeout(timer);unsubscribe();error?reject(error):resolve();};
-        const timer=setTimeout(()=>finish(new Error('候选界面未能就绪，当前界面和编辑内容已保留。')),15000);
-        const unsubscribe=this.subscribe(check);check();
-      });
+      if (staged.contributes.some(extension=>extension.kind!=='toolbar')) {
+        this.candidate={plugin:staged,ready:new Set(),expected:new Set(),failure:''};this.changed();
+        // Slots and offscreen probes register before readiness is evaluated.
+        await new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())));
+        await new Promise<void>((resolve,reject)=>{
+          const check=()=>{
+            const candidate=this.candidate;
+            if(candidate?.failure){finish(new Error(candidate.failure));return;}
+            if(candidate?.expected.size && [...candidate.expected].every(key=>candidate.ready.has(key)))finish();
+          };
+          const finish=(error?:Error)=>{clearTimeout(timer);unsubscribe();error?reject(error):resolve();};
+          const timer=setTimeout(()=>finish(new Error('候选界面未能就绪，当前界面和编辑内容已保留。')),15000);
+          const unsubscribe=this.subscribe(check);check();
+        });
+      }
       await saves.preserve('plugin');
       await call('plugins.install',{token:plugin.token});
       await this.refresh();

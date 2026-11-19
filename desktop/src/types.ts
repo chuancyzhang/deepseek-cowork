@@ -20,8 +20,8 @@ export type SidebarLayout = {
 export type SidebarSnapshot = { value: SidebarLayout; revision: number };
 export type SidebarMethod = 'sidebar.create_group' | 'sidebar.move' | 'sidebar.pin_project';
 export type FileSession = { id: string; path: string; name: string; fingerprint: string; payload: any; conflict?: boolean; unavailable?: boolean };
-export type Extension = {id:string; kind:'workbench'|'page'|'panel'|'editor'|'command'|'menu'; target:string; entry?:string; mode?:'replace'|'append'; command?:string; title?:string};
-export type Plugin = { id: string; name: string; version: string; description: string; capabilities: string[]; hash: string; builtin?: boolean; previous?: boolean; html?: string; url?: string; token?: string; hostApi:1|2; stateVersion?:number; entry:string; contributes:Extension[]; enabled?:boolean };
+export type Extension = {id:string; kind:'workbench'|'page'|'panel'|'editor'|'command'|'menu'|'toolbar'; target:string; entry?:string; mode?:'replace'|'append'; command?:string; title?:string; action?:'usage'; showRate?:boolean};
+export type Plugin = { id: string; name: string; version: string; description: string; capabilities: string[]; hash: string; builtin?: boolean; previous?: boolean; html?: string; url?: string; token?: string; hostApi:1|2; stateVersion?:number; entry?:string; contributes:Extension[]; enabled?:boolean };
 export type HostEvent = { event: string; data?: any; conversation_id?: string; run_id?: string; run?:Run; error?: string };
 declare global {
   interface Window { cowork: { pathForFile: (file: File) => string; call: <T = any>(method: string, params?: any) => Promise<T>; onEvents: (callback: (events: HostEvent[]) => void) => () => void } }

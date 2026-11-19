@@ -23,7 +23,7 @@ export default function PluginSlot({kind,target,scope,children}:{kind:Extension[
 export function CandidateProbes(){
   const {registry}=useWorkbench();useSyncExternalStore(registry.subscribe,registry.snapshot);
   const plugin=registry.candidate?.plugin;
-  return plugin?<>{plugin.contributes.map(extension=><PluginFrame key={`${plugin.hash}/${extension.id}`} plugin={plugin} extension={extension} scope={{extensionId:extension.id}} mode="warm" hidden readyKey={`probe:${extension.id}`}/>)}</>:null;
+  return plugin?<>{plugin.contributes.filter(extension=>extension.kind!=='toolbar').map(extension=><PluginFrame key={`${plugin.hash}/${extension.id}`} plugin={plugin} extension={extension} scope={{extensionId:extension.id}} mode="warm" hidden readyKey={`probe:${extension.id}`}/>)}</>:null;
 }
 export function CommandServices(){
   const {registry}=useWorkbench();useSyncExternalStore(registry.subscribe,registry.snapshot);

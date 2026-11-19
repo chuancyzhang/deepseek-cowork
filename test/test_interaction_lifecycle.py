@@ -84,6 +84,8 @@ class InteractionLifecycleTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(results[0]["answers"]["q"]["text"], "my answer")
         self.assertEqual([event["status"] for event in ended], ["completed"])
+        self.assertEqual(ack["response"], results[0])
+        self.assertEqual(ack["response"], ended[0]["response"])
 
     def test_manual_wait_remains_cancellable_by_owner(self):
         service, ended = self.service()

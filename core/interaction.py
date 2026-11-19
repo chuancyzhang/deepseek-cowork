@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -499,10 +500,10 @@ class InteractionService:
                 else:
                     payload, valid, _ = parse_interaction_reply(request, raw_value)
                 if valid:
+                    acknowledgement = {"status": "ok", "resolved": True, "response": deepcopy(payload)}
                     entry["response"] = payload
                     entry["answered"] = True
                     entry["event"].set()
-                    acknowledgement = {"status": "ok", "resolved": True}
                 else:
                     acknowledgement = {"status": "ok", "resolved": False, "reason": "invalid"}
         logger.info("interaction.submit session=%s run=%s request=%s resolved=%s reason=%s",

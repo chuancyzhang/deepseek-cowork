@@ -166,7 +166,7 @@ export function GenerationTaskStatus({task, statusLabel = '正在处理', durati
 }
 
 export function AssistantTurn({messages, cid, active, onAction, onFile, timing, activeRun, interactionRun = activeRun, showDuration = true, stopped = false, statusLabel = '正在处理', questions = [], onInteractionDone = () => {}, reviewTask}: {
-  messages: Message[]; cid: string; active: boolean; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; timing?: TurnTiming; activeRun?: string; interactionRun?: string; showDuration?: boolean; stopped?: boolean; statusLabel?: string; questions?: QuestionRecord[]; onInteractionDone?: () => void; reviewTask?: ReviewSummary;
+  messages: Message[]; cid: string; active: boolean; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; timing?: TurnTiming; activeRun?: string; interactionRun?: string; showDuration?: boolean; stopped?: boolean; statusLabel?: string; questions?: QuestionRecord[]; onInteractionDone?: (requestId: string) => void; reviewTask?: ReviewSummary;
 }) {
   const {answer, results, hasProcess: messageProcess} = replyParts(messages);
   const hasProcess = messageProcess || questions.length > 0;

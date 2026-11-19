@@ -109,8 +109,6 @@ class TestLongContextAgent(unittest.TestCase):
                 events.append(value)
                 if value.get("type") == "context_storage_request":
                     coordinator.context_storage("s", value)
-                if value.get("phase") == "failed":
-                    worker.is_stopped = True  # A failed test must never wait for manual input.
             try:
                 with patch("core.agent.SkillManager", return_value=skills), \
                      patch("core.agent.LLMFactory.create_provider", return_value=provider), \

@@ -26,6 +26,7 @@ from core.tool_tasks import ToolTaskManager, ToolEventSignal, WAIT_TOOL_DEFINITI
 from core.message_persistence import filter_persistable_messages, project_provider_messages
 from core.runtime_journal import RuntimeJournal
 from core.context_usage import estimate_context_usage
+from core.long_context import CheckpointError, ContextCancelled, ContextWindowBlocked, is_context_overflow_error
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, get_agent_manager_registry
 from core.clarify_mode import (
     GRILL_CHECKPOINT_PURPOSE,
@@ -2176,7 +2177,7 @@ class LLMWorker(TaskWorker):
             "timestamp": time.time(),
         }
 
-    def _emit_prompt_observability(self, stable_prompt, runtime_prompt, request_messages):
+    def _emit_prompt_observability(self, stable_prompt, runtime_prompt, request_messages, *, capacity=None):
         # Observation only: do not add fields to messages or provider parameters.
         try:
             context_usage = estimate_context_usage(
@@ -2209,6 +2210,7 @@ class LLMWorker(TaskWorker):
             "content": stable_prompt,
             "runtime_context": runtime_prompt,
             "context_usage": context_usage,
+            **({"context_capacity": capacity} if capacity is not None else {}),
             "skill_contexts": skill_contexts,
             "prompt_cache_key": self.conversation_id or self.session_id,
             "timestamp": time.time(),
@@ -2245,16 +2247,16 @@ class LLMWorker(TaskWorker):
             kwargs["request_context"] = request_context or {}
         return provider.chat_stream(messages, **kwargs)
 
-    def _generate_context_checkpoint(self, provider, messages, rollover_id, part, repair):
+    def _generate_context_checkpoint(self, provider, messages, rollover_id, part, retries, output_limit):
         """A separate, tool-free request. Never becomes assistant dialogue or replay."""
-        from core.long_context import ContextError, ContextCancelled
         from core.task_details import redact_diagnostic
-        attempt_id = f"{self.request_id}:context:{rollover_id}:{part}:{repair}:{uuid.uuid4().hex}"
+        attempt_id = f"{self.request_id}:context:{rollover_id}:{part}:{retries.used}:{uuid.uuid4().hex}"
         started_at = time.time()
         self._record_provider_attempt(attempt_id, {"status": "running", "purpose": "context_checkpoint",
-                                                 "started_at": started_at, "run_id": self.request_id})
+            "started_at": started_at, "run_id": self.request_id, "max_output_tokens": output_limit})
         self.observability_signal.emit({"type": "context_checkpoint_request_start",
             "run_id": self.request_id, "request_id": attempt_id, "timestamp": time.time(),
+            "max_output_tokens": output_limit, "part": part, "retries_used": retries.used,
             "provider": getattr(provider, "provider_name", ""), "model": getattr(provider, "model_name", "")})
         stream = None
         content = []
@@ -2264,8 +2266,7 @@ class LLMWorker(TaskWorker):
                 request_context={"client_request_id": attempt_id, "run_id": self.request_id,
                     "abort_check": lambda: self.is_stopped, "register_stream": self._register_provider_stream,
                     "release_stream": self._release_provider_stream,
-                    "tools_disabled": True,
-                    **self.context_window_manager.budget.output_request_options(checkpoint=True)})
+                    "tools_disabled": True, "max_output_tokens": output_limit, "max_retries": retries.remaining})
             for chunk in stream:
                 if self.is_stopped:
                     raise ContextCancelled("已停止压缩上下文。")
@@ -2273,12 +2274,26 @@ class LLMWorker(TaskWorker):
                 if kind == "content":
                     content.append(str(chunk.get("content") or ""))
                 elif kind in {"tool_call", "server_tool_status", "output_image"}:
-                    raise ContextError("状态整理请求返回了工具操作，未接受这次检查点。")
+                    raise CheckpointError("状态整理请求返回了工具操作，未接受这次检查点。", "provider")
                 elif kind == "error":
-                    raise ContextError(str(chunk.get("content") or "状态整理请求失败。"))
+                    detail = str(chunk.get("content") or "状态整理请求失败。")
+                    reason = "provider"
+                    if any(marker in detail for marker in (
+                            "without a terminal event", "without a finish_reason", "without a message_stop")):
+                        detail = "上下文压缩缺少完整终止事件，未保存这次检查点。"
+                        reason = "incomplete"
+                    elif chunk.get("status_code") in {400, 422} and (
+                            is_context_overflow_error(detail) or any(name in detail.lower() for name in (
+                                "max_tokens", "max_output_tokens", "max_completion_tokens"))):
+                        reason = "output_budget"
+                    raise CheckpointError(redact_diagnostic(detail)[:2000], reason)
                 elif kind == "provider_retry":
+                    retries.take()
+                    content.clear()
+                    terminal = {}
                     self.observability_signal.emit({"type": "context_checkpoint_retry", "run_id": self.request_id,
-                        "request_id": attempt_id, "attempt": chunk.get("attempt"), "reason": chunk.get("reason", "")})
+                        "request_id": attempt_id, "attempt": retries.used,
+                        "reason": redact_diagnostic(str(chunk.get("reason") or ""))[:2000]})
                 elif kind == "provider_terminal":
                     terminal = {"terminal_status": str(chunk.get("status") or ""),
                                 "event_type": str(chunk.get("event_type") or kind),
@@ -2288,9 +2303,10 @@ class LLMWorker(TaskWorker):
                                 "error": redact_diagnostic(str(chunk.get("error") or ""))[:2000]}
                     if terminal["terminal_status"] != "completed":
                         if terminal["finish_reason"] in {"length", "max_output_tokens", "max_tokens"}:
-                            raise ContextError("上下文压缩输出达到上限，未保存这次检查点。请重试压缩。")
+                            raise CheckpointError("上下文压缩输出达到上限，未保存这次检查点。", "length")
                         detail = terminal["error"] or terminal["finish_reason"] or terminal["terminal_status"]
-                        raise ContextError(f"上下文压缩被服务拒绝或未完成：{detail}。请重试压缩。")
+                        reason = "output_budget" if is_context_overflow_error(detail) else "provider"
+                        raise CheckpointError(f"上下文压缩被服务拒绝或未完成（{detail}）。", reason)
                 elif kind == "usage":
                     usage = dict(chunk.get("usage") or {})
                     usage.update(request_id=attempt_id, turn_id=self.turn_id, run_id=self.request_id,
@@ -2304,7 +2320,7 @@ class LLMWorker(TaskWorker):
             if self.is_stopped:
                 raise ContextCancelled("已停止压缩上下文。")
             if terminal.get("terminal_status") != "completed":
-                raise ContextError("上下文压缩缺少完整终止事件，未保存这次检查点。请重试压缩。")
+                raise CheckpointError("上下文压缩缺少完整终止事件，未保存这次检查点。", "incomplete")
             finished_at = time.time()
             self._record_provider_attempt(attempt_id, {**terminal, "status": "completed",
                 "finished_at": finished_at, "duration": finished_at - started_at})
@@ -2320,9 +2336,6 @@ class LLMWorker(TaskWorker):
             self.observability_signal.emit({"type": "context_checkpoint_request_error",
                 "run_id": self.request_id, "request_id": attempt_id, **terminal,
                 "error": safe_error, "duration": finished_at - started_at})
-            if not terminal and any(marker in str(exc) for marker in (
-                    "without a terminal event", "without a finish_reason", "without a message_stop")):
-                raise ContextError("上下文压缩缺少完整终止事件，未保存这次检查点。请重试压缩。") from exc
             raise
         finally:
             close = getattr(stream, "close", None)
@@ -3306,7 +3319,9 @@ class LLMWorker(TaskWorker):
                                 self._build_request_messages(current_messages), generated_messages, self.tools, provider)
                             if guidance_switched:
                                 previous_provider_messages = []
-                        self._emit_prompt_observability(stable_system_prompt, runtime_context_prompt, request_messages)
+                        manager = self.context_window_manager
+                        self._emit_prompt_observability(stable_system_prompt, runtime_context_prompt, request_messages,
+                                                        capacity=manager.capacity_snapshot(manager.last_used))
                     provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__
                     attempt_id = f"{self.request_id or self.turn_id or self.session_id}:request:{turn_count}"
                     assistant_message_id = uuid.uuid5(
@@ -3851,6 +3866,10 @@ class LLMWorker(TaskWorker):
                         "duration": duration,
                     })
 
+                    provider_failure = {"error": str(provider_error_message), "error_type": provider_error_type}
+                    if is_context_overflow_error(provider_error_message):
+                        provider_failure["context_recovery"] = "new_chat"
+
                     if preserve_responses and not response_items_buffer:
                         if self.is_stopped:
                             final_content = chunk_content or "⚠️ Operation stopped by user."
@@ -3860,8 +3879,7 @@ class LLMWorker(TaskWorker):
                                 raise RuntimeError(str(provider_error_message))
                             self._append_pending_guidance(current_messages, generated_messages, close=True)
                             self.finished_signal.emit({
-                                "error": str(provider_error_message),
-                                "error_type": provider_error_type,
+                                **provider_failure,
                                 "generated_messages": generated_messages,
                                 "turn_id": self.turn_id,
                                 "request_id": self.request_id,
@@ -3903,8 +3921,7 @@ class LLMWorker(TaskWorker):
                             raise RuntimeError(str(provider_error_message))
                         self._append_pending_guidance(current_messages, generated_messages, close=True)
                         self.finished_signal.emit({
-                            "error": str(provider_error_message),
-                            "error_type": provider_error_type,
+                            **provider_failure,
                             "generated_messages": generated_messages,
                             "turn_id": self.turn_id,
                             "request_id": self.request_id,
@@ -4931,6 +4948,7 @@ class LLMWorker(TaskWorker):
                     self.finished_signal.emit({
                         "error": error_text,
                         "error_type": error_type,
+                        **({"context_recovery": e.recovery} if isinstance(e, ContextWindowBlocked) else {}),
                         "generated_messages": generated_messages,
                         "turn_id": self.turn_id,
                         "request_id": self.request_id,

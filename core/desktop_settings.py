@@ -236,7 +236,8 @@ class DesktopSettingsAPI:
             previous_model = next((model for model in existing.get("models", []) if model.get("id") == model_id), {})
             model = {**previous_model, "id": model_id, "model_name": p["model_name"], "display_name": p.get("display_name") or p["model_name"],
                      "api_protocol": p.get("api_protocol") or previous_model.get("api_protocol") or "chat_completions"}
-            for key in ("supports_vision", "supports_tools", "supports_reasoning", "reasoning_effort", "context_length", "max_tokens", "temperature"):
+            for key in ("supports_vision", "supports_tools", "supports_reasoning", "reasoning_effort",
+                        "context_length", "max_tokens", "temperature", "context_window_tokens", "max_output_tokens"):
                 if key in p:
                     model[key] = p[key]
             models = [model if item.get("id") == model_id else item for item in existing.get("models", [])]
@@ -262,11 +263,11 @@ class DesktopSettingsAPI:
             self.publish({"event": "appearance_changed"})
             return {"saved": True}
         if method == "settings.context":
-            from core.long_context import TARGETS
+            from core.long_context import DEFAULT_TARGET_TOKENS, TARGETS
             target = p.get("target_tokens")
             if target not in (0, *TARGETS) or type(target) is not int:
                 raise ValueError("请选择未启用、300K 或 1M。")
-            self.config.set_experimental_long_context({"enabled": bool(target), "target_tokens": target or TARGETS[0]})
+            self.config.set_experimental_long_context({"enabled": bool(target), "target_tokens": target or DEFAULT_TARGET_TOKENS})
             log.info("context_policy_saved target=%s next_run=true", target)
             return self.public_settings()
         if method == "settings.import":

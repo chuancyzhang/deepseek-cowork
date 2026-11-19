@@ -42,6 +42,7 @@ from .mcp_client import (
     normalize_mcp_transport,
 )
 from .im_gateway_config import normalize_im_gateway_config
+from .long_context import DEFAULT_DESKTOP_POLICY
 from .sidebar_projects import project_paths
 from .variable_store import VariableStore
 
@@ -301,7 +302,7 @@ class ConfigManager:
             "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
             "deepseek_v4_context_window_tokens": 1000000,
             "context_budget_ratio": 0.8,
-            "experimental_long_context": {"enabled": False, "target_tokens": 300000},
+            "experimental_long_context": dict(DEFAULT_DESKTOP_POLICY),
             "context_compression_recent_keep_turns": 40,
             "disabled_skills": [],
             "enabled_skills": [],

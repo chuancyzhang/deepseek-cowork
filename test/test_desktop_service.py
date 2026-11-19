@@ -26,6 +26,10 @@ class Provider(BaseHTTPRequestHandler):
     def do_POST(self):
         value = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.requests.append(value)
+        messages = value["messages"]
+        checkpoint = str(messages[0].get("content", "")).startswith("你负责为同一任务整理有界的交接状态")
+        history_seed = any(m["role"] == "user" and m.get("content") == "CONTEXT-LONG-HISTORY" for m in messages)
+        followup = any(m["role"] == "user" and m.get("content") == "CONTEXT-FOLLOW-UP" for m in messages)
         slow = any("SLOW" in str(m.get("content")) for m in value["messages"] if m["role"] == "user")
         guidance_check = any("GUIDANCE-CHECK" in str(m.get("content")) for m in value["messages"] if m["role"] == "user")
         self.send_response(200)
@@ -33,6 +37,15 @@ class Provider(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         try:
+            if checkpoint or history_seed and not followup:
+                text = '{"goal":' if checkpoint else "早期历史。" * 6500
+                reason = "length" if checkpoint else "stop"
+                for delta, finish in (({"content": text}, None), ({}, reason)):
+                    chunk = {"id": "fixture", "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+                    self.wfile.write(("data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n").encode())
+                self.wfile.write(b'data: [DONE]\n\n')
+                self.wfile.flush()
+                return
             trigger = next((m.get("content", "") for m in value["messages"] if m["role"] == "user" and
                             str(m.get("content", "")).startswith("AUTOMATION-TOOL:")), "")
             if trigger and not any(m["role"] == "tool" for m in value["messages"]):
@@ -692,6 +705,7 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.assertEqual(sum(m["id"] == params["message_id"] for m in value["messages"]), 1)
 
     def test_context_setting_is_saved_for_next_run(self):
+        self.assertEqual(self.client.call("settings.get")["context_policy"], {"enabled": True, "target_tokens": 1000000})
         cid = self.client.call("conversation.create")["id"]
         params = self.submit(cid, "SLOW")
         settings = self.client.call("settings.context", target_tokens=300000)
@@ -703,6 +717,32 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.client.call("conversation.stop", conversation_id=cid, run_id=params["request_id"])
         with self.assertRaises(RuntimeError):
             self.client.call("settings.context", target_tokens=999999)
+
+    def test_truncated_checkpoint_retries_then_ends_the_run_with_history_and_file(self):
+        selected = self.client.call("settings.get")
+        model = next(item for item in selected["models"] if item["id"] == self.model_id)
+        self.client.call("settings.save_model", channel_id=model["channel_id"], model_id=model["id"],
+                         model_name=model["model_name"], base_url=model["base_url"], context_window_tokens=37000)
+        self.client.call("settings.context", target_tokens=0)
+        cid = self.client.call("conversation.create")["id"]
+        self.submit(cid, "CONTEXT-LONG-HISTORY")
+        self.assertEqual(self.client.wait_run(cid)["run"]["status"], "completed")
+        self.submit(cid, "CONTEXT-FOLLOW-UP")
+        self.assertEqual(self.client.wait_run(cid)["run"]["status"], "completed")
+        artifact = self.client.call("workspace.create", conversation_id=cid, name="报告.md", text="已完成的报告")
+        self.client.call("settings.context", target_tokens=300000)
+        before = len(Provider.requests)
+        sent = self.submit(cid, "CONTEXT-RESUME")
+        failed = self.client.wait_run(cid)
+        self.assertEqual(failed["run"]["status"], "failed")
+        self.assertIn("输出达到上限", failed["run"]["error"])
+        self.assertEqual([request.get("max_tokens") for request in Provider.requests[before:]], [8192, 16384, 16384, 16384])
+        events = (event.get("payload", event) for event in failed["events"])
+        final = next(event for event in events if event.get("type") == "final" and event.get("run_id") == sent["request_id"])
+        self.assertEqual(final["result"]["context_recovery"], "new_chat")
+        self.assertEqual(sum(message["id"] == sent["message_id"] for message in failed["messages"]), 1)
+        self.assertTrue(any(message.get("content") == "早期历史。" * 6500 for message in failed["messages"]))
+        self.assertEqual(Path(artifact["path"]).read_text(encoding="utf-8"), "已完成的报告")
 
     def test_edit_recovery_conflict_and_workspace_boundary(self):
         cid = self.client.call("conversation.create")["id"]

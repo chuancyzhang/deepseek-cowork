@@ -11,7 +11,7 @@ from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker, ContextSaveReq
 from core.chat_storage import ChatStorage
 from core.context_storage import source_fingerprints
 from core.context_window import ContextWindowManager
-from core.long_context import (ContextBudget, ContextCancelled, ContextError, desktop_policy,
+from core.long_context import (CheckpointError, ContextBudget, ContextCancelled, ContextError, ContextWindowBlocked, desktop_policy,
                                estimate_request, format_capacity, normalize_policy, validate_checkpoint)
 from core.runtime_journal import RuntimeJournal
 
@@ -171,7 +171,7 @@ class TestContextSaveQueue(ContextFixture):
 
 
 class TestContextManager(ContextFixture):
-    def make_manager(self, profile=None):
+    def make_manager(self, profile=None, target=300000):
         self.events, self.summary_requests = [], []
         profile = profile if profile is not None else {"context_window_tokens": 32000, "max_output_tokens": 4096}
         self.queue = ChatSaveWorker(self.storage.db_path, debounce_ms=10000)
@@ -194,7 +194,7 @@ class TestContextManager(ContextFixture):
             self.queue.enqueue_context(ContextSaveRequest("s", "run", value["operation_id"],
                 value["operation"], value["payload"], value["expires_at"]))
         self.worker.observability_signal = SimpleNamespace(emit=event)
-        def summarize(provider, request, rollover_id, part, repair):
+        def summarize(provider, request, rollover_id, part, retries, output_limit):
             self.summary_requests.append(copy.deepcopy(request))
             previous = json.loads(request[1]["content"])["previous_checkpoint"]
             result = previous or checkpoint(["user-0"])
@@ -202,7 +202,7 @@ class TestContextManager(ContextFixture):
                 result["constraints"] = ["Produce JSON only; old format revoked"]
             return json.dumps(result, ensure_ascii=False)
         self.worker._generate_context_checkpoint = summarize
-        self.manager = ContextWindowManager(self.worker, normalize_policy({"enabled": True}))
+        self.manager = ContextWindowManager(self.worker, normalize_policy({"enabled": True, "target_tokens": target}))
         return self.manager
 
     def test_unconfigured_capacity_rolls_over_at_setting_target(self):
@@ -269,23 +269,32 @@ class TestContextManager(ContextFixture):
         self.assertEqual(again[:len(projected)], projected)
         self.assertEqual(messages[-1], result)
 
-    def test_invalid_checkpoint_repairs_once_without_commit(self):
+    def test_invalid_checkpoint_stops_after_three_repairs_without_commit(self):
         manager = self.make_manager()
-        self.worker._generate_context_checkpoint = lambda *args: "invalid"
+        requests = []
+        def summarize(_provider, request, _rollover, _part, retries, limit):
+            requests.append((len(request), retries.used, limit))
+            return "invalid"
+        self.worker._generate_context_checkpoint = summarize
         current = [{"role": "system", "content": "sys"}, *self.messages,
                    {"id": "a1", "role": "assistant", "content": "old " * 30000},
                    {"id": "a2", "role": "assistant", "content": "recent"}]
-        with self.assertRaises(ContextError):
-            manager._prepare_once(current, current[2:], [], None)
+        with self.assertRaises(ContextWindowBlocked) as failure:
+            manager.prepare(current, current[2:], [], None)
+        self.assertEqual(failure.exception.recovery, "new_chat")
+        self.assertEqual(requests, [(2, 0, 4096), (3, 1, 4096), (3, 2, 4096), (3, 3, 4096)])
+        saved = self.storage.get_messages("s")
+        self.assertEqual([message["id"] for message in saved], [message["id"] for message in current[1:]])
+        self.assertTrue(all(persisted["content"] == original["content"] for persisted, original in zip(saved, current[1:])))
         self.assertIsNone(self.storage.get_context_window("s"))
         self.assertEqual(self.journal.get_run("s", "run")["context_rollover"]["phase"], "failed")
 
-    def test_explicit_retry_keeps_same_run_and_stopping_wait_does_not_commit(self):
+    def test_stopping_before_a_retry_does_not_commit(self):
         manager = self.make_manager()
         original_event = self.worker.observability_signal.emit
         def stop_on_failure(event):
             original_event(event)
-            if event.get("phase") == "failed":
+            if event.get("phase") == "retrying":
                 self.worker.is_stopped = True
         self.worker.observability_signal.emit = stop_on_failure
         self.worker._generate_context_checkpoint = lambda *args: "invalid"
@@ -297,21 +306,59 @@ class TestContextManager(ContextFixture):
         self.assertIsNone(self.storage.get_context_window("s"))
         self.assertEqual(self.journal.get_run("s", "run")["context_rollover"]["phase"], "cancelled")
 
+    def test_length_increases_only_checkpoint_output_and_defers_if_current_window_fits(self):
+        manager = self.make_manager(profile={"context_window_tokens": 40000})
+        calls = []
+        def truncate(_provider, request, _rollover, _part, retries, limit):
+            calls.append((retries.used, limit, len(request)))
+            raise CheckpointError("output truncated", "length")
+        self.worker._generate_context_checkpoint = truncate
+        current = [{"role": "system", "content": "sys"}, *self.messages,
+                   {"id": "a1", "role": "assistant", "content": "old " * 22000},
+                   {"id": "a2", "role": "assistant", "content": "recent"}]
+        projected, switched = manager.prepare(current, current[2:], [], None)
+        self.assertFalse(switched)
+        self.assertEqual(projected, current)
+        self.assertEqual(calls, [(0, 8192, 2), (1, 16384, 2), (2, 16384, 3), (3, 16384, 3)])
+        self.assertEqual(self.journal.get_run("s", "run")["context_rollover"]["phase"], "deferred")
+        self.assertEqual(manager.prepare(current, current[2:], [], None), (current, False))
+        self.assertEqual(len(calls), 4)
+        self.assertIsNone(self.storage.get_context_window("s"))
+
+    def test_rejected_higher_output_limit_retries_with_shorter_checkpoint(self):
+        manager = self.make_manager(profile={"context_window_tokens": 60000})
+        calls = []
+        def summarize(_provider, request, _rollover, _part, retries, limit):
+            calls.append((retries.used, limit, len(request)))
+            if len(calls) == 1:
+                raise CheckpointError("truncated", "length")
+            if len(calls) == 2:
+                raise CheckpointError("max_tokens rejected", "output_budget")
+            return json.dumps(checkpoint(["user-0"]))
+        self.worker._generate_context_checkpoint = summarize
+        self.assertEqual(manager._summarize(self.messages, {"user-0"}, None)["refs"], ["user-0"])
+        self.assertEqual(calls, [(0, 8192, 2), (1, 16384, 2), (2, 8192, 3)])
+
+    def test_higher_target_is_offered_when_it_leaves_room_for_next_request(self):
+        manager = self.make_manager(profile={"context_window_tokens": 500000})
+        self.worker._generate_context_checkpoint = lambda *args: "invalid"
+        current = [{"role": "system", "content": "sys"}, *self.messages,
+                   {"id": "long", "role": "assistant", "content": "历史内容" * 67500},
+                   {"id": "recent", "role": "assistant", "content": "已保留成果。"}]
+        with self.assertRaises(ContextWindowBlocked) as failure:
+            manager.prepare(current, current[2:], [], None)
+        self.assertEqual(failure.exception.recovery, "increase_target")
+        self.assertIsNone(self.storage.get_context_window("s"))
+
     def test_lost_commit_receipt_reuses_durable_seed_without_resummarizing(self):
         manager = self.make_manager()
         original_operation = manager._storage_operation
-        original_event = self.worker.observability_signal.emit
         def operation(kind, payload, generated=None):
             result = original_operation(kind, payload, generated)
             if kind == "commit":
                 raise ContextError("receipt lost after SQLite commit")
             return result
-        def retry(event):
-            original_event(event)
-            if event.get("phase") == "failed":
-                self.journal.update_run("s", "run", {"context_retry": event["rollover_id"]})
         manager._storage_operation = operation
-        self.worker.observability_signal.emit = retry
         current = [{"role": "system", "content": "sys"}, *self.messages,
                    {"id": "a1", "role": "assistant", "content": "old " * 30000},
                    {"id": "a2", "role": "assistant", "content": "recent"}]
@@ -397,7 +444,7 @@ class TestContextBudget(unittest.TestCase):
                 budget = ContextBudget.from_profile({"context_window_tokens": capacity}, policy)
                 self.assertEqual(budget.output_tokens, 8192)
                 self.assertEqual(budget.output_request_options(), {})
-                self.assertEqual(budget.output_request_options(checkpoint=True), {"max_output_tokens": 8192})
+                self.assertEqual(budget.checkpoint_output_limit(100, 8192), 8192)
                 self.assertIsNone(budget.snapshot(100)["output_limit_tokens"])
 
     def test_explicit_limit_is_preserved_and_checkpoint_stays_bounded(self):
@@ -407,17 +454,24 @@ class TestContextBudget(unittest.TestCase):
                                                     normalize_policy({"enabled": True}))
                 self.assertEqual(budget.output_tokens, limit)
                 self.assertEqual(budget.output_request_options(), {"max_output_tokens": limit})
-                self.assertEqual(budget.output_request_options(checkpoint=True), {"max_output_tokens": min(limit, 8192)})
+                self.assertEqual(budget.checkpoint_output_limit(100, 16384), min(limit, 16384))
                 self.assertEqual(budget.snapshot(100)["output_limit_tokens"], limit)
+        self.assertEqual(budget.checkpoint_output_limit(120000, 16384), 1600)
 
     def test_default_policy_and_capacity_limits(self):
-        self.assertEqual(normalize_policy(None), {"enabled": False, "target_tokens": 300000})
-        self.assertEqual(normalize_policy({"enabled": True, "target_tokens": 1})["target_tokens"], 300000)
+        self.assertEqual(normalize_policy(None), {"enabled": False, "target_tokens": 1000000})
+        self.assertEqual(normalize_policy({"enabled": True, "target_tokens": 1})["target_tokens"], 1000000)
         policy = normalize_policy({"enabled": True, "target_tokens": 1000000})
+        self.assertEqual(desktop_policy({}), policy)
+        for saved in ({"enabled": True, "target_tokens": 300000}, {"enabled": False, "target_tokens": 300000}):
+            self.assertEqual(desktop_policy({"experimental_long_context": saved}), saved)
         self.assertFalse(desktop_policy({"experimental_long_context": policy}, excluded=True)["enabled"])
         budget = ContextBudget.from_profile({"context_window_tokens": 128000}, policy)
         self.assertEqual(budget.effective_tokens, 128000 - 8192 - 6400)
         self.assertLess(budget.trigger_tokens, budget.effective_tokens)
+        small = ContextBudget.from_profile({"context_window_tokens": 8192}, policy)
+        self.assertEqual(small.effective_tokens, 3072)
+        self.assertEqual(small.output_request_options(), {})
         stats = {}
         estimate_request([{"role": "user", "content_parts": [{"type": "image"}]}], [], image_stats=stats)
         self.assertEqual(stats["unestimated_images"], 1)
@@ -447,7 +501,7 @@ class TestContextBudget(unittest.TestCase):
     def test_capacity_unknown_snapshot_and_frozen_policy(self):
         self.assertEqual(format_capacity({}, policy={"enabled": True})["value"], "待统计")
         self.assertFalse(format_capacity({}, policy={})["visible"])
-        budget = ContextBudget.from_profile({"context_window_tokens": 128000}, normalize_policy({"enabled": True}))
+        budget = ContextBudget.from_profile({"context_window_tokens": 128000}, normalize_policy({"enabled": True, "target_tokens": 300000}))
         snap = {**budget.snapshot(30000), "run_id": "run"}
         overview = format_capacity(snap, policy={"enabled": True, "target_tokens": 1000000}, active_run_id="run")
         self.assertIn("新设置下一轮生效", overview["note"])

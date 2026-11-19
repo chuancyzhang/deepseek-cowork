@@ -1,4 +1,4 @@
-"""Opt-in context policy and request budgets; provider payloads stay unchanged."""
+"""Context policy and budgets for dialogue and its independent checkpoints."""
 
 import copy
 import json
@@ -11,10 +11,13 @@ from .context_images import ImageBudgetUnavailable, image_token_budget
 
 
 TARGETS = (300_000, 1_000_000)
-DEFAULT_POLICY = {"enabled": False, "target_tokens": TARGETS[0]}
+DEFAULT_TARGET_TOKENS = TARGETS[-1]
+DEFAULT_DESKTOP_POLICY = {"enabled": True, "target_tokens": DEFAULT_TARGET_TOKENS}
 DEFAULT_OUTPUT_RESERVE_TOKENS = 8192
 MAX_CHECKPOINT_TOKENS = 4096
 MAX_CHECKPOINT_OUTPUT_TOKENS = 8192
+MAX_CHECKPOINT_RETRY_OUTPUT_TOKENS = 16_384
+MAX_CHECKPOINT_RETRIES = 3
 HISTORY_TOOL_NAMES = frozenset({"history_search", "history_read"})
 
 
@@ -26,16 +29,51 @@ class ContextCancelled(ContextError):
     pass
 
 
+class ContextWindowBlocked(ContextError):
+    def __init__(self, message, recovery):
+        super().__init__(message)
+        self.recovery = recovery
+
+
+class CheckpointError(ContextError):
+    def __init__(self, message, reason):
+        super().__init__(message)
+        self.reason = reason
+
+
+@dataclass
+class CheckpointRetries:
+    used: int = 0
+
+    @property
+    def remaining(self):
+        return MAX_CHECKPOINT_RETRIES - self.used
+
+    def take(self):
+        if self.remaining <= 0:
+            return False
+        self.used += 1
+        return True
+
+
+def is_context_overflow_error(message):
+    text = str(message or "").lower()
+    return any(marker in text for marker in (
+        "context_length_exceeded", "context_window_exceeded", "maximum context length",
+        "exceeds the context window", "input exceeds the context", "input is too long",
+    ))
+
+
 def normalize_policy(value):
     value = value if isinstance(value, dict) else {}
-    target = value.get("target_tokens", TARGETS[0])
+    target = value.get("target_tokens", DEFAULT_TARGET_TOKENS)
     if type(target) is not int or target not in TARGETS:
-        target = TARGETS[0]
+        target = DEFAULT_TARGET_TOKENS
     return {"enabled": value.get("enabled") is True, "target_tokens": target}
 
 
 def desktop_policy(config, *, excluded=False):
-    return dict(DEFAULT_POLICY) if excluded else normalize_policy(config.get("experimental_long_context", {}))
+    return normalize_policy(None if excluded else config.get("experimental_long_context", DEFAULT_DESKTOP_POLICY))
 
 
 def text_tokens(value):
@@ -105,22 +143,36 @@ class ContextBudget:
     safety_tokens: int
     output_limit_tokens: int | None = None
 
-    def output_request_options(self, *, checkpoint=False):
+    def output_request_options(self):
         """Only explicit generation limits reach the provider, never the reserve."""
         limit = self.output_limit_tokens
-        if checkpoint:
-            limit = min(limit or MAX_CHECKPOINT_OUTPUT_TOKENS, MAX_CHECKPOINT_OUTPUT_TOKENS)
         return {"max_output_tokens": limit} if limit is not None else {}
+
+    def checkpoint_output_limit(self, input_tokens, requested):
+        limit = min(requested, self.output_limit_tokens or requested)
+        if self.model_tokens is not None:
+            limit = min(limit, self.model_tokens - self.safety_tokens - input_tokens)
+        return limit
+
+    @property
+    def model_input_tokens(self):
+        if self.model_tokens is None:
+            return None
+        return self.model_tokens - self.output_tokens - self.safety_tokens
 
     @property
     def effective_tokens(self):
-        if self.model_tokens is None:
-            return self.target_tokens
-        return min(self.target_tokens, self.model_tokens - self.output_tokens - self.safety_tokens)
+        capacity = self.model_input_tokens
+        return min(self.target_tokens, capacity) if capacity is not None else self.target_tokens
+
+    @staticmethod
+    def compression_threshold(effective_tokens):
+        headroom = min(MAX_CHECKPOINT_TOKENS + 2048, effective_tokens // 2)
+        return max(1, min(int(effective_tokens * .8), effective_tokens - headroom))
 
     @property
     def trigger_tokens(self):
-        return min(int(self.effective_tokens * .8), self.effective_tokens - MAX_CHECKPOINT_TOKENS - 2048)
+        return self.compression_threshold(self.effective_tokens)
 
     @classmethod
     def from_profile(cls, profile, policy, config=None):
@@ -140,13 +192,14 @@ class ContextBudget:
             # model limit or making users configure one before their first run.
             capacity = None
         output_limit = profile.get("max_output_tokens") or None
-        output = output_limit or DEFAULT_OUTPUT_RESERVE_TOKENS
+        safety = max(2048, capacity // 20) if capacity is not None else 0
+        reserve = DEFAULT_OUTPUT_RESERVE_TOKENS if capacity is None else min(
+            DEFAULT_OUTPUT_RESERVE_TOKENS, max(1, (capacity - safety) // 2))
+        output = output_limit or reserve
         if type(output) is not int or output < 1:
             raise ContextError("模型输出预留必须为正整数。")
-        result = cls(policy["target_tokens"], capacity, output,
-                     max(2048, capacity // 20) if capacity is not None else 0,
-                     output_limit)
-        if result.effective_tokens <= MAX_CHECKPOINT_TOKENS + 4096:
+        result = cls(policy["target_tokens"], capacity, output, safety, output_limit)
+        if result.effective_tokens <= 0:
             raise ContextError("当前模型可用上下文太小，无法同时保留任务状态和下一次回答。")
         return result
 
@@ -173,18 +226,18 @@ def validate_checkpoint(text, allowed_ids):
     if raw.startswith("```") and raw.endswith("```"):
         raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     if text_tokens(raw) > MAX_CHECKPOINT_TOKENS:
-        raise ContextError("任务检查点超过 4096 tokens。")
+        raise CheckpointError("任务检查点超过 4096 tokens。", "invalid")
     try:
         value = json.loads(raw)
     except (ValueError, TypeError) as exc:
-        raise ContextError("任务检查点不是有效 JSON。") from exc
+        raise CheckpointError("任务检查点不是有效 JSON。", "invalid") from exc
     if not isinstance(value, dict) or not isinstance(value.get("goal"), str) or not value["goal"].strip():
-        raise ContextError("任务检查点缺少当前目标。")
+        raise CheckpointError("任务检查点缺少当前目标。", "invalid")
     keys = ("constraints", "completed", "decisions", "pending", "next_steps", "refs")
     if any(not isinstance(value.get(key), list) for key in keys):
-        raise ContextError("任务检查点缺少约束、进度或下一步。")
+        raise CheckpointError("任务检查点缺少约束、进度或下一步。", "invalid")
     if len(value["refs"]) > 32 or any(not isinstance(ref, str) or ref not in allowed_ids for ref in value["refs"]):
-        raise ContextError("任务检查点包含无效的历史引用。")
+        raise CheckpointError("任务检查点包含无效的历史引用。", "invalid")
     return {"goal": value["goal"], **{key: copy.deepcopy(value[key]) for key in keys}}
 
 

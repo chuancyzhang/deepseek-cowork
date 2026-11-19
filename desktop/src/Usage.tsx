@@ -1,5 +1,5 @@
-import { useEffect, useId, useMemo, useState, type Ref } from 'react';
-import { ChartColumn, ChevronRight, X } from 'lucide-react';
+import { useEffect, useId, useMemo, useRef, useState, type Ref } from 'react';
+import { ChartColumn, ChevronRight, Info, X } from 'lucide-react';
 import type { RuntimeEvent, Settings } from './types';
 import { generationRates, SPEED_TREND_SECONDS, UsageProjection, type SpeedRequest } from './usageMetrics';
 import './usage.css';
@@ -98,19 +98,28 @@ export default function Usage({ events, activeRunId, settings, onSave, onClose }
 }) {
   const usage = useUsage(events, activeRunId);
   const targetId = useId();
+  const details = useRef<HTMLDetailsElement>(null);
   const saved = settings.context_policy.enabled ? settings.context_policy.target_tokens : 0;
-  const [target, setTarget] = useState(saved);
+  const [draftTarget, setDraftTarget] = useState<number>();
+  const target = draftTarget ?? saved;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const parts = groups.map(([label, keys], index) => ({
     label, index, value: keys.reduce((sum, key) => sum + Math.max(0, usage.context?.counts?.[key] || 0), 0),
   }));
   const total = parts.reduce((sum, part) => sum + part.value, 0);
-  const capacity = usage.capacity?.effective_tokens || 0;
-  const used = Math.max(0, usage.context?.total || 0);
+  const budget = usage.capacity;
+  const capacity = budget?.used_tokens == null ? 0 : budget.effective_tokens || 0;
+  const used = Math.max(0, budget?.used_tokens ?? usage.context?.total ?? 0);
   const usedPercent = percent(used, capacity);
   const cachePercent = usage.cacheInput ? Math.round(percent(usage.cached, usage.cacheInput)) : undefined;
-  const hasContext = usage.context?.status === 'available';
+  const hasComposition = usage.context?.status === 'available';
+  const hasContext = hasComposition || capacity > 0;
+  const current = activeRunId != null && usage.contextRunId === activeRunId;
+  const excludedMedia = capacity > 0 ? budget?.unestimated_images : usage.context?.has_media;
+  const budgetNote = budget?.target_tokens != null && capacity > 0 && capacity < budget.target_tokens
+    ? '按模型容量计算，已扣除输出预留和安全余量。'
+    : budget?.budget_source === 'target_setting' ? '模型容量未知，按目标估算。' : '';
 
   async function save() {
     if (!onSave) return;
@@ -118,6 +127,7 @@ export default function Usage({ events, activeRunId, settings, onSave, onClose }
     setError('');
     try {
       await onSave(target);
+      setDraftTarget(undefined);
     } catch (failure) {
       setError((failure as Error).message);
     } finally {
@@ -146,17 +156,24 @@ export default function Usage({ events, activeRunId, settings, onSave, onClose }
     </section>
 
     <section className="usage-section">
-      <div className="usage-heading"><h4>当前上下文</h4>{hasContext && <small>文本估算{usage.context?.has_media ? ' · 媒体未计入' : ''}</small>}</div>
+      <div className="usage-heading"><h4>{hasContext ? current ? '本次上下文' : '上次请求' : '上下文'}</h4>
+        {hasContext && <small>{capacity > 0 ? '估算' : '文本估算'}{excludedMedia ? ' · 部分媒体未计入' : ''}</small>}
+      </div>
       {hasContext ? <>
         <div className="usage-budget">
-          <div><strong>{format(used)}</strong><small>{capacity > 0 ? `/ ${format(capacity)} Token` : 'Token'}</small></div>
+          <div><strong>{format(used)}</strong><small>{capacity > 0 ? `/ ${format(capacity)} Token` : 'Token'}</small>
+            {budgetNote && <button className="icon-button usage-budget-info" title={budgetNote} aria-label="查看可用上限说明"
+              onClick={() => {if (details.current) {details.current.open = true; details.current.scrollIntoView({block: 'nearest'});}}}>
+              <Info size={13} aria-hidden="true"/>
+            </button>}
+          </div>
           <small>{capacity > 0 ? <>占用 <b>{usedPercent.toFixed(1)}%</b></> : '预算未知'}</small>
         </div>
         {capacity > 0 && <div className="usage-capacity" role="meter" aria-label="上下文占用" aria-valuemin={0} aria-valuemax={capacity}
           aria-valuenow={Math.min(used, capacity)} aria-valuetext={`${format(used)} / ${format(capacity)} Token`}>
           <span style={{ width: Math.min(100, usedPercent) + '%' }}/>
         </div>}
-        <p className="usage-composition-title">文本组成</p>
+        {hasComposition && <><p className="usage-composition-title">文本组成</p>
         <div className="usage-composition" aria-hidden="true">{parts.map(part =>
           <span key={part.label} className={`usage-part-${part.index}`} style={{ width: percent(part.value, total) + '%' }}/>)}</div>
         <ul className="usage-groups" aria-label="文本组成与占比">{parts.map(part =>
@@ -164,31 +181,35 @@ export default function Usage({ events, activeRunId, settings, onSave, onClose }
             <span><i className={`usage-part-${part.index}`} aria-hidden="true"/>{part.label}</span>
             <span>{format(part.value)}</span>
             <small>{percent(part.value, total).toFixed(1)}%</small>
-          </li>)}</ul>
+          </li>)}</ul></>}
       </> : <>
         <p className="usage-empty">{usage.context ? '暂无文本估算' : '首次请求发出后显示上下文用量'}</p>
-        {capacity > 0 && <small>本轮有效上限 {format(capacity)} Token</small>}
       </>}
     </section>
 
     {onSave && <section className="usage-section">
       <div className="usage-heading usage-limit">
-        <div><label htmlFor={targetId}>目标上限</label><small id={targetId+'-note'}>下次开始任务时生效</small></div>
-        <select id={targetId} aria-describedby={targetId+'-note'} value={target} disabled={busy}
-          onChange={event => { setTarget(Number(event.target.value)); setError(''); }}>
+        <label htmlFor={targetId}>下次目标</label>
+        <select id={targetId} value={target} disabled={busy}
+          onChange={event => {
+            const next = Number(event.target.value);
+            setDraftTarget(next === saved ? undefined : next);
+            setError('');
+          }}>
           <option value={0}>未启用</option><option value={300000}>300K</option><option value={1000000}>1M</option>
         </select>
       </div>
       {target !== saved && <div className="button-row">
-        <button className="secondary" disabled={busy} onClick={() => { setTarget(saved); setError(''); }}>取消</button>
+        <button className="secondary" disabled={busy} onClick={() => { setDraftTarget(undefined); setError(''); }}>取消</button>
         <button className="primary" disabled={busy} onClick={save}>{busy ? '正在保存…' : '保存'}</button>
       </div>}
       {error && <p className="error-text" role="alert">{error}</p>}
     </section>}
 
-    <details className="usage-section usage-details">
+    <details className="usage-section usage-details" ref={details}>
       <summary><ChevronRight size={14} aria-hidden="true"/>统计口径与详情</summary>
-      <p className="muted">生成速度根据收到的思考和正文片段估算。请求用量由模型服务返回，不同模型的请求合计展示。上下文为最近一次请求的文本估算。</p>
+      <p className="muted">生成速度根据收到的思考和正文片段估算。请求用量由模型服务返回，不同模型的请求合计展示。上下文占用按最近一次请求估算，组成图仅计文本。</p>
+      {budgetNote && <p className="muted">{budgetNote}</p>}
       <pre>{JSON.stringify({ input_tokens: usage.input, output_tokens: usage.output, last_request: usage.last ?? null, capacity: usage.capacity ?? null }, null, 2)}</pre>
     </details>
   </section>;

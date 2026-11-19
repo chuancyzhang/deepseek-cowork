@@ -6,9 +6,12 @@ import time
 import uuid
 
 from .context_storage import source_fingerprints
-from .long_context import (CHECKPOINT_PROMPT, MAX_CHECKPOINT_TOKENS, ContextBudget,
-                           ContextCancelled, ContextError, estimate_request, text_tokens,
-                           validate_checkpoint)
+from .long_context import (
+    CHECKPOINT_PROMPT, DEFAULT_TARGET_TOKENS, MAX_CHECKPOINT_OUTPUT_TOKENS,
+    MAX_CHECKPOINT_RETRY_OUTPUT_TOKENS, MAX_CHECKPOINT_TOKENS, CheckpointError,
+    CheckpointRetries, ContextBudget, ContextCancelled, ContextError, ContextWindowBlocked,
+    estimate_request, text_tokens, validate_checkpoint,
+)
 from .message_persistence import filter_persistable_messages
 
 
@@ -37,6 +40,7 @@ class ContextWindowManager:
         self.last_stream_update = 0.0
         self.stream_tokens = 0
         self.rollover_id = ""
+        self.defer_compression = False
         self.provider = None
         self.image_budget = {}
 
@@ -54,12 +58,15 @@ class ContextWindowManager:
             "run_id": self.run_id, "session_id": self.session_id, "timestamp": time.time(), **extra,
         })
 
-    def snapshot(self, messages, tools, phase="ready"):
-        used = self.estimate(messages, tools)
-        self.last_used = used
-        self.stream_tokens = 0
+    def capacity_snapshot(self, used, phase="ready"):
         value = self.budget.snapshot(used, window_id=self.window["id"] if self.window else "", phase=phase)
         value.update(updated_at=time.time(), run_id=self.run_id, **self.image_budget)
+        return value
+
+    def snapshot(self, messages, tools, phase="ready"):
+        self.last_used = self.estimate(messages, tools)
+        self.stream_tokens = 0
+        value = self.capacity_snapshot(self.last_used, phase)
         self.worker.observability_signal.emit({"type": "context_capacity", "capacity": value})
         return value
 
@@ -257,52 +264,88 @@ class ContextWindowManager:
 
     def _summarize(self, source, allowed_ids, provider):
         previous = self.window["content"] if self.window else None
+        retries = CheckpointRetries()
+        requested_output = MAX_CHECKPOINT_OUTPUT_TOKENS
+        can_raise_output = True
+        short_summary = 0
         room = max(1024, (self.budget.effective_tokens - MAX_CHECKPOINT_TOKENS - 4096) // 2)
         for index, chunk in enumerate(self._summary_chunks(source, room), 1):
             self.check_cancelled()
             self.event("started", part=index)
             user = {"role": "user", "content": json.dumps(
                 {"previous_checkpoint": previous, "new_evidence": chunk}, ensure_ascii=False)}
-            request = [{"role": "system", "content": CHECKPOINT_PROMPT}, user]
-            if estimate_request(request, []) + MAX_CHECKPOINT_TOKENS > self.budget.effective_tokens:
-                raise ContextError("任务状态整理输入超过预算，请缩小材料后重试。")
-            for attempt in range(2):
-                text = self.worker._generate_context_checkpoint(provider, request, self.rollover_id, index, attempt)
+            base = [{"role": "system", "content": CHECKPOINT_PROMPT}, user]
+            while True:
+                self.check_cancelled()
+                request = base if not short_summary else [*base, {"role": "user", "content": (
+                    f"只输出一份有效 JSON，正文尽量控制在 {short_summary} tokens 内。"
+                    "用短句保留关键要求、已完成事项和下一步，原文细节用 refs 指向已有消息。"
+                )}]
+                input_tokens = estimate_request(request, [])
+                output_limit = self.budget.checkpoint_output_limit(input_tokens, requested_output)
+                if output_limit <= 0 or input_tokens + MAX_CHECKPOINT_TOKENS > self.budget.effective_tokens:
+                    raise CheckpointError("任务状态整理输入超过预算。", "input_budget")
                 try:
+                    text = self.worker._generate_context_checkpoint(
+                        provider, request, self.rollover_id, index, retries, output_limit)
                     previous = validate_checkpoint(text, allowed_ids)
                     break
-                except ContextError:
-                    if attempt:
+                except CheckpointError as exc:
+                    self.check_cancelled()
+                    if exc.reason not in {"length", "invalid", "incomplete", "output_budget"} or not retries.take():
                         raise
-                    request = [*request, {"role": "user", "content":
-                        "上次输出未通过结构、引用或长度校验。请重新输出严格符合字段要求且不超过4096 tokens的JSON；refs仅用资料中的消息id。"}]
+                    higher_limit = self.budget.checkpoint_output_limit(input_tokens, MAX_CHECKPOINT_RETRY_OUTPUT_TOKENS)
+                    if exc.reason == "length" and can_raise_output and higher_limit > output_limit:
+                        requested_output = MAX_CHECKPOINT_RETRY_OUTPUT_TOKENS
+                        can_raise_output = False
+                    else:
+                        if exc.reason == "output_budget":
+                            requested_output = max(1, min(MAX_CHECKPOINT_OUTPUT_TOKENS, output_limit // 2))
+                            can_raise_output = False
+                        short_summary = max(512, (short_summary or MAX_CHECKPOINT_TOKENS) // 2)
+                    self.event("retrying", part=index, retry=retries.used, reason=exc.reason,
+                               previous_output_limit=output_limit)
         if previous is None:
-            raise ContextError("没有足够的已保存历史可整理。")
+            raise CheckpointError("没有足够的已保存历史可整理。", "input_budget")
         return previous
 
     def prepare(self, messages, generated, tools, provider):
         self.rollover_id = ""
-        while True:
-            try:
-                return self._prepare_once(messages, generated, tools, provider)
-            except ContextCancelled:
-                raise
-            except Exception as exc:
-                if not self.rollover_id:
-                    self.worker.observability_signal.emit({"type": "context_capacity", "capacity": {
-                        "status": "unavailable", "reason": str(exc), "run_id": self.run_id}})
-                    raise
-                # Only an explicit click retries. Keep the same run and closed
-                # tool boundary; never submit a duplicate user message or tool.
-                while True:
-                    if self.worker.is_stopped:
-                        self.event("cancelled")
-                        raise ContextCancelled("已停止压缩上下文。")
-                    run = self.worker.runtime_journal.get_run(self.session_id, self.run_id) or {}
-                    if run.get("context_retry") == self.rollover_id:
-                        self.worker.runtime_journal.update_run(self.session_id, self.run_id, {"context_retry": ""})
-                        break
-                    time.sleep(.1)
+        try:
+            return self._prepare_once(messages, generated, tools, provider)
+        except ContextCancelled:
+            raise
+        except Exception as exc:
+            if not self.rollover_id:
+                self.worker.observability_signal.emit({"type": "context_capacity", "capacity": {
+                    "status": "unavailable", "reason": str(exc), "run_id": self.run_id}})
+            raise
+
+    def _fits_current_budget(self, usage):
+        return (self.budget.model_input_tokens is not None and not usage.get("unestimated_images")
+                and usage["used_tokens"] <= self.budget.effective_tokens)
+
+    def _compression_failed(self, projected, tools, usage, error):
+        self.check_cancelled()
+        if self._fits_current_budget(usage):
+            # The early trigger leaves room to use the current, valid window.
+            # Check the hard budget again at each subsequent request boundary.
+            self.defer_compression = True
+            self.snapshot(projected, tools)
+            self.event("deferred", reason=str(error), used_tokens=usage["used_tokens"])
+            return projected, False
+
+        recovery = "continue"
+        model_input = self.budget.model_input_tokens
+        used = usage["used_tokens"]
+        if model_input is not None:
+            higher = min(DEFAULT_TARGET_TOKENS, model_input)
+            if used > model_input:
+                recovery = "new_chat"
+            elif (higher > self.budget.effective_tokens and not usage.get("unestimated_images")
+                  and used < self.budget.compression_threshold(higher)):
+                recovery = "increase_target"
+        raise ContextWindowBlocked(str(error), recovery) from error
 
     def update_snapshot(self, messages, tools, phase):
         # Called only at closed protocol boundaries. Never starts compression.
@@ -318,22 +361,12 @@ class ContextWindowManager:
         self.provider = provider
         self.last_messages = list(messages)
         self.last_generated = copy.deepcopy(filter_persistable_messages(generated))
-        if self.rollover_id:
-            committed = self.storage.get_context_window(self.session_id, self.rollover_id)
-            if committed and committed["status"] == "active":
-                # A commit receipt can be lost after SQLite commits. Resume the
-                # exact durable seed rather than generating a different one.
-                self.window = committed
-                projected = self._project(messages)
-                self.snapshot(projected, tools)
-                self.event("completed", recovered_commit=True)
-                return projected, True
         # Reject unbudgeted content before discarding any part of the working set.
         projected = self._project(messages)
         usage = self.snapshot(projected, tools)
-        if usage["used_tokens"] < self.budget.trigger_tokens:
+        if usage["used_tokens"] < self.budget.trigger_tokens or self.defer_compression and self._fits_current_budget(usage):
             return projected, False
-        self.rollover_id = self.rollover_id or uuid.uuid4().hex
+        self.rollover_id = uuid.uuid4().hex
         try:
             self.event("started")
             source, fingerprints, revision = self.persist_history(messages, generated)
@@ -344,15 +377,16 @@ class ContextWindowManager:
             tail = active[max(1, last_assistant):]
             tail_ids = {m.get("id") for m in tail}
             to_summarize = [m for m in active[1:] if m.get("id") not in tail_ids]
-            if not to_summarize:
-                raise ContextError("当前输入或最近工具轮次已占满工作集，请缩小材料或提高上下文档位。")
             minimum = [messages[0], *self._seed_context(messages, {}, self.rollover_id, tail), *tail]
-            if self.estimate(minimum, tools) >= self.budget.trigger_tokens:
-                raise ContextError("当前输入、固定提示或最近完整处理片段无法容纳，请缩小材料后重试。")
+            if not to_summarize or self.estimate(minimum, tools) >= self.budget.trigger_tokens:
+                return self._compression_failed(active, tools, usage, ContextError("当前内容无法继续缩短。"))
             allowed_ids = {m["id"] for m in source}
             if self.window:
                 allowed_ids.update(self.window["content"].get("refs") or [])
-            checkpoint = self._summarize(to_summarize, allowed_ids, provider)
+            try:
+                checkpoint = self._summarize(to_summarize, allowed_ids, provider)
+            except CheckpointError as exc:
+                return self._compression_failed(active, tools, usage, exc)
             self.check_cancelled()
             host_state = self._host_state(source)
             seeds = self._seed_context(messages, checkpoint, self.rollover_id, tail, host_state)
@@ -369,14 +403,28 @@ class ContextWindowManager:
             next_messages = self._project(messages, candidate)
             next_used = self.estimate(next_messages, tools)
             if next_used >= self.budget.trigger_tokens:
-                raise ContextError("压缩后必要内容仍接近上限，请缩小当前输入或提高上下文档位。")
-            self._storage_operation("commit", candidate)
-            self.window = self.storage.get_context_window(self.session_id, self.rollover_id)
-            if not self.window or self.window["status"] != "active":
+                return self._compression_failed(active, tools, usage, ContextError("整理后仍接近可用上限。"))
+            try:
+                self._storage_operation("commit", candidate)
+            except ContextCancelled:
+                raise
+            except ContextError:
+                # A missing receipt does not undo an already committed checkpoint.
+                window = self.storage.get_context_window(self.session_id, self.rollover_id)
+                if not window or window["status"] != "active":
+                    raise
+                recovered_commit = True
+            else:
+                window = self.storage.get_context_window(self.session_id, self.rollover_id)
+                recovered_commit = False
+            if not window or window["status"] != "active":
                 raise ContextError("上下文提交未得到确认，未继续模型请求。")
             self.check_cancelled()
+            self.window = window
+            self.defer_compression = False
             self.snapshot(next_messages, tools)
-            self.event("completed", before_tokens=usage["used_tokens"], after_tokens=next_used)
+            self.event("completed", before_tokens=usage["used_tokens"], after_tokens=next_used,
+                       recovered_commit=recovered_commit)
             return next_messages, True
         except ContextCancelled:
             self.event("cancelled")

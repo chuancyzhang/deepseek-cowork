@@ -116,11 +116,12 @@
 .usage-cache-ring, .usage-cache-ring strong { display: grid; place-items: center; border-radius: 50%; }
 .usage-cache-ring { width: 44px; height: 44px; background: var(--soft); }
 .usage-cache-ring strong { width: 36px; height: 36px; background: var(--bg); font-weight: 600; }
-.usage-cache small, .usage-limit small { display: block; margin-top: 2px; }
+.usage-cache small { display: block; margin-top: 2px; }
 
 .usage-budget { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 2px 8px; margin-top: 6px; }
 .usage-budget strong { font-size: 1.6em; font-weight: 600; }
 .usage-budget b { color: var(--text); font-weight: 600; }
+.usage-budget-info { width: 24px; height: 24px; align-self: center; }
 .usage-capacity { height: 5px; margin-top: 4px; border-radius: 3px; background: var(--soft); overflow: hidden; }
 .usage-capacity span { display: block; height: 100%; border-radius: inherit; background: var(--usage-accent); }
 .usage-popover .usage-composition-title { margin-top: 10px; }

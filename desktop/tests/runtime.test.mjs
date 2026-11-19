@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, turnTimings, elapsedTime, thinkingTime, interactionRecords, isUserStopped, toolErrorText } from '../src/runtime.ts';
+import { contextRecoveryForRun, displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, turnTimings, elapsedTime, thinkingTime, interactionRecords, isUserStopped, toolErrorText } from '../src/runtime.ts';
 import { UsageProjection, generationRates } from '../src/usageMetrics.ts';
 
 const providerEvent = (run_id, type, created_at, status) => ({
@@ -54,6 +54,31 @@ test('a retry or interruption does not replace the previous completed speed', ()
   assert.equal(interrupted.request, undefined);
   assert.equal(interrupted.lastSpeed, 1);
   assert.equal(projection.project([]).lastSpeed, undefined);
+});
+
+test('usage pairs each request with its own budget, including legacy and disabled runs', () => {
+  const projection = new UsageProjection();
+  const observation = (run_id, data) => ({type: 'observability', run_id, data});
+  const budget = {status: 'available', phase: 'ready', used_tokens: 40830, effective_tokens: 300000};
+  const text = {status: 'available', total: 35000};
+  const events = [observation('old', {type: 'context_capacity', capacity: budget}),
+    observation('old', {type: 'system_prompt', context_usage: text}),
+    observation('old', {type: 'context_capacity', capacity: {...budget, phase: 'finished', used_tokens: 90000}})];
+  assert.deepEqual(projection.project(events).capacity, budget);
+  const fresh = [...events, observation('off', {type: 'system_prompt', context_usage: text})];
+  assert.equal(projection.project(fresh, 'off').capacity, undefined);
+  const limited = {...budget, used_tokens: 50000, effective_tokens: 466808, target_tokens: 1000000};
+  const latest = [...fresh, observation('new', {type: 'system_prompt', context_usage: text, context_capacity: limited})];
+  assert.deepEqual(projection.project(latest, 'new').capacity, limited);
+  assert.equal(projection.project(latest, 'new').contextRunId, 'new');
+});
+
+test('context recovery follows the failed run after a reload', () => {
+  const events = unwrapEvents([{payload: {type: 'final', run_id: 'old', result: {context_recovery: 'increase_target'}}},
+    {payload: {type: 'final', run_id: 'new', result: {context_recovery: 'new_chat'}}}]);
+  assert.equal(contextRecoveryForRun(events, 'old'), 'increase_target');
+  assert.equal(contextRecoveryForRun(events, 'new'), 'new_chat');
+  assert.equal(contextRecoveryForRun(events, 'other'), undefined);
 });
 
 test('tool error display accepts structured JSON without changing the retained error', () => {

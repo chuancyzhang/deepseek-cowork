@@ -62,8 +62,6 @@ def run_live(report_path):
             if event.get("type") == "context_rollover":
                 print(json.dumps({key: event.get(key) for key in ("phase", "part", "before_tokens", "after_tokens", "error")
                                   if event.get(key) is not None}, ensure_ascii=False), flush=True)
-                if event.get("phase") == "failed":
-                    worker.is_stopped = True
             if event.get("type") != "context_storage_request":
                 return
             if event["operation"] == "prepare":
@@ -82,9 +80,9 @@ def run_live(report_path):
         worker._register_provider_stream = lambda stream: not worker.is_stopped
         worker._release_provider_stream = lambda stream: None
         worker._provider_chat_stream = lambda provider, messages, **kwargs: provider.chat_stream(messages, **kwargs)
-        def summarize(provider, request, rollover, part, repair):
-            summary_requests.append({"part": part, "repair": repair})
-            return LLMWorker._generate_context_checkpoint(worker, provider, request, rollover, part, repair)
+        def summarize(provider, request, rollover, part, retries, output_limit):
+            summary_requests.append({"part": part, "retries_used": retries.used, "max_output_tokens": output_limit})
+            return LLMWorker._generate_context_checkpoint(worker, provider, request, rollover, part, retries, output_limit)
         worker._generate_context_checkpoint = summarize
         manager = ContextWindowManager(worker, normalize_policy({"enabled": True}))
         worker.context_window_manager = manager

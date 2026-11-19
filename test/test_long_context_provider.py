@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import test_deepseek_provider as helpers
 
@@ -8,7 +8,7 @@ import test_deepseek_provider as helpers
 class TestContextProviderContract(unittest.TestCase):
     def test_checkpoint_terminal_details_are_retained_and_eof_is_rejected(self):
         from core.agent import LLMWorker
-        from core.long_context import ContextBudget, ContextError, normalize_policy
+        from core.long_context import CheckpointRetries, ContextError
         for status, reason, expected in (("completed", "stop", None),
                                          ("incomplete", "max_output_tokens", "输出达到上限"),
                                          ("incomplete", "max_tokens", "输出达到上限"),
@@ -22,17 +22,16 @@ class TestContextProviderContract(unittest.TestCase):
                         "finish_reason": reason, "event_type": "response." + status,
                         "response_id": "response-id", "error": 'Bearer private-token'})
                 worker = SimpleNamespace(request_id="r", is_stopped=False,
-                    context_window_manager=SimpleNamespace(budget=ContextBudget.from_profile({}, normalize_policy({"enabled": True}))),
                     _record_provider_attempt=lambda identity, value: records.append(value),
                     observability_signal=SimpleNamespace(emit=events.append),
                     _provider_chat_stream=lambda *a, **kw: iter(chunks),
                     _register_provider_stream=Mock(), _release_provider_stream=Mock())
                 if expected:
                     with self.assertRaisesRegex(ContextError, expected):
-                        LLMWorker._generate_context_checkpoint(worker, SimpleNamespace(), [], "w", 1, 0)
+                        LLMWorker._generate_context_checkpoint(worker, SimpleNamespace(), [], "w", 1, CheckpointRetries(), 8192)
                     self.assertEqual(records[-1]["status"], "failed")
                 else:
-                    self.assertEqual(LLMWorker._generate_context_checkpoint(worker, SimpleNamespace(), [], "w", 1, 0), "checkpoint")
+                    self.assertEqual(LLMWorker._generate_context_checkpoint(worker, SimpleNamespace(), [], "w", 1, CheckpointRetries(), 8192), "checkpoint")
                     self.assertEqual(records[-1]["status"], "completed")
                 if status:
                     self.assertEqual(records[-1]["terminal_status"], status)
@@ -91,18 +90,40 @@ class TestContextProviderContract(unittest.TestCase):
 
     def test_checkpoint_stream_setup_error_records_failed_attempt(self):
         from core.agent import LLMWorker
-        from core.long_context import ContextBudget, normalize_policy
+        from core.long_context import CheckpointRetries
         records = []
         worker = SimpleNamespace(request_id="r", is_stopped=False,
-            context_window_manager=SimpleNamespace(budget=ContextBudget.from_profile({}, normalize_policy({"enabled": True}))),
             _record_provider_attempt=lambda identity, value: records.append((identity, value)),
             observability_signal=SimpleNamespace(emit=lambda event: None),
             _provider_chat_stream=Mock(side_effect=RuntimeError("setup failed")),
             _register_provider_stream=Mock(), _release_provider_stream=Mock())
         with self.assertRaisesRegex(RuntimeError, "setup failed"):
-            LLMWorker._generate_context_checkpoint(worker, SimpleNamespace(), [], "w", 1, 0)
+            LLMWorker._generate_context_checkpoint(worker, SimpleNamespace(), [], "w", 1, CheckpointRetries(), 8192)
         self.assertEqual([value["status"] for _, value in records], ["running", "failed"])
         self.assertEqual(records[0][0], records[1][0])
+
+    def test_checkpoint_network_retry_uses_remaining_budget_and_replaces_partial_text(self):
+        from core.agent import LLMWorker
+        from core.llm.providers import retry_model_api_stream
+        from core.long_context import CheckpointRetries
+
+        def stream(attempt):
+            if not attempt:
+                yield {"type": "content", "content": "partial"}
+                raise TimeoutError("interrupted checkpoint")
+            yield {"type": "content", "content": "completed"}
+            yield {"type": "provider_terminal", "status": "completed", "finish_reason": "stop"}
+
+        worker = SimpleNamespace(request_id="r", is_stopped=False, _record_provider_attempt=Mock(),
+            observability_signal=SimpleNamespace(emit=Mock()), _register_provider_stream=Mock(),
+            _release_provider_stream=Mock(),
+            _provider_chat_stream=lambda *args, request_context, **kw: retry_model_api_stream(stream, request_context))
+        retries = CheckpointRetries(used=2)
+        with patch("core.llm.providers._wait_before_model_retry", return_value=True) as wait:
+            result = LLMWorker._generate_context_checkpoint(worker, SimpleNamespace(), [], "w", 1, retries, 8192)
+        self.assertEqual(result, "completed")
+        self.assertEqual(retries.remaining, 0)
+        wait.assert_called_once()
 
 
 if __name__ == "__main__":

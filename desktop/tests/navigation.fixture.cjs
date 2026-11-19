@@ -51,10 +51,10 @@ const wait=async predicate=>{for(let i=0;i<350;i++){if(predicate())return;await 
 const rpc=(method,params={})=>read(`window.cowork.call(${JSON.stringify(method)},${JSON.stringify(params)})`);
 const command=id=>Menu.getApplicationMenu().getMenuItemById(id).click();
 const fill=(selector,value)=>read(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});el.focus();Object.getOwnPropertyDescriptor(el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype,'value').set.call(el,${JSON.stringify(value)});el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
-async function snap(name, selector) {
+async function snap(name, selector, padding=24) {
   const output=process.env.COWORK_NAVIGATION_SCREENSHOTS;
   if(!output)return;
-  const rect=selector ? await read('(()=>{const r=document.querySelector('+JSON.stringify(selector)+').getBoundingClientRect();return {x:Math.floor(r.left)-24,y:Math.floor(r.top)-24,width:Math.ceil(r.width)+48,height:Math.ceil(r.height)+48};})()') : undefined;
+  const rect=selector ? await read(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:Math.floor(r.left)-${padding},y:Math.floor(r.top)-${padding},width:Math.ceil(r.width)+${2*padding},height:Math.ceil(r.height)+${2*padding}};})()`) : undefined;
   await fs.mkdir(output,{recursive:true});
   window.webContents.invalidate();
   await delay(120);
@@ -193,7 +193,18 @@ async function checkChatHeader() {
   await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
   await until('!document.querySelector(".history-popover")&&document.activeElement.getAttribute("aria-label")==="历史提问"');
   await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
-  await until('Boolean(document.querySelector(".usage-popover"))');
+  await until('document.querySelector(".usage-budget").textContent.includes("300,000 Token")');
+  assert.equal(await read('document.querySelector(".usage-popover select").value'),'1000000');
+  assert.equal(await read('document.querySelector(".usage-limit label").textContent'),'下次目标');
+  assert.equal(await read('document.querySelector(".usage-capacity").getAttribute("aria-valuetext")'),'40,830 / 300,000 Token');
+  await snap('usage','.usage-popover',0);
+  for(const value of ['300000','1000000']){
+    await read(`(()=>{const select=document.querySelector('.usage-popover select');select.value=${JSON.stringify(value)};select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await clickText('.usage-popover .button-row button','保存');
+    await until('!document.querySelector(".usage-popover .button-row")');
+    assert.equal((await rpc('settings.get')).context_policy.target_tokens,Number(value));
+    assert.equal(await read('document.querySelector(".usage-capacity").getAttribute("aria-valuemax")'),'300000');
+  }
   await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
   await until('!document.querySelector(".usage-popover")&&document.activeElement.getAttribute("aria-label")==="用量统计"');
   await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
@@ -268,7 +279,16 @@ async function run(){
   const review=await rpc('conversation.create');await rpc('conversation.rename',{conversation_id:review.id,title:'检查文件预览问题'});
   const report=await rpc('conversation.create');await rpc('conversation.rename',{conversation_id:report.id,title:'汇总本周工作进展'});
   const messages=[{id:'user',role:'user',content:'整理项目文档，让新同事能更快上手。'},{id:'answer',role:'assistant',content:'已整理好文档结构，按实际使用顺序分成快速开始、使用指南和开发说明。\n\n原有内容已保留，重复说明合并到对应章节。'}];
-  snapshots.set(docs.id,{has_messages:true,messages,render_messages:messages});
+  const counts={user:1432,assistant:12128,results:15940,system:6230,tools:3500,injected:1220};
+  const usageEvents=[
+    {type:'observability',data:{type:'system_prompt',context_usage:{status:'available',counts,total:40450},
+      context_capacity:{status:'available',used_tokens:40830,effective_tokens:300000,target_tokens:300000}}},
+    {type:'observability',data:{type:'provider_request_start',request_id:'example-provider'},created_at:100},
+    {type:'content',delta:messages[1].content,source_message_id:'answer',created_at:101},
+    {type:'observability',data:{type:'llm_usage',usage:{request_id:'example-provider',input_tokens:38520,output_tokens:2090,cached_input_tokens:26520}}},
+    {type:'observability',data:{type:'provider_request_finish',request_id:'example-provider',status:'completed'},created_at:102.1},
+  ].map((event,index)=>({...event,run_id:'example-usage',sequence:index+1}));
+  snapshots.set(docs.id,{has_messages:true,messages,render_messages:messages,events:usageEvents});
   window.webContents.send('cowork:events',[{event:'conversation_changed',conversation_id:docs.id}]);
   await until('Array.from(document.querySelectorAll(".history-select")).some(button=>button.textContent==="检查文件预览问题")');
   await checkSidebar();
@@ -369,6 +389,11 @@ async function run(){
   await clickText('.history-select','整理项目文档');
   await until('document.querySelectorAll(".chat-header-tools button").length===3');
   assert.equal(await read('(()=>{const buttons=[...document.querySelectorAll(".chat-header-tools button")].map(button=>button.getBoundingClientRect());return buttons.every(rect=>rect.top===buttons[0].top&&rect.left>=0&&rect.right<=innerWidth);})()'),true);
+  await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
+  await until('document.querySelector(".usage-capacity")?.getAttribute("aria-valuemax")==="300000"');
+  assert.equal(await read('(()=>{const r=document.querySelector(".usage-popover").getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;})()'),true);
+  await snap('usage-dark-scaled');
+  await read('document.querySelector(".usage-popover [aria-label=关闭用量]").click()');
   command('new-chat');await until('!!document.querySelector(".workbench-home .home-project-trigger")&&document.activeElement===document.querySelector("[aria-label=消息输入]")');
   await read('document.querySelector(".home-project-trigger").click()');
   await until('!!document.querySelector(".home-project-menu")');

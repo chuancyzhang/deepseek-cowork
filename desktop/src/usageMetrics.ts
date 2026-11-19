@@ -9,7 +9,16 @@ type ContextUsage = {
   total?: number;
   has_media?: boolean;
 };
-type Capacity = { effective_tokens?: number } & Record<string, unknown>;
+type Capacity = {
+  status?: string;
+  phase?: string;
+  used_tokens?: number;
+  effective_tokens?: number;
+  target_tokens?: number;
+  run_id?: string;
+  budget_source?: string;
+  unestimated_images?: number;
+} & Record<string, unknown>;
 type RequestUsage = {
   request_id?: string;
   input_tokens?: number;
@@ -29,6 +38,7 @@ function emptyUsage() {
   return {
     input: 0, output: 0, cached: 0, cacheInput: 0, count: 0,
     context: undefined as ContextUsage | undefined,
+    contextRunId: undefined as string | undefined,
     capacity: undefined as Capacity | undefined,
     last: undefined as RequestUsage | undefined,
   };
@@ -50,6 +60,7 @@ export class UsageProjection {
   private counted = new Set<string>();
   private requests = new Map<string, SpeedRequest>();
   private lastSpeed?: { rate: number; at: number };
+  private pendingCapacity?: { runId: string; value: Capacity };
 
   project(events: RuntimeEvent[], activeRunId?: string) {
     // History can be replaced or prepended. Live batches keep the previous objects.
@@ -61,6 +72,7 @@ export class UsageProjection {
       this.counted.clear();
       this.requests.clear();
       this.lastSpeed = undefined;
+      this.pendingCapacity = undefined;
     }
     for (let i = this.previous.length; i < events.length; i++) this.apply(events[i]);
     this.previous = events;
@@ -74,14 +86,29 @@ export class UsageProjection {
   private apply(event: RuntimeEvent) {
     const { type, data, created_at: at, run_id: runId } = event;
     if (type === 'observability') {
-      if (data?.type === 'system_prompt') this.usage.context = data.context_usage;
-      else if (data?.type === 'context_capacity') this.usage.capacity = data.capacity;
-      else if (data?.type === 'llm_usage' && data.usage) this.addUsage(runId, data.usage);
+      if (data?.type === 'system_prompt') {
+        this.usage.context = data.context_usage;
+        this.usage.contextRunId = runId;
+        // New records carry the budget on the same request event. Older runs
+        // published the ready estimate immediately before this event.
+        this.usage.capacity = data.context_capacity ?? (runId && this.pendingCapacity?.runId === runId
+          ? this.pendingCapacity.value : undefined);
+        this.pendingCapacity = undefined;
+      } else if (data?.type === 'context_capacity') {
+        const snapshot = data.capacity as Capacity | undefined;
+        const owner = runId || snapshot?.run_id;
+        if (owner && snapshot?.status === 'available' && snapshot.phase === 'ready') {
+          this.pendingCapacity = {runId: owner, value: snapshot};
+        }
+      } else if (data?.type === 'llm_usage' && data.usage) this.addUsage(runId, data.usage);
       else if (runId && data?.request_id) this.requestBoundary(runId, data, at);
       return;
     }
     if (!runId) return;
-    if (type === 'final') this.requests.delete(runId);
+    if (type === 'final') {
+      this.requests.delete(runId);
+      if (this.pendingCapacity?.runId === runId) this.pendingCapacity = undefined;
+    }
     const request = this.requests.get(runId);
     if (request && at != null && (type === 'thinking' || type === 'content' || type === 'content_snapshot')) {
       const before = Math.ceil(request.thinking + request.content);

@@ -276,6 +276,12 @@ export function isUserStopped(run?: Pick<Run, 'status' | 'error'> | null) {
   return run?.status === 'interrupted' && /^(?:run )?interrupted by user\.?$/i.test(run.error.trim());
 }
 
+export function contextRecoveryForRun(events: RuntimeEvent[], runId: string) {
+  const final = events.findLast(event => event.run_id === runId && event.type === 'final');
+  const recovery = final?.result?.context_recovery;
+  if (recovery === 'increase_target' || recovery === 'continue' || recovery === 'new_chat') return recovery;
+}
+
 export function runErrorSummary(error: string) {
   if (/is a (video|image) model|use \/v1\/(videos|images)/i.test(error)) return '当前选择的是多媒体专用模型，请在输入区切换对话模型；生成模型在多媒体配置中选择。';
   if (/Image generation is not enabled/i.test(error)) return '模型服务未开放请求所需的图片生成能力。请核对该服务的模型能力配置，或选择其他已配置模型后继续。';

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, lazy, Suspense, useSyncExternalStore, type RefObject } from 'react';
 import {ArrowLeft, ChartColumn, ChevronDown, Copy, ExternalLink, Folder, History, LoaderCircle, MoreHorizontal, PanelRight, RefreshCw, Sparkles, X} from 'lucide-react';
 import type { Attachment, Conversation, FileSession, HostEvent, Message, Plugin, RuntimeEvent, Settings } from '../types';
-import { displayMessages, messageGroups, isActive, mergeEvents, messageText, runErrorSummary, isUserStopped, unwrapEvents, turnTimings, replyParts } from '../runtime';
+import { contextRecoveryForRun, displayMessages, messageGroups, isActive, mergeEvents, messageText, runErrorSummary, isUserStopped, unwrapEvents, turnTimings, replyParts } from '../runtime';
 import PluginSlot from './PluginSlot';
 import Usage, {UsageToolbarButton} from '../Usage';
 import { Drafts, type Draft } from '../drafts';
@@ -92,6 +92,10 @@ export default function BuiltinWorkbench() {
     (message.meta?.turn_id || message.meta?.ui_turn_id) === current?.run?.id) ? latestGroup.id : undefined;
   const activeProcess = activeGroup && latestGroup && (replyParts(latestGroup.messages).hasProcess || latestGroup.questions?.length);
   const userStopped = !active && isUserStopped(current?.run);
+  const failedRun = !active && !userStopped && current?.run?.error ? current.run : undefined;
+  const contextRecovery = useMemo(() => failedRun && contextRecoveryForRun(events, failedRun.id), [events, failedRun]);
+  const adjustTarget = contextRecovery === 'increase_target' && settings?.context_policy.enabled
+    && settings.context_policy.target_tokens < 1_000_000;
   const stoppedGroup = userStopped ? [...groups].reverse().find(group => group.assistant && group.messages.some(message =>
     (message.meta?.turn_id || message.meta?.ui_turn_id) === current?.run?.id)) : undefined;
   const layout = useRef<HTMLDivElement>(null);
@@ -99,6 +103,15 @@ export default function BuiltinWorkbench() {
   function toggleUsage() {
     setShowUsage(!showUsage);
     setShowHistory(false);
+  }
+  function continueTask() {
+    if (!current) return;
+    const entry = drafts.get(current.id);
+    if (!entry.value.text.trim() && !entry.value.attachments.length && !entry.pending) {
+      setDraft('请继续上一轮未完成的任务。先核对已经生成的文件与完成的操作，保留有效结果，避免重复已完成的操作。');
+      if (contextRecovery) void send(current.id).catch(() => {});
+    }
+    composer.current?.focus();
   }
   function closeWorkspace() {
     setWorkspaceOpen(false);
@@ -188,7 +201,19 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
             {current && Boolean(current.media_tasks?.length) && <Suspense fallback={null}><ChatMediaTasks key={current.id} cid={current.id} tasks={current.media_tasks || []} configured={settings?.media_capabilities||[]} openFile={path=>void openFile(path)} configure={()=>void goRoute('multimedia')}/></Suspense>}
             {active && !activeProcess && !(reviewTask && activeGroup) && (reviewTask ? <GenerationTaskStatus task={reviewTask} statusLabel={runLabel} waiting={current?.run?.status === 'queued'}/> : <div className="run-state"><LoaderCircle size={14} className="spin"/>{runLabel}</div>)}
             {userStopped && !stoppedGroup && <div className="run-state" role="status">已停止</div>}
-            {!active && !userStopped && current?.run?.error && <div className="run-error"><span>{current.run.status === 'interrupted' ? '任务意外中断' : '这次任务未完成'}</span><p>{runErrorSummary(current.run.error)}</p><details><summary>查看具体原因</summary><pre>{current.run.error}</pre></details><button className="secondary" onClick={() => {setDraft('请继续上一轮未完成的任务。先核对已经生成的文件与完成的操作，保留有效结果，避免重复已完成的操作。');composer.current?.focus();}}>继续这个任务</button></div>}
+            {failedRun && <div className="run-error">
+              <span>{failedRun.status === 'interrupted' ? '任务意外中断' : '这次任务未完成'}</span>
+              <p>{adjustTarget ? '已保存聊天和已有内容。可在用量中把下次目标调到 1M，再继续这个任务。'
+                : contextRecovery === 'new_chat' ? '当前内容超过模型可用长度，聊天已保留。可以新建聊天，或减少本次材料后再试。'
+                : contextRecovery ? '聊天和已有内容已保留。' : runErrorSummary(failedRun.error)}</p>
+              <details><summary>查看具体原因</summary><pre>{failedRun.error}</pre></details>
+              <div className="button-row">
+                {adjustTarget ? <button className="secondary" onClick={() => {setShowHistory(false); setShowUsage(true);}}>打开用量</button>
+                  : contextRecovery !== 'new_chat' && <button className="secondary" disabled={sending} onClick={continueTask}>继续这个任务</button>}
+                {contextRecovery && !adjustTarget && <button className="secondary"
+                  onClick={() => void newConversation(current?.meta.workspace_dir).catch(failure => error(failure.message))}>新建聊天</button>}
+              </div>
+            </div>}
             </div>}
         </div><div className="composer-container">
 <DraftRecovery pending={drafts.needsRecovery(selectedId.current)} busy={sending} recover={retry => void recoverSend(retry)}/>

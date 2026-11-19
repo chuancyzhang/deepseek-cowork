@@ -247,7 +247,8 @@ def retry_model_api_stream(stream_factory, request_context=None):
     """
 
     context = request_context if isinstance(request_context, dict) else {}
-    for attempt_index in range(MODEL_API_TRANSIENT_MAX_RETRIES + 1):
+    max_retries = context.get("max_retries", MODEL_API_TRANSIENT_MAX_RETRIES)
+    for attempt_index in range(max_retries + 1):
         if _retry_cancelled(context):
             return
         emitted_semantic_output = False
@@ -290,16 +291,19 @@ def retry_model_api_stream(stream_factory, request_context=None):
             if _retry_cancelled(context):
                 return
             can_retry = bool(
-                attempt_index < MODEL_API_TRANSIENT_MAX_RETRIES
-                and not emitted_semantic_output
+                attempt_index < max_retries
+                and (context.get("tools_disabled") or not emitted_semantic_output)
                 and not completed_terminal_seen
                 and is_transient_model_api_error(exc)
             )
             if not can_retry:
                 for chunk in failed_terminal_chunks:
                     yield chunk
-                yield {"type": "error", "content": str(exc),
-                       "error_type": getattr(exc, "error_type", type(exc).__name__)}
+                failure = {"type": "error", "content": str(exc),
+                           "error_type": getattr(exc, "error_type", type(exc).__name__)}
+                if "max_retries" in context:
+                    failure["status_code"] = _exception_status_code(exc)
+                yield failure
                 return
             retry_number = attempt_index + 1
             retry_after = _retry_after_seconds(exc)
@@ -316,8 +320,8 @@ def retry_model_api_stream(stream_factory, request_context=None):
                 "attempt": retry_number,
                 "request_attempt": attempt_index + 1,
                 "next_request_attempt": attempt_index + 2,
-                "max_request_attempts": MODEL_API_TRANSIENT_MAX_RETRIES + 1,
-                "max_retries": MODEL_API_TRANSIENT_MAX_RETRIES,
+                "max_request_attempts": max_retries + 1,
+                "max_retries": max_retries,
                 "reason": str(exc),
                 "delay_seconds": delay_seconds,
             }

@@ -227,6 +227,11 @@ else {
         if (failure) throw new Error(failure);
         return {opened:true};
       }
+      if (method === 'library.reveal' && params.source === 'local') {
+        const item = await backend.call('library.locate', params);
+        shell.showItemInFolder(item.path);
+        return {revealed: true};
+      }
       if (method === 'file.external') {
         const file = await backend.call('file.describe', params);
         return shell.openPath(file.path);

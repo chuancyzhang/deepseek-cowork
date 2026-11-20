@@ -631,7 +631,17 @@ class TencentDocsProvider(McpKnowledgeProvider):
         super().cancel_login()
         self._pending_auth = None
 
+    @staticmethod
+    def _can_upload(tools, collection, nested=False):
+        needed = {"manage.pre_import", "manage.async_import", "manage.import_progress"}
+        if collection != PERSONAL:
+            needed.add("manage.move_file_to_space")
+        elif nested:
+            needed.add("manage.move_file")
+        return needed <= tools.keys()
+
     def catalog(self, scope):
+        tools = self.schemas(self.identity(scope))
         spaces, page = [], 0
         while True:
             data = self.call(scope, "query_space_list", {"num": page})
@@ -641,8 +651,11 @@ class TencentDocsProvider(McpKnowledgeProvider):
             page += 1
             if page >= 1000:
                 raise KnowledgeError("pagination_limit", "空间列表过多，请缩小范围。")
-        return {"mine": [{"id": PERSONAL, "name": "个人文件"}],
-                "others": [{"id": str(s["space_id"]), "name": s["title"]} for s in spaces],
+        return {"mine": [{"id": PERSONAL, "name": "个人文件", "writeable": self._can_upload(tools, PERSONAL),
+                          "nested_writeable": self._can_upload(tools, PERSONAL, nested=True)}],
+                "others": [{"id": str(s["space_id"]), "name": s["title"],
+                            "writeable": self._can_upload(tools, str(s["space_id"])) and s.get("writeable") is not False}
+                           for s in spaces],
                 "shared": [], "organizations": []}
 
     def children(self, scope, collection, parent="", page=1):
@@ -674,6 +687,12 @@ class TencentDocsProvider(McpKnowledgeProvider):
         result = self.call(scope, "get_content", {"file_id": item_id}, cancelled)
         result.update(title=info.get("title", ""), url=info.get("url", ""))
         return result
+
+    def upload(self, scope, path, kb_id, folder=""):
+        tools = self.schemas(self.identity(scope))
+        if not self._can_upload(tools, kb_id, bool(folder)):
+            raise KnowledgeError("unsupported", "当前账号无法上传到所选目录，请在腾讯文档中处理。")
+        return super().upload(scope, path, kb_id, folder)
 
     def perform_upload(self, scope, task, size, md5):
         name = os.path.basename(task["path"])
@@ -967,7 +986,9 @@ class LexiangProvider(McpKnowledgeProvider):
             if not identifier:
                 raise KnowledgeError("invalid_response", "知识库列表缺少标识。")
             shared.append({"id": str(identifier), "name": space.get("name") or space.get("title") or str(identifier),
-                           "organization_id": team_id})
+                           "organization_id": team_id,
+                           "writeable": {"file_apply_upload", "file_commit_upload"} <= schemas.keys()
+                           and space.get("writeable") is not False})
         return {"mine": [], "others": [], "shared": shared, "organizations": list(organizations.values())}
 
     def root(self, scope, collection):
@@ -984,7 +1005,7 @@ class LexiangProvider(McpKnowledgeProvider):
         if item.get("entry_type"):
             normalized["type"] = item["entry_type"]
         normalized["updated_at"] = item.get("updated_at") or item.get("edited_at")
-        return super()._document(scope, normalized, collection)
+        return {**super()._document(scope, normalized, collection), "has_children": item.get("has_children") is True}
 
     def children(self, scope, collection, parent="", page=1):
         values, more = self._paged(scope, "entry_list_children", {"parent_id": parent or self.root(scope, collection)}, "entries", page)

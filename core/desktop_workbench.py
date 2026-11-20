@@ -287,17 +287,29 @@ class DesktopFiles:
         if method == "workspace.attach":
             root = self.workspace(cid) / "attachments"
             root.mkdir(exist_ok=True)
+            sources = [Path(source_name).resolve() for source_name in p["paths"]]
+            if any(not source.is_file() or source.stat().st_size > 50 * 1024 * 1024 for source in sources):
+                raise ValueError("附件不存在或超过 50 MiB。")
             result = []
-            for source_name in p["paths"]:
-                source = Path(source_name).resolve()
-                if not source.is_file() or source.stat().st_size > 50 * 1024 * 1024:
-                    raise ValueError("附件不存在或超过 50 MiB。")
-                target = root / (uuid.uuid4().hex[:8] + "-" + source.name)
-                with source.open("rb") as src, target.open("xb") as dest:
-                    shutil.copyfileobj(src, dest)
-                    dest.flush()
-                    os.fsync(dest.fileno())
-                result.append({"name": source.name, "path": str(target), "size": target.stat().st_size})
+            created = []
+            try:
+                for source in sources:
+                    target = root / (uuid.uuid4().hex[:8] + "-" + source.name)
+                    with source.open("rb") as src, target.open("xb") as dest:
+                        created.append(target)
+                        shutil.copyfileobj(src, dest)
+                        dest.flush()
+                        os.fsync(dest.fileno())
+                    result.append({"name": source.name, "path": str(target), "size": target.stat().st_size})
+            except OSError as exc:
+                for target in created:
+                    try:
+                        target.unlink(missing_ok=True)
+                    except OSError:
+                        log.warning("attachment_cleanup_failed session=%s", cid)
+                log.warning("attachment_batch_failed session=%s cause=%s", cid, type(exc).__name__)
+                raise ValueError("添加附件未完成，请确认所选文件仍可访问后重试。") from None
+            log.info("attachment_batch_completed session=%s count=%s", cid, len(result))
             return result
         if method == "workspace.create":
             path = self.checked_file(cid, p.get("name") or "未命名.md")

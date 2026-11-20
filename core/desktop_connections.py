@@ -9,8 +9,9 @@ from core.team_spaces import TeamSpaceClient
 
 class Connections:
     methods = frozenset({"library.status", "library.select", "library.login", "library.authorize", "library.confirm",
-        "library.logout", "library.catalog", "library.children", "library.search", "library.read", "library.read_result", "library.reference",
+        "library.logout", "library.catalog", "library.children", "library.search", "library.read", "library.read_result", "library.reference", "library.references",
         "library.upload", "library.uploads", "library.check_upload", "library.tenant", "library.import", "library.mkdir", "library.folder",
+        "library.rename", "library.trash", "library.trash_list", "library.restore", "library.locate",
         "enterprise.status", "enterprise.bind", "enterprise.providers", "enterprise.login", "enterprise.refresh", "enterprise.logout",
         "team.list", "team.detail", "team.collection", "team.object", "team.execute", "team.upload", "team.download", "team.conversation"})
 
@@ -27,21 +28,36 @@ class Connections:
             if action == "status":
                 return {"active": self.library.source, "sources": {name: provider.snapshot() for name, provider in self.library.providers.items()}}
             source = p.get("source") or self.library.source
+            entries = p["items"] if action == "references" else [p]
+            if not isinstance(entries, list) or not entries or any(not isinstance(item, dict) for item in entries):
+                raise ValueError("请选择可引用的资料。")
             if source == "local":
                 if action == "catalog":
                     return {"mine": self.local.projects(), "public": self.local.public()}
                 if action == "folder":
                     return self.local.folder(p)
+                if action == "locate":
+                    _, path = self.local.checked(p["collection"], p["item"])
+                    return {"path": str(path)}
                 if action == "mkdir":
                     return self.local.mkdir(p)
+                if action == "rename" and p.get("collection") == "public":
+                    return self.local.rename(p)
+                if action == "trash" and p.get("collection") == "public":
+                    return self.s.jobs.submit("移到资料库回收站", lambda cancelled, progress: self.local.trash(p, cancelled, progress))
+                if action == "trash_list":
+                    return self.local.trash_list()
+                if action == "restore":
+                    return self.s.jobs.submit("还原公共资料", lambda cancelled, progress: self.local.restore(p, cancelled, progress))
                 if action == "import":
                     return self.s.jobs.submit("添加公共资料", lambda cancelled, progress: self.local.import_files(p, cancelled, progress))
                 if action in {"children", "search"}:
                     return self.s.jobs.submit("读取本地资料", lambda cancelled, progress: self.local.files(p, cancelled, progress))
                 if action == "read":
                     return self.local.read(p)
-                if action == "reference":
-                    return {"source": "local", **self.local.describe(p)}
+                if action in {"reference", "references"}:
+                    refs = [{"source": "local", **self.local.describe(entry)} for entry in entries]
+                    return refs[0] if action == "reference" else refs
                 raise ValueError("本地资料使用项目目录，无需连接或上传。")
             provider = self.library.provider(source)
             if action == "select":
@@ -79,20 +95,36 @@ class Connections:
                         or result.get("scope", {}).get("generation") != scope.get("generation")):
                     raise ValueError("预览尚未完成或资料库账号已改变，请重新打开文件。")
                 return {key: result[key] for key in ("path", "name", "fingerprint", "payload")}
-            if action == "reference":
-                ref = provider.reference(scope, p["collection"], p["title"], p.get("item", ""))
-                self.library.store.visit(ref)
-                return ref
+            if action in {"reference", "references"}:
+                refs = [provider.reference(scope, entry["collection"], entry["title"], entry.get("item", "")) for entry in entries]
+                for ref in refs:
+                    self.library.store.visit(ref)
+                return refs[0] if action == "reference" else refs
             def operation(cancelled, progress):
                 if action == "catalog":
+                    if source != "weknora" and p.get("refresh"):
+                        provider.clear_cache()
                     return provider.catalog(scope)
                 if action == "children":
                     if source == "weknora":
-                        return provider.children(scope, p["collection"], p.get("parent", ""), p.get("page", 1))
+                        result = provider.children(scope, p["collection"], p.get("parent", ""), p.get("page", 1))
+                        url = provider.reference(scope, p["collection"], "")["url"]
+                        return {**result, "items": [{**item, "knowledge_base_id": p["collection"], "url": url} for item in result["items"]]}
                     return provider.children(scope, p["collection"], p.get("parent", ""), p.get("page", 1))
                 if action == "search":
                     if source == "weknora":
-                        return provider.tool(scope, "search", {"query": p["query"]}, cancelled=cancelled.is_set)
+                        args = {"query": p["query"]}
+                        if p.get("collection"):
+                            args["kb_ids"] = [p["collection"]]
+                        matches = provider.tool(scope, "search", args, cancelled=cancelled.is_set)["results"]
+                        # Search is ranked per chunk; picking or opening acts on the source document.
+                        documents = {}
+                        for item in matches:
+                            identifier = item["knowledge_id"]
+                            title = item.get("knowledge_title") or item.get("title") or item.get("file_name") or identifier
+                            base = item["knowledge_base_id"]
+                            documents.setdefault((base, identifier), {**provider.reference(scope, base, title, identifier), "id": identifier})
+                        return list(documents.values())
                     return provider.search(scope, p["query"], cancelled=cancelled.is_set)
                 if action == "read":
                     from core.library_preview import weknora_preview, document_content, check_cancelled

@@ -1,3 +1,7 @@
+export type LibrarySelection = {collection: string; item: string; title: string};
+export const libraryItemId = (item: any) => String(item.item_id ?? item.id ?? item.knowledge_id ?? item.folder_path ?? '');
+export const libraryItemKey = (item: any) => JSON.stringify([item.collection_id ?? item.knowledge_base_id ?? '', libraryItemId(item), Boolean(item.is_folder)]);
+
 // Resource identity and navigation memberships are separate: dedupe within a view.
 export function libraryCollections(catalog: any, category = 'all') {
   const organizations = new Map((catalog?.organizations || []).map((item:any) => [String(item.id), item.name]));
@@ -23,5 +27,5 @@ export function librarySpaces(catalog: any) {
   return [...spaces.values()];
 }
 export function appendLibraryRows(previous: any[], items: any[]) {
-  return [...new Map([...previous, ...items].map(item => [String(item.id || item.item_id), item])).values()];
+  return [...new Map([...previous, ...items].map(item => [libraryItemKey(item), item])).values()];
 }

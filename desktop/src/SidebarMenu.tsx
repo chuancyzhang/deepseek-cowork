@@ -4,15 +4,17 @@ import type {SidebarGroup} from './types';
 
 export type MenuAnchor = {x: number; below: number; above: number; trigger: HTMLButtonElement | null};
 
-export default function SidebarMenu({anchor, first, last, groups, currentGroup, onMove, onNew, onClose}: {
+export default function SidebarMenu({anchor, first, last, groups, currentGroup, onMove, onNew, onClose, label = '条目操作', className = ''}: {
   anchor: MenuAnchor;
   first: ReactNode;
   last?: ReactNode;
   groups?: SidebarGroup[];
   currentGroup?: string;
-  onMove: (id: string | null) => void;
-  onNew: () => void;
+  onMove?: (id: string | null) => void;
+  onNew?: () => void;
   onClose: () => void;
+  label?: string;
+  className?: string;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const main = useRef<HTMLDivElement>(null);
@@ -96,7 +98,7 @@ export default function SidebarMenu({anchor, first, last, groups, currentGroup, 
   }
 
   return <div ref={root} onKeyDown={key}>
-    <div ref={main} className="context-menu sidebar-context-menu" role="menu" aria-label="条目操作">
+    <div ref={main} className={'context-menu sidebar-context-menu ' + className} role="menu" aria-label={label}>
       {first}
       {groups && <button ref={moveButton} role="menuitem" aria-haspopup="menu" aria-expanded={open}
         onPointerEnter={event => {if (event.pointerType === 'mouse') setOpen(true);}} onClick={enterSubmenu}>
@@ -105,10 +107,10 @@ export default function SidebarMenu({anchor, first, last, groups, currentGroup, 
       {last}
     </div>
     {open && groups && <div ref={submenu} className="context-menu sidebar-context-menu sidebar-group-menu" role="menu" aria-label="移到分组">
-      {groups.map(group => <button key={group.id} role="menuitemradio" aria-checked={currentGroup === group.id} title={group.name} onClick={() => onMove(group.id)}>
+      {groups.map(group => <button key={group.id} role="menuitemradio" aria-checked={currentGroup === group.id} title={group.name} onClick={() => onMove?.(group.id)}>
         <span>{group.name}</span>{currentGroup === group.id && <Check size={14}/>}
       </button>)}
-      {currentGroup && <button role="menuitem" onClick={() => onMove(null)}>移出分组</button>}
+      {currentGroup && <button role="menuitem" onClick={() => onMove?.(null)}>移出分组</button>}
       <button role="menuitem" className={groups.length ? 'sidebar-new-group-option' : undefined} onClick={onNew}><FolderPlus size={15}/>新建分组…</button>
     </div>}
   </div>;

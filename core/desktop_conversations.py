@@ -303,6 +303,15 @@ class ConversationActions:
                     patch = {"archived": True, "deleted_at": int(time.time())}
                 else:
                     patch = {key: copy.deepcopy(value) for key, value in p.get("value", {}).items() if key in PREFERENCE_KEYS}
+                    if "append_knowledge_refs" in p:
+                        additions = p["append_knowledge_refs"]
+                        if not isinstance(additions, list) or any(not isinstance(ref, dict) for ref in additions):
+                            raise ValueError("请选择可引用的资料。")
+                        refs = list(self.record(cid)["meta"].get("knowledge_refs") or [])
+                        for ref in additions:
+                            if ref not in refs:
+                                refs.append(copy.deepcopy(ref))
+                        patch["knowledge_refs"] = refs
                     if "mode" in patch:
                         from core.mode_plugins import require_mode
                         from core.clarify_mode import normalize_run_mode

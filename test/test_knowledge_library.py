@@ -581,6 +581,7 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
                 self.assertEqual(item["is_folder"], kind == "folder")
                 self.assertEqual(item["readable"], kind != "folder")
                 self.assertEqual(item["item_type"], kind)
+                self.assertEqual(item["has_children"], has_children)
                 self.assertEqual(item["updated_at"], "2026-09-23T08:00:00Z")
 
     def test_lexiang_team_catalog_and_cursor_pages_match_live_contract(self):
@@ -742,6 +743,25 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
         self.assertEqual(task["status"], "saved")
         self.assertEqual(sum(name == "manage.async_import" for name, _ in self.remote.calls), 1)
         self.assertCode("duplicate_upload", lambda: self.upload(self.tencent))
+
+    def test_tencent_upload_requires_tools_for_the_selected_destination(self):
+        from core.knowledge_sources import PERSONAL
+
+        scope = self.tencent.snapshot()
+        schemas = self.tencent.schemas(self.tencent.identity(scope))
+        discovered = {name: schema for name, schema in schemas.items() if not name.startswith("manage.move_file")}
+        with patch.object(self.tencent, "schemas", return_value=discovered):
+            catalog = self.tencent.catalog(scope)
+            self.assertTrue(catalog["mine"][0]["writeable"])
+            self.assertFalse(catalog["mine"][0]["nested_writeable"])
+            self.assertFalse(catalog["others"][0]["writeable"])
+            self.assertCode("unsupported", lambda: self.upload(self.tencent))
+            self.assertFalse(any(name == "manage.pre_import" for name, _ in self.remote.calls))
+            self.assertEqual(self.store.uploads(), [])
+            path = os.path.join(self.temp.name, "personal.md")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("个人资料")
+            self.assertEqual(self.tencent.upload(scope, path, PERSONAL)["status"], "processing")
 
     def test_tencent_completed_personal_import_invalidates_directory_cache(self):
         from core.knowledge_sources import PERSONAL

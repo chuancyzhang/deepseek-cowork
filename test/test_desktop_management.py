@@ -726,4 +726,113 @@ def test_public_library_import_conflicts_and_scope(tmp_path):
     for item in ('../escape',str(tmp_path)):
         with pytest.raises(ValueError): library.folder({'collection':'public','parent':item})
     with pytest.raises(ValueError): library.mkdir({'collection':'public','name':'../escape'})
+    library.mkdir({'collection':'public','name':'.参考资料'})
+    entries = library.files({'collection':'public'}, threading.Event(), Mock())['items']
+    assert any(entry['title'] == '.参考资料' for entry in entries)
     assert library.projects()==[]
+
+
+def test_public_library_recycle_preserves_batches_across_restart(tmp_path):
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    import pytest
+    from core.local_library import LocalLibrary
+
+    service = SimpleNamespace(config=SimpleNamespace(data_dir=str(tmp_path)))
+    library = LocalLibrary(service)
+    public = library.public()
+    root = Path(public["path"])
+    folder = Path(library.mkdir({"collection": "public", "name": "资料"})["path"])
+    (folder / "保留.md").write_text("child", encoding="utf-8")
+    source = root / "old.log"
+    source.write_text("source", encoding="utf-8")
+
+    def reference(path):
+        return {"item": str(path), "revision": library.row(public, path)["revision"]}
+
+    moved = library.rename({"name": "说明.log", **reference(source)})
+    file = Path(moved["path"])
+    assert not source.exists() and file.read_text(encoding="utf-8") == "source"
+    assert moved["editable"]
+    with pytest.raises(ValueError, match="有效"):
+        library.rename({"name": "CON.md", **reference(file)})
+    with pytest.raises(ValueError, match="同名"):
+        library.rename({"name": folder.name, **reference(file)})
+    stale = reference(file)
+    file.write_text("new contents", encoding="utf-8")
+    with pytest.raises(ValueError, match="已变化"):
+        library.trash({"items": [stale]}, threading.Event(), Mock())
+    with pytest.raises(ValueError):
+        library.trash({"items": [{"item": "..", "revision": "other"}]}, threading.Event(), Mock())
+
+    result = library.trash({"items": [reference(file), reference(folder)]}, threading.Event(), Mock())
+    assert result["moved"] == [str(file), str(folder)] and not result["failed"]
+    assert not file.exists() and not folder.exists()
+    restarted = LocalLibrary(service)
+    batches = restarted.trash_list()
+    assert [(batch["id"], len(batch["items"])) for batch in batches] == [(result["id"], 2)]
+    file.write_text("another file", encoding="utf-8")
+    with pytest.raises(ValueError, match="原位置已有"):
+        restarted.restore({"id": result["id"]}, threading.Event(), Mock())
+    assert not folder.exists() and file.read_text(encoding="utf-8") == "another file"
+    file.rename(root / "another.log")
+    restored = restarted.restore({"id": result["id"]}, threading.Event(), Mock())
+    assert restored["restored"] == [str(file), str(folder)] and not restored["failed"]
+    assert file.read_text(encoding="utf-8") == "new contents"
+    assert (folder / "保留.md").read_text(encoding="utf-8") == "child"
+    assert restarted.trash_list() == []
+
+
+def test_public_library_rejects_redirected_library_root(tmp_path):
+    import os
+    import subprocess
+    from types import SimpleNamespace
+    from core.local_library import LocalLibrary
+
+    data = tmp_path / "data"
+    data.mkdir()
+    outside = tmp_path / "external"
+    outside.mkdir()
+    link = data / "library"
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], check=True, capture_output=True)
+    else:
+        link.symlink_to(outside, target_is_directory=True)
+    try:
+        service = SimpleNamespace(config=SimpleNamespace(data_dir=str(data)))
+        library = LocalLibrary(service)
+        with pytest.raises(ValueError, match="公共资料位置"):
+            library.public()
+        with pytest.raises(ValueError, match="回收站位置"):
+            library.trash_list()
+        assert not list(outside.iterdir())
+    finally:
+        if link.is_junction():
+            link.rmdir()
+        else:
+            link.unlink()
+
+
+def test_weknora_desktop_search_uses_document_identity_and_selected_base():
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from core.desktop_connections import Connections
+
+    provider = Mock()
+    snapshot = {"source": "weknora"}
+    provider.snapshot.return_value = snapshot
+    provider.tool.return_value = {"results": [
+        {"id": "chunk-a", "knowledge_base_id": "base", "knowledge_id": "file", "knowledge_title": "原文"},
+        {"id": "chunk-b", "knowledge_base_id": "base", "knowledge_id": "file", "knowledge_title": "原文"},
+    ]}
+    provider.reference.side_effect = lambda scope, base, title, item: {
+        "collection_id": base, "item_id": item, "title": title,
+    }
+    adapter = Connections.__new__(Connections)
+    adapter.library = SimpleNamespace(provider=lambda _: provider)
+    adapter.s = SimpleNamespace(jobs=SimpleNamespace(submit=lambda _, run: run(threading.Event(), Mock())))
+    rows = adapter.dispatch("library.search", {"source": "weknora", "query": "词", "collection": "base"})
+    assert rows == [{"collection_id": "base", "item_id": "file", "title": "原文", "id": "file"}]
+    assert provider.tool.call_args.args == (snapshot, "search", {"query": "词", "kb_ids": ["base"]})

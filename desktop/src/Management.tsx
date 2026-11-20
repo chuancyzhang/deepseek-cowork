@@ -4,6 +4,7 @@ import { rpc } from './managementApi';
 import type { Settings } from './types';
 import {useHostField} from './host/context';
 import {prepareFormDraft, publicFormDraft, restoreFormRecovery, sameFormValue, type FormDraft} from './host/forms';
+import type { LibrarySelection } from './management/libraryCatalog';
 const Capabilities = lazy(() => import('./management/Capabilities'));
 const Preferences = lazy(() => import('./management/Preferences'));
 const Library = lazy(() => import('./management/Library'));
@@ -25,7 +26,7 @@ const groups: Record<string, [string, string, any][]> = {
 
 export default function Management({ returnToChat, route, settings, updateSettings, openConversation, onReference, onError, confirm, registerLeave }: {
   returnToChat:()=>void; route: string; settings: Settings | null; updateSettings: (value: Settings) => void; openConversation: (id: string) => void;
-  onReference: (ref: any) => Promise<void>; onError: (message: string) => void;
+  onReference: (source: string, items: LibrarySelection[]) => Promise<void>; onError: (message: string) => void;
   confirm: (title: string, detail: string, choices: string[]) => Promise<number>; registerLeave: (callback: () => Promise<boolean>) => void;
 }) {
   const tabs = groups[route] || groups.settings;
@@ -35,7 +36,9 @@ export default function Management({ returnToChat, route, settings, updateSettin
   useEffect(() => window.cowork.onEvents(events => {
     if (events.some(event => event.event === 'settings_changed')) void rpc('settings.get').then(updateSettings).catch(error => onError(error.message));
   }), [updateSettings, onError]);
-  const leave = useCallback(async () => !dirty || await confirm('保留未保存的编辑？', '编辑草稿会保留在本机，下次进入可以继续。只有点击保存才会修改配置。', ['继续编辑', '保留草稿并离开']) === 1, [dirty, confirm]);
+  const leave = useCallback(async () => !dirty || (route === 'library'
+    ? await confirm('保留未完成的命名？', '返回资料库后可继续命名。', ['继续编辑', '保留并离开']) === 1
+    : await confirm('保留未保存的编辑？', '编辑草稿会保留在本机，下次进入可以继续。只有点击保存才会修改配置。', ['继续编辑', '保留草稿并离开']) === 1), [dirty, confirm, route]);
   useEffect(() => { registerLeave(leave); return () => registerLeave(async () => true); }, [leave, registerLeave]);
   const common = { onError, confirm, onDirty: setDirty };
   return <div className={'management-layout ' + (route === 'capabilities' ? 'capabilities-layout' : route === 'library' ? 'library-layout' : '')}>

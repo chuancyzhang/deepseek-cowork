@@ -1,5 +1,6 @@
 import {useCallback,useEffect,useLayoutEffect,useRef,useState,useMemo} from 'react';
 import type {Attachment,Conversation,FileSession,HostEvent,Message,Plugin,ProjectAction,ProjectRecord,Run,RuntimeEvent,Settings,SidebarMethod,SidebarSnapshot} from '../types';
+import type {LibrarySelection} from '../management/libraryCatalog';
 import {MessageProjection,isActive,mergeEvents,unwrapEvents,messageText,interactionRecords} from '../runtime';
 import {Drafts,type Draft} from '../drafts';
 import {reviewId} from '../reviews';
@@ -598,27 +599,33 @@ export function useWorkbenchController() {
     if (selectedId.current !== id) return;
     changeWorkspace({selected: 'library', libraryOpen: true}); setWorkspaceOpen(true);
   }
-  async function addLibraryReference(ref: any, targetId?: string) {
+  async function addLibraryReference(source: string, items: LibrarySelection[], targetId?: string) {
     const id = targetId || await ensureConversation();
-    if (ref.source === 'local') {
-      const added = await call<Attachment[]>('workspace.attach', {conversation_id: id, paths: [ref.path]});
+    const refs = await call<any[]>('library.references', {source, items});
+    if (source === 'local') {
+      const added = await call<Attachment[]>('workspace.attach', {conversation_id: id, paths: refs.map(ref => ref.path)});
       const value = drafts.get(id).value;
       drafts.change(id, {...value, attachments: [...value.attachments, ...added.filter(file => !value.attachments.some(old => old.path === file.path))]});
       if (selectedId.current === id) applyDraft(drafts.get(id).value, false);
       await drafts.save(id);
       return;
     }
-    const target = await call<Conversation>('conversation.get', {conversation_id: id});
-    await preferences({knowledge_refs: [...(target.meta.knowledge_refs || []).filter((item: any) => JSON.stringify(item) !== JSON.stringify(ref)), ref]}, id);
+    const result = await call('conversation.preferences', {conversation_id: id, append_knowledge_refs: refs});
+    receiveConversation(host, id, previous => previous ? {...previous, meta: {...previous.meta, ...result.meta}} : previous);
+    await refreshList();
   }
   async function activateFile(path: string) {
     try { await saveView(); setActiveFile(path); changeWorkspace({selected: 'file:' + path}); } catch (failure) { error((failure as Error).message); }
   }
-  async function openFile(path: string) {
+  async function openFile(path: string, edit = false) {
     const id = selectedId.current;
     try { await saveView(); } catch (failure) { error((failure as Error).message); return; }
     if (selectedId.current !== id) return;
-    if (editors.some(e => e.file.path === path)) { setActiveFile(path); changeWorkspace({selected: 'file:' + path, ...(!workspaceView.filesPinned ? {filesOpen: false} : {})}); setWorkspaceOpen(true); return; }
+    const active = editorsRef.current.find(item => item.file.path === path);
+    if (active) {
+      if (edit && active.file.payload.kind === 'html') host.set('file-source:' + active.file.id, true);
+      setActiveFile(path); changeWorkspace({selected: 'file:' + path, ...(!workspaceView.filesPinned ? {filesOpen: false} : {})}); setWorkspaceOpen(true); return;
+    }
     try {
       const file = await call<FileSession>('file.open', { conversation_id: id, path });
       if (selectedId.current !== id) return;
@@ -629,6 +636,10 @@ export function useWorkbenchController() {
       const plugin = await call<Plugin>('plugins.load', { id: 'cowork.writing' });
       if (selectedId.current !== id) return;
       const text = file.payload.text ?? file.payload.content ?? '';
+      if (edit && !file.payload.read_only) {
+        file.payload.start_edit = true;
+        if (file.payload.kind === 'html') host.set('file-source:' + file.id, true);
+      }
       setEditors(previous => [...previous, { file, text, saved: text, plugin }]); setActiveFile(file.path); changeWorkspace({selected: 'file:' + file.path, ...(!workspaceView.filesPinned ? {filesOpen: false} : {})}); setWorkspaceOpen(true);
     } catch (failure) { if (selectedId.current === id) error((failure as Error).message); }
   }

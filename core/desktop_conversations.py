@@ -1,6 +1,7 @@
 """Project and history actions on the existing SQLite conversation ledger."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import copy
 from contextlib import suppress
 import hashlib
@@ -8,6 +9,7 @@ import json
 from datetime import datetime
 import logging
 from pathlib import Path
+import threading
 import time
 import uuid
 
@@ -30,6 +32,26 @@ class ConversationActions:
     def __init__(self, service):
         self.service = service
         self.storage, self.store, self.config = service.storage, service.store, service.config
+        self._search_lock = threading.Lock()
+        self._search_stop = threading.Event()
+        self._search_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sidebar-search")
+        self._search_index = None
+
+    def close(self):
+        with self._search_lock:
+            self._search_stop.set()
+        self._search_worker.shutdown(wait=True, cancel_futures=True)
+
+    def _prepare_search(self, *, retry):
+        with self._search_lock:
+            if self._search_stop.is_set():
+                raise RuntimeError("后台正在关闭，请重新打开应用后搜索。")
+            task = self._search_index
+            if task is None or (retry and task.done() and task.exception() is not None):
+                log.info("sidebar_search_prepare_started retry=%s", task is not None)
+                task = self._search_worker.submit(self.storage.prepare_sidebar_search, self._search_stop.is_set)
+                self._search_index = task
+            return task
 
     def subagent_control(self, session_id, operation, **data):
         return self.service.request_agent({**data, "action": "subagent_control", "session_id": session_id,
@@ -280,6 +302,12 @@ class ConversationActions:
                 return {"saved": saved}
         if method == "conversation.search":
             query = str(p.get("query") or "")
+            if query.strip():
+                deferred = p.get("defer_index") is True
+                preparation = self._prepare_search(retry=not deferred or p.get("retry_index") is True)
+                if deferred and not preparation.done():
+                    return {"status": "preparing"}
+                preparation.result()
             identities = self.storage.search_conversations(query, limit=min(200, int(p.get("limit", 50))))
             matched_paths = {self.config._project_key(folder) for project in self.config.get_projects()
                              if query.casefold() in project["name"].casefold() for folder in project_paths(project)}

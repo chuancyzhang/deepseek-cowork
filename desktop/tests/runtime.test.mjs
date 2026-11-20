@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { contextRecoveryForRun, displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, turnTimings, elapsedTime, thinkingTime, interactionRecords, isUserStopped, toolErrorText } from '../src/runtime.ts';
+import { contextRecoveryForRun, displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, conversationTime, turnTimings, elapsedTime, thinkingTime, interactionRecords, isUserStopped, toolErrorText } from '../src/runtime.ts';
 import { UsageProjection, generationRates } from '../src/usageMetrics.ts';
 
 const providerEvent = (run_id, type, created_at, status) => ({
@@ -134,6 +134,15 @@ test('missing or invalid message time is never replaced with the current date', 
   for (const value of [undefined, null, 0, -1, NaN, Infinity, 1e20, '1700000000']) assert.equal(messageTime(value), null);
   assert.equal(messageTime(1700000000).iso, '2023-11-14T22:13:20.000Z');
   assert.equal(displayMessages([], [{type:'content',run_id:'r',delta:'旧记录'}])[0].created_at, undefined);
+});
+
+test('sidebar update time uses calendar days across a year boundary', () => {
+  const now = new Date(2026, 0, 1, 10);
+  const seconds = (...parts) => new Date(...parts).getTime() / 1000;
+  assert.equal(conversationTime(seconds(2026, 0, 1, 9, 5), now).label, '09:05');
+  assert.equal(conversationTime(seconds(2025, 11, 31, 21), now).label, '昨天');
+  assert.equal(conversationTime(seconds(2025, 11, 30, 15), now).label, '12月30日');
+  assert.equal(conversationTime(0, now), null);
 });
 
 test('event cursor is scoped by run and duplicate batches are harmless', () => {

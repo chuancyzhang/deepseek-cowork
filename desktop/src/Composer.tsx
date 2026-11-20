@@ -26,8 +26,9 @@ export default function Composer(props: Props) {
   const [pending, setPending] = useState<{skills: string[]; expert: any; references: string[]} | null>(null), [mentionStart, setMentionStart] = useState(-1), [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState<string[]>([]);
-  const [placement, setPlacement] = useState({above:true, height:420, right:0});
+  const [placement, setPlacement] = useState({above:true, height:420});
   const root = useRef<HTMLDivElement>(null), latest = useRef(props); latest.current = props;
+  const modelTrigger = useRef<HTMLButtonElement>(null), modelPanel = useRef<HTMLDivElement>(null);
   const previousId = useRef(conversation?.id), hover = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const lists = useRef(new Map<string, Promise<any[]>>());
   const prefs = conversation?.meta || {}, refs: any[] = prefs.conversation_refs || [], knowledge: any[] = prefs.knowledge_refs || [];
@@ -46,18 +47,60 @@ export default function Composer(props: Props) {
   useEffect(() => { if (previousId.current) close(); previousId.current = conversation?.id; }, [conversation?.id]);
   useLayoutEffect(() => { if (textarea.current) { textarea.current.style.height = 'auto'; textarea.current.style.height = Math.min(180, Math.max(70, textarea.current.scrollHeight)) + 'px'; } }, [text, textarea]);
   useLayoutEffect(() => {
-    if (!menu || !root.current) return;
+    if (!menu || menu === 'model' || !root.current) return;
     const place = () => {const box = root.current!.getBoundingClientRect(); const above = Math.max(100, box.top - 60), below = Math.max(100, innerHeight - box.bottom - 12); const up = above >= 240 || above >= below;
-      const trigger = root.current!.querySelector('.model-trigger')?.getBoundingClientRect();
-      const right = trigger ? Math.max(0, Math.min(box.width - Math.min(320, box.width), box.right - trigger.right)) : 0;
-      setPlacement({above:up, height:Math.min(menu === 'model' ? 420 : 500, up ? above : below), right});};
+      setPlacement({above:up, height:Math.min(500, up ? above : below)});};
     place(); const observer = new ResizeObserver(place); observer.observe(root.current); window.addEventListener('resize',place);
     return () => {observer.disconnect(); window.removeEventListener('resize',place);};
   }, [menu]);
-  useEffect(() => {if (menu === 'model') root.current?.querySelector<HTMLInputElement>('[aria-label="搜索对话模型"]')?.focus();}, [menu]);
+  useLayoutEffect(() => {
+    const composer = root.current, trigger = modelTrigger.current, panel = modelPanel.current;
+    if (menu !== 'model' || !composer || !trigger || !panel) return;
+    const surface = composer.closest('.conversation');
+    const place = () => {
+      const anchor = trigger.getBoundingClientRect(), area = surface?.getBoundingClientRect();
+      const margin = 8, gap = 6;
+      const inset = surface ? parseFloat(getComputedStyle(surface).paddingTop) : 0;
+      const top = Math.max(0, (area?.top ?? 0) + inset) + margin;
+      const bottom = Math.min(innerHeight, area?.bottom ?? innerHeight) - margin;
+      const left = Math.max(0, area?.left ?? 0) + margin;
+      const right = Math.min(innerWidth, area?.right ?? innerWidth) - margin;
+      const above = anchor.top - gap - top, below = bottom - anchor.bottom - gap;
+      const upwards = above >= 300 || above >= below;
+      const height = Math.min(420, Math.max(0, bottom - top), Math.max(208, upwards ? above : below));
+      const width = Math.max(0, Math.min(320, composer.clientWidth, right - left));
+      panel.style.width = width + 'px';
+      panel.style.left = Math.max(left, Math.min(anchor.right, right) - width) + 'px';
+      panel.style.top = upwards ? 'auto' : Math.max(top, Math.min(bottom - height, anchor.bottom + gap)) + 'px';
+      panel.style.bottom = upwards ? innerHeight - Math.min(bottom, Math.max(top + height, anchor.top - gap)) + 'px' : 'auto';
+      panel.style.maxHeight = height + 'px';
+    };
+    place();
+    panel.querySelector<HTMLInputElement>('input')?.focus({preventScroll:true});
+    const observer = new ResizeObserver(place);
+    observer.observe(composer);
+    if (surface) observer.observe(surface);
+    surface?.addEventListener('scroll', place);
+    window.addEventListener('resize', place);
+    return () => {
+      observer.disconnect();
+      surface?.removeEventListener('scroll', place);
+      window.removeEventListener('resize', place);
+    };
+  }, [menu]);
   useEffect(() => {
     if (menu !== 'model') return;
-    const frame = requestAnimationFrame(() => root.current?.querySelector('.model-menu [aria-pressed="true"]')?.scrollIntoView({block:'nearest'}));
+    const frame = requestAnimationFrame(() => {
+      const list = modelPanel.current?.querySelector('.picker-list');
+      const selected = list?.querySelector('[aria-pressed="true"]');
+      if (!list || !selected) return;
+      const box = list.getBoundingClientRect(), row = selected.getBoundingClientRect();
+      if (row.top < box.top || row.bottom > box.bottom) {
+        const heading = selected.previousElementSibling;
+        const start = heading?.classList.contains('model-group') ? heading.getBoundingClientRect().top : row.top;
+        list.scrollTop += (row.bottom - start <= box.height ? start : row.top) - box.top;
+      }
+    });
     return () => cancelAnimationFrame(frame);
   }, [menu, query, model?.id]);
   useEffect(() => {
@@ -113,7 +156,12 @@ export default function Composer(props: Props) {
     : section === 'variables' ? items.filter(item => item.kind === 'text') : items.filter(item => item.enabled !== false && item.source_kind !== 'core_builtin' && item.name.startsWith('mcp-server-') === (section === 'connectors'));
   function selected(item: any) { return section === 'conversations' ? (pending?.references || refs.map(ref => ref.session_id)).includes(item.id) : section === 'experts' ? ((pending?.expert || prefs.conversation_agent)?.id || '') === item.id : (pending?.skills || skills).includes(item.name); }
   const matching = list.filter(item => [item.name,item.display_name,item.title,item.description].some(part => String(part || '').toLocaleLowerCase().includes(query.toLocaleLowerCase())));
-  return <div ref={root} className={'composer-shell ' + (dragging ? 'dragging' : '')} onDragOver={event => {event.preventDefault(); setDragging(true);}} onDragLeave={event => {if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false);}} onDrop={event => {event.preventDefault(); setDragging(false); void importFiles([...event.dataTransfer.files]).catch(failure => error(failure.message));}} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); section && menu === 'add' ? setSection('') : close(); } }}>
+  return <div ref={root} className={'composer-shell ' + (dragging ? 'dragging' : '')} onDragOver={event => {event.preventDefault(); setDragging(true);}} onDragLeave={event => {if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false);}} onDrop={event => {event.preventDefault(); setDragging(false); void importFiles([...event.dataTransfer.files]).catch(failure => error(failure.message));}} onKeyDown={event => {
+    if (event.key !== 'Escape') return;
+    event.stopPropagation();
+    if (menu === 'model') modelTrigger.current?.focus({preventScroll:true});
+    section && menu === 'add' ? setSection('') : close();
+  }}>
     <div className="composer">
       {attachments.some(isImageAttachment) && conversation && <div className="image-attachments">{attachments.filter(isImageAttachment).map(file => <ImageAttachment key={conversation.id + ':' + file.path} cid={conversation.id} file={file} onOpen={props.openFile} onRemove={() => setAttachments(attachments.filter(item => item.path !== file.path))}/>)}</div>}
       {(skills.length > 0 || refs.length > 0 || knowledge.length > 0 || attachments.some(file => !isImageAttachment(file))) && <div className="composer-contexts">
@@ -138,11 +186,11 @@ export default function Composer(props: Props) {
         <button className="text-tool" title="选择专家" onClick={() => open('add','experts')}><UserRound size={14}/><span>{prefs.conversation_agent?.name || '专家'}</span></button>
         {prefs.mode === 'grilling' && <div className="mode-chip">{!active && <button aria-label="取消拷问模式" onClick={() => void applyPreference({mode: 'execution', grill_execution_confirmed: false})}><X size={12}/></button>}<button onClick={() => open('add','mode')}>拷问模式</button></div>}
         {props.creation && <div className="mode-chip"><button onClick={()=>open('add','mode')}>创造模式</button></div>}
-      </div><div className="composer-right"><button className="model-trigger" aria-expanded={menu === 'model'} aria-haspopup="dialog" title={model?.label || '选择对话模型'} onClick={() => menu === 'model' ? close() : open('model')}><span>{model?.label || '选择对话模型'}{prefs.reasoning_effort ? ' · ' + prefs.reasoning_effort : ''}</span><ChevronDown size={12}/></button><button className="send-button" title={active && !text.trim() && !attachments.length ? '停止任务' : '发送消息'} disabled={sending || conversation?.run?.status === 'stopping' || !active && !text.trim() && !attachments.length} onClick={() => void (active && !text.trim() && !attachments.length ? props.stop() : props.send()).catch(failure => error(failure.message))}>{sending ? <LoaderCircle className="spin" size={18}/> : active && !text.trim() && !attachments.length ? <Square size={15} fill="currentColor"/> : <ArrowUp size={20}/>}</button></div></div>
+      </div><div className="composer-right"><button ref={modelTrigger} className="model-trigger" aria-expanded={menu === 'model'} aria-haspopup="dialog" title={model?.label || '选择对话模型'} onClick={() => menu === 'model' ? close() : open('model')}><span>{model?.label || '选择对话模型'}{prefs.reasoning_effort ? ' · ' + prefs.reasoning_effort : ''}</span><ChevronDown size={12}/></button><button className="send-button" title={active && !text.trim() && !attachments.length ? '停止任务' : '发送消息'} disabled={sending || conversation?.run?.status === 'stopping' || !active && !text.trim() && !attachments.length} onClick={() => void (active && !text.trim() && !attachments.length ? props.stop() : props.send()).catch(failure => error(failure.message))}>{sending ? <LoaderCircle className="spin" size={18}/> : active && !text.trim() && !attachments.length ? <Square size={15} fill="currentColor"/> : <ArrowUp size={20}/>}</button></div></div>
     </div>
     {model?.chat_supported === false && <p className="composer-model-warning" role="alert">当前模型用于{model.purpose_label}。<button className="text-link" onClick={()=>open('model')}>请选择对话模型</button>，输入与附件会保留。</p>}
     {!props.home && <div className="composer-footer"><button title={prefs.workspace_dir || '聊天工作目录'} onClick={async () => {try {const path = await call<string | null>('dialog.workspace'); if (path) {const cid = await props.ensureConversation(); await call('conversation.workspace', {conversation_id: cid, path});}} catch (failure) {error((failure as Error).message);}}}><Folder size={13}/><span>工作目录 · {prefs.workspace_source === 'chat' || !prefs.workspace_dir ? '聊天工作目录' : prefs.workspace_dir.split(/[\\/]/).pop()}</span></button><span>Enter 发送 · Shift+Enter 换行</span></div>}
-    {menu && <div className={'composer-menu ' + menu + '-menu'} style={{maxHeight:placement.height, ...(['add','mention'].includes(menu) ? {height:Math.min(menu === 'mention' ? 350 : 324,placement.height)} : {}), ...(menu === 'model' ? {left:'auto',right:placement.right,maxWidth:'100%'} : {}), ...(placement.above ? {bottom:'calc(100% + 6px)'} : {bottom:'auto',top:'calc(100% + 6px)'})}} role="dialog" aria-label={menu === 'model' ? '选择对话模型' : menu === 'permission' ? '执行权限' : '添加上下文'}>
+    {menu && <div ref={menu === 'model' ? modelPanel : undefined} className={'composer-menu ' + menu + '-menu'} style={menu === 'model' ? undefined : {maxHeight:placement.height, ...(['add','mention'].includes(menu) ? {height:Math.min(menu === 'mention' ? 350 : 324,placement.height)} : {}), ...(placement.above ? {bottom:'calc(100% + 6px)'} : {bottom:'auto',top:'calc(100% + 6px)'})}} role="dialog" aria-label={menu === 'model' ? '选择对话模型' : menu === 'permission' ? '执行权限' : '添加上下文'}>
       {['add','mention'].includes(menu) ? <>
         <nav className="composer-menu-nav">{categories.filter(([id]) => menu !== 'mention' || ['experts','skills','connectors','conversations'].includes(id)).map(([id,label,Icon]) => <button key={id} className={section === id ? 'selected' : ''} onMouseEnter={() => {clearTimeout(hover.current); if (menu === 'add' && section !== id) hover.current = setTimeout(() => enterSection(id), 100);}} onMouseLeave={() => clearTimeout(hover.current)} onClick={() => enterSection(id)} onKeyDown={event => {if (event.key === 'ArrowRight') {event.preventDefault(); enterSection(id);}}}><Icon size={15}/><span>{label}</span><ChevronRight size={13}/></button>)}{menu === 'add' && <>{settings?.plugin_actions?.map(action=><button key={action.id} onClick={()=>{close();void props.useAction?.(action.id).catch(failure=>error(failure.message));}}><Play size={15}/>{action.label}{!action.configured&&<small>需配置</small>}</button>)}<hr/><button onClick={() => {close(); void props.browseLibrary().catch(failure => error(failure.message));}}><BookOpen size={15}/>浏览资料库</button><button onClick={() => {close(); void props.attach();}}><Paperclip size={15}/>添加文件</button>{active && (text.trim() || attachments.length > 0) && <button disabled={conversation?.run?.status === 'stopping'} onClick={() => {close(); void props.stop().catch(failure => error(failure.message));}}><Square size={14}/>停止当前任务</button>}</>}</nav>
         {section && <section className="composer-submenu"><div className="submenu-heading"><button className="icon-button submenu-back" title="返回" onClick={() => setSection('')}><ArrowLeft size={14}/></button><strong>{categories.find(([id]) => id === section)?.[1]}</strong></div>

@@ -39,3 +39,5 @@
 .composer-model-warning{font-size:12px;margin:8px 4px;color:var(--error);overflow-wrap:anywhere}.composer-menu-nav{overflow-y:auto;min-height:0}.composer-menu-nav small{margin-left:auto;font-size:11px}.picker-row:disabled{cursor:not-allowed;opacity:.65}
 
 .model-menu .model-media-link{border-top:1px solid var(--line);border-radius:0;margin-top:2px;padding-top:12px;padding-bottom:12px;flex-shrink:0}
+.composer-menu.model-menu {position:fixed; bottom:auto; max-width:none}
+.model-menu .picker-list {scrollbar-gutter:stable}

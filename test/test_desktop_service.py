@@ -178,7 +178,7 @@ class DesktopShutdownTests(unittest.TestCase):
         service.streams = {}
         service.store = SimpleNamespace(active_runs=lambda: [])
         service.state = SimpleNamespace(update_preparing=False, prepare_update_shutdown=lambda: {"saved": True})
-        for name in ("updates", "scheduler", "messaging", "workbench", "jobs", "models", "ledger"):
+        for name in ("updates", "scheduler", "messaging", "workbench", "jobs", "models", "conversations", "ledger"):
             setattr(service, name, Mock())
         entered, release = threading.Event(), threading.Event()
         def fail_save():
@@ -828,6 +828,58 @@ class DesktopIntegrationTests(unittest.TestCase):
 
 
 class DesktopTransactionTests(unittest.TestCase):
+    def test_search_reports_preparation_and_retries_the_shared_index(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from core.desktop_conversations import ConversationActions
+        from core.desktop_store import DesktopChatStorage, DesktopStore
+        with tempfile.TemporaryDirectory(dir=QA_ROOT) as directory:
+            storage = DesktopChatStorage(str(Path(directory) / "history.db"))
+            storage.save_conversation("old", [{"role": "user", "content": "旧记录中的关键词"}], title="历史聊天")
+            service = SimpleNamespace(storage=storage, store=DesktopStore(storage),
+                                      config=SimpleNamespace(get_projects=lambda: []))
+            actions = ConversationActions(service)
+            prepare = storage.prepare_sidebar_search
+            entered, release = threading.Event(), threading.Event()
+            starts = []
+
+            def delayed_prepare(cancel_check=None):
+                if cancel_check:
+                    starts.append(True)
+                    if len(starts) == 1:
+                        entered.set()
+                        if not release.wait(5):
+                            raise TimeoutError("test preparation was not released")
+                        raise OSError("模拟索引准备失败")
+                return prepare(cancel_check)
+
+            def search(**params):
+                return actions.dispatch("conversation.search", {"query": "关键词", "defer_index": True, **params})
+
+            def complete(result):
+                deadline = time.monotonic() + 5
+                while result == {"status": "preparing"} and time.monotonic() < deadline:
+                    time.sleep(.01)
+                    result = search()
+                return result
+
+            try:
+                with patch.object(storage, "prepare_sidebar_search", delayed_prepare):
+                    self.assertEqual(search(query="旧关键词"), {"status": "preparing"})
+                    self.assertTrue(entered.wait(5))
+                    self.assertEqual(search(), {"status": "preparing"})
+                    self.assertEqual(len(starts), 1)
+                    release.set()
+                    with self.assertRaisesRegex(OSError, "模拟索引准备失败"):
+                        complete(search())
+                    self.assertEqual(len(starts), 1)
+                    self.assertEqual([row["id"] for row in complete(search(retry_index=True))], ["old"])
+                    self.assertEqual(len(starts), 2)
+                    self.assertEqual([row["id"] for row in search(defer_index=False)], ["old"])
+            finally:
+                release.set()
+                actions.close()
+
     def test_child_controls_keep_session_and_submission_identity(self):
         from types import SimpleNamespace
         from unittest.mock import Mock

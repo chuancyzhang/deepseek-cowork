@@ -1,5 +1,5 @@
 .window-titlebar.app-navigation{height:40px;min-height:40px;display:flex;align-items:center;gap:6px;padding:4px 12px;background:var(--bg);color:var(--text);position:relative;z-index:30;font-family:var(--font-family);font-size:calc(13px * var(--font-scale,1))}
-.window-titlebar.app-navigation.windows{padding-right:max(146px,calc(100% - env(titlebar-area-width,100%) + 12px))}
+.window-titlebar.app-navigation.windows{min-height:max(40px,env(titlebar-area-height,40px));padding-right:max(146px,calc(100% - env(titlebar-area-width,100%) + 12px))}
 .app-navigation button,.app-navigation nav,.app-navigation .navigation-tools{-webkit-app-region:no-drag}
 .app-navigation .icon-button{width:32px;height:30px;color:var(--muted)}
 .navigation-divider{width:1px;height:16px;background:var(--line);margin:0 3px}
@@ -11,9 +11,10 @@
 .navigation-tools .icon-button{position:relative;width:28px;height:30px;padding:0;color:var(--muted);flex-shrink:0}
 .navigation-count{position:absolute;top:0;right:0;display:inline-flex;align-items:center;justify-content:center;min-width:13px;height:13px;padding:0 2px;font-size:9px;font-variant-numeric:tabular-nums;background:var(--soft);color:var(--text);border-radius:5px}
 .app-shell .sidebar{padding-top:16px}
-.app-shell .sidebar .brand{min-height:36px;height:auto;margin-bottom:12px;padding-inline:5px;gap:4px;justify-content:space-between;flex-wrap:wrap}
-.app-shell .sidebar .brand strong{font-size:calc(16px * var(--font-scale,1));min-width:0;overflow:hidden;text-overflow:ellipsis}
+.app-shell .sidebar .brand{min-height:36px;height:auto;margin-bottom:12px;margin-inline-end:-5px;padding-inline:2px 0;gap:3px;justify-content:space-between}
+.app-shell .sidebar .brand strong{font-size:calc(13px * var(--font-scale,1));min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .app-shell .sidebar .brand > div{margin-inline-start:auto}
+.sidebar .navigation-tools .icon-button{width:27px}
 .app-shell .sidebar .new-chat{border:0;box-shadow:none;background:transparent;min-height:36px;padding:8px 5px;margin-bottom:12px;flex-shrink:0;font-size:calc(14px * var(--font-scale,1))}
 .app-shell .sidebar .new-chat:hover{background:var(--hover)}
 .app-shell .sidebar .sidebar-section{letter-spacing:0;margin-bottom:6px;font-size:12px}
@@ -67,8 +68,5 @@
   .application-menus button{padding-inline:8px}
   .navigation-space{min-width:12px}
   .app-shell .sidebar{padding-inline:12px}
-  .app-shell .sidebar .brand{padding-inline:2px}
-  .app-shell .sidebar .brand strong{font-size:calc(14px * var(--font-scale,1))}
-  .sidebar .navigation-tools .icon-button{width:26px}
 }
 @media(max-height:650px){.native-dialog.global-search{max-height:calc(100vh - 64px)}.global-search-results{max-height:48vh}.global-search-input{padding-block:12px}.global-search>.section-heading{top:12px}}

@@ -1,9 +1,10 @@
-import {useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type Ref} from 'react';
+import {useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type Ref} from 'react';
 import {Archive, BookOpen, Check, ChevronDown, ChevronRight, Folder, FolderOpen, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Pin, PinOff, Plus, Settings, Sparkles, SquarePen, Star, Trash2, Undo2, Users, X} from 'lucide-react';
 import type {Conversation, ProjectAction, ProjectRecord, SidebarEntry, SidebarLayout, SidebarMethod} from './types';
 import {useHost, useHostField} from './host/context';
 import {UpdateNotice} from './management/Updates';
 import {chatWorkspace, pathKey, projectLayoutPath, projectPaths} from './projects';
+import {conversationTime} from './runtime';
 import SidebarMenu, {type MenuAnchor} from './SidebarMenu';
 import {useSidebarDrag} from './sidebarDrag';
 import './sidebar.css';
@@ -38,6 +39,19 @@ const entryOf = (item: Item): SidebarEntry => item.kind === 'project'
   ? {kind: 'project', id: projectLayoutPath(item.project)} : {kind: 'chat', id: item.chat.id};
 const entryKey = (entry: SidebarEntry) => entry.kind === 'project' ? 'project:' + pathKey(entry.id) : 'chat:' + entry.id;
 const destinations = [['capabilities', '能力', Sparkles], ['library', '资料库', BookOpen], ['favorites', '常用任务', Star], ['team', '团队空间', Users]] as const;
+const sidebarWidthKey = 'sidebar:width';
+const sidebarMinimum = 204, sidebarDefault = 240, sidebarMaximum = 320;
+const minimumMainWidth = 344;
+const sidebarWidthLimit = (workbenchWidth: number) => Math.max(sidebarMinimum, Math.min(sidebarMaximum, workbenchWidth - minimumMainWidth));
+const fitSidebarWidth = (width: number, limit: number) => Math.round(Math.max(sidebarMinimum, Math.min(limit, width)));
+
+function storedSidebarWidth() {
+  try {
+    const width = Number(localStorage.getItem(sidebarWidthKey));
+    if (width >= sidebarMinimum && width <= sidebarMaximum) return Math.round(width);
+  } catch { /* The default is available before local layout storage can be read. */ }
+  return sidebarDefault;
+}
 
 function organize(conversations: Conversation[], supplemental: Conversation[], configured: ProjectRecord[], layout: SidebarLayout | null) {
   const byId = new Map(conversations.map(chat => [chat.id, chat]));
@@ -111,6 +125,60 @@ export default function Sidebar(props: Props) {
   const selectedGroup = props.layout?.chats[props.selected] || (selected && model.byWorkspace.get(chatWorkspace(selected))?.groupId);
   const groups = props.layout?.groups || [];
   const drag = useSidebarDrag((entry, group) => void move(entry, group), () => setMenu(null));
+  const sidebar = useRef<HTMLElement>(null);
+  const listId = useId();
+  const [preferredWidth, setPreferredWidth] = useHostField(sidebarWidthKey, storedSidebarWidth);
+  const [widthLimit, setWidthLimit] = useState(() => sidebarWidthLimit(innerWidth));
+  const width = fitSidebarWidth(preferredWidth, widthLimit);
+  const resizing = useRef<{pointer: number; startX: number; initial: number; latest: number; preferred: number} | null>(null);
+  const now = new Date();
+
+  useLayoutEffect(() => {
+    const shell = sidebar.current?.parentElement;
+    if (!shell) return;
+    const measure = () => setWidthLimit(sidebarWidthLimit(shell.clientWidth));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(shell);
+    return () => observer.disconnect();
+  }, []);
+
+  const saveWidth = useCallback((next: number) => {
+    try {localStorage.setItem(sidebarWidthKey, String(next));}
+    catch {props.onError('侧栏宽度暂未保存，当前窗口仍保留调整。');}
+  }, [props.onError]);
+
+  useEffect(() => {
+    function finish() {
+      const movement = resizing.current;
+      resizing.current = null;
+      if (!movement) return;
+      if (movement.latest === movement.initial) setPreferredWidth(movement.preferred);
+      else saveWidth(movement.latest);
+    }
+    function move(event: PointerEvent) {
+      const movement = resizing.current;
+      if (!movement || movement.pointer !== event.pointerId) return;
+      if (event.buttons === 0) {finish(); return;}
+      const next = fitSidebarWidth(movement.initial + event.clientX - movement.startX, widthLimit);
+      if (next === movement.latest) return;
+      movement.latest = next;
+      setPreferredWidth(next);
+    }
+    function release(event: PointerEvent) {
+      if (resizing.current?.pointer === event.pointerId) finish();
+    }
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', release);
+    window.addEventListener('pointercancel', release);
+    window.addEventListener('blur', finish);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', release);
+      window.removeEventListener('pointercancel', release);
+      window.removeEventListener('blur', finish);
+    };
+  }, [saveWidth, setPreferredWidth, widthLimit]);
 
   useLayoutEffect(() => {
     host.set('sidebar:overlay', Boolean(menu || drag.dragging));
@@ -205,6 +273,7 @@ export default function Sidebar(props: Props) {
     const item = {kind: 'chat', chat} as const, entry = entryOf(item), label = chatLabel(chat);
     const group = groups.find(group => group.id === props.layout?.chats[chat.id]);
     const selected = chat.id === props.selected && props.route === 'chat';
+    const time = conversationTime(chat.updated_at, now);
     return <div key={chat.id} className={'history-row' + (selected ? ' selected' : '')}
       data-drag-source={drag.dragging && entryKey(drag.dragging.entry) === entryKey(entry) ? '' : undefined}
       onContextMenu={event => selectMenu(event, item, true)}>
@@ -213,6 +282,7 @@ export default function Sidebar(props: Props) {
         onClick={() => props.onSelect(chat.id)}>
         {props.running.has(chat.id) ? <LoaderCircle size={14} className="spin" aria-label="正在运行"/> : chat.meta.pinned && !archive ? <Pin size={14}/> : <MessageSquare size={14}/>}
         <span>{label}</span>
+        {time && <time className="history-time" dateTime={time.iso} title={time.full} aria-label={'最近更新 ' + time.full}>{time.label}</time>}
       </button>
       {more(item, label + ' 聊天操作')}
     </div>;
@@ -254,10 +324,10 @@ export default function Sidebar(props: Props) {
   const menuChat = menu?.item.kind === 'chat' ? menu.item.chat : null;
   const canOrganize = !archive && !!props.layout;
 
-  return <aside className="sidebar" onClickCapture={drag.interceptClick}>
+  return <aside ref={sidebar} className="sidebar" style={{width}} onClickCapture={drag.interceptClick}>
     <div className="brand"><strong title="DeepSeek Cowork">DeepSeek Cowork</strong><div ref={props.toolsRef}/></div>
     <button className="new-chat" onClick={() => props.onNew()}><SquarePen size={18}/>新建聊天</button>
-    <nav className={'conversation-list' + (drag.dragging ? ' sidebar-dragging' : '')} ref={drag.list} aria-label="分组、项目与聊天"
+    <nav id={listId} className={'conversation-list' + (drag.dragging ? ' sidebar-dragging' : '')} ref={drag.list} aria-label="分组、项目与聊天"
       onScroll={() => {if (menu) setMenu(null);}} onDragStart={event => event.preventDefault()}>
       {archive ? <>
         <div className="sidebar-section"><span>已归档</span><button title="返回侧栏列表" aria-pressed onClick={toggleArchive}><Archive size={14}/></button></div>
@@ -322,6 +392,23 @@ export default function Sidebar(props: Props) {
       <UpdateNotice/>
       <div className="sidebar-utilities"><button className={props.route === 'settings' ? 'selected' : ''} aria-current={props.route === 'settings' ? 'page' : undefined} onClick={() => props.onRoute('settings')}><Settings size={17}/><span>设置</span><ChevronRight size={15} className="sidebar-settings-arrow" aria-hidden="true"/></button></div>
     </div>
+    <div className="sidebar-resizer" role="separator" tabIndex={0} aria-label="调整侧栏宽度" aria-orientation="vertical"
+      aria-controls={listId} aria-valuemin={sidebarMinimum} aria-valuemax={widthLimit} aria-valuenow={width}
+      onPointerDown={event => {
+        if (event.button !== 0 || resizing.current) return;
+        event.preventDefault();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        resizing.current = {pointer:event.pointerId, startX:event.clientX, initial:width, latest:width, preferred:preferredWidth};
+      }}
+      onKeyDown={event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === 'Home' ? sidebarDefault : event.key === 'End' ? widthLimit
+          : fitSidebarWidth(width + (event.key === 'ArrowLeft' ? -8 : 8), widthLimit);
+        if (next === preferredWidth) return;
+        setPreferredWidth(next);
+        saveWidth(next);
+      }}/>
     {menu && menuEntry && <SidebarMenu key={entryKey(menuEntry)} anchor={menu.anchor}
       groups={canOrganize ? groups : undefined} currentGroup={currentGroup(menuEntry)}
       onMove={id => closeAction(() => void move(menuEntry, id, true))} onNew={() => beginGroup(menuEntry)} onClose={() => setMenu(null)}

@@ -32,6 +32,20 @@ export function messageTime(createdAt?: number) {
   return {iso: date.toISOString(), label: date.toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hourCycle:'h23'}),
     full: date.toLocaleString('zh-CN', {year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23'})};
 }
+const conversationClock = new Intl.DateTimeFormat('zh-CN', {hour:'2-digit', minute:'2-digit', hourCycle:'h23'});
+const conversationDay = new Intl.DateTimeFormat('zh-CN', {month:'long', day:'numeric'});
+const conversationFullTime = new Intl.DateTimeFormat('zh-CN', {
+  year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hourCycle:'h23',
+});
+export function conversationTime(updatedAt: number, now = new Date()) {
+  const date = messageDate(updatedAt);
+  if (!date) return null;
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const day = date.toDateString();
+  const label = day === now.toDateString() ? conversationClock.format(date)
+    : day === yesterday.toDateString() ? '昨天' : conversationDay.format(date);
+  return {iso:date.toISOString(), label, full:conversationFullTime.format(date)};
+}
 type TimeInterval = {start: number; end?: number};
 export type TurnTiming = {id: string; start?: number; end?: number; thinking: Record<string, TimeInterval[]>};
 /** Measure recorded stream boundaries; missing history never starts a new clock. */

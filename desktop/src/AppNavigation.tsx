@@ -105,17 +105,41 @@ type SearchResult = {key:string;kind:string;title:string;detail?:string;shortcut
 export function GlobalSearch({conversations,projects,close,onChat,onProject,onAction,error}:{conversations:Conversation[];projects:ProjectRecord[];close:()=>void;onChat:(id:string)=>Promise<void>;onProject:(path:string)=>Promise<void>;onAction:(action:string)=>Promise<void>;error:(message:string)=>void}) {
   const [query,setQuery] = useState(''), [filter,setFilter] = useState('all'), [selected,setSelected] = useState(0), [revision,setRevision]=useState(0);
   const [limit,setLimit] = useState(40);
-  const [response,setResponse] = useState<{query:string;items:Conversation[];error?:string}|null>(null);
+  const [response,setResponse] = useState<{query:string;items:Conversation[];preparing?:boolean;error?:string}|null>(null);
+  const attemptedRevision = useRef(0);
   const input=useRef<HTMLInputElement>(null),results=useRef<HTMLDivElement>(null);
   const term=query.trim(),chatSearch=Boolean(term)&&(filter==='all'||filter==='chat');
   useEffect(()=>{input.current?.focus();},[]);
   useEffect(()=>{
     if(!chatSearch)return;
-    let valid=true;
-    const timer=setTimeout(()=>{void call<Conversation[]>('conversation.search',{query:term,limit:200}).then(items=>{if(valid)setResponse({query:term,items});}).catch(reason=>{if(valid)setResponse({query:term,items:[],error:reason.message});});},200);
+    let valid = true, preparing = false;
+    async function search(retryIndex = false) {
+      try {
+        const result = await call<Conversation[] | {status:'preparing'}>('conversation.search', {
+          query:term, limit:200, defer_index:true, retry_index:retryIndex
+        });
+        if (!valid) return;
+        if (Array.isArray(result)) {
+          setResponse({query:term,items:result});
+        } else {
+          if (!preparing) setResponse({query:term,items:[],preparing:true});
+          preparing = true;
+          timer = setTimeout(() => void search(), 400);
+        }
+      } catch (reason) {
+        if (valid) setResponse({query:term,items:[],error:(reason as Error).message});
+      }
+    }
+    let timer = setTimeout(() => {
+      const retry = revision !== attemptedRevision.current;
+      attemptedRevision.current = revision;
+      void search(retry);
+    }, 200);
     return()=>{valid=false;clearTimeout(timer);};
   },[term,chatSearch,revision]);
-  const loading=chatSearch&&response?.query!==term, failure=chatSearch&&response?.query===term?response.error:'';
+  const preparing = chatSearch && response?.query === term && response.preparing;
+  const loading = chatSearch && (response?.query !== term || preparing);
+  const failure = chatSearch && response?.query === term ? response.error : '';
   const match=(value:string)=>value.toLocaleLowerCase().includes(term.toLocaleLowerCase());
   const archivedPaths = useMemo(() => new Set(projects.filter(project => project.archived || project.hidden).flatMap(projectPaths).map(pathKey)), [projects]);
   const archived=(item:Conversation)=>item.meta.archived||archivedPaths.has(chatWorkspace(item));
@@ -139,7 +163,7 @@ export function GlobalSearch({conversations,projects,close,onChat,onProject,onAc
       {visible.map((row,index)=><div key={row.kind+row.key}>{index===0||rows[index-1].kind!==row.kind?<div className="global-search-group">{!term&&row.kind==='聊天'?'最近聊天':row.kind==='操作'?'快捷操作':row.kind}</div>:null}<button id={'search-result-'+index} role="option" aria-selected={index===active} className="global-search-result" title={row.detail?row.title+'\n'+row.detail:row.title} onFocus={()=>setSelected(index)} onClick={()=>void choose(row)}>{row.kind==='项目'?<Folder size={18}/>:row.kind==='聊天'?<MessageSquare size={18}/>:row.key==='new-chat'?<SquarePen size={18}/>:<FolderPlus size={18}/>}<span><strong>{row.title}</strong>{row.detail&&<small>{row.detail}</small>}</span>{row.shortcut&&<kbd>{row.shortcut}</kbd>}</button></div>)}
       {rows.length>limit&&<button className="sidebar-more" onClick={()=>setLimit(value=>value+40)}>显示更多结果</button>}
       {chatSearch&&response?.query===term&&response.items.length>=200&&<p className="navigation-search-limit">聊天结果较多，请输入更具体的关键词。</p>}
-      {loading&&<p className="navigation-empty" role="status"><LoaderCircle size={16} className="spin"/>正在搜索聊天…</p>}
+      {loading&&<p className="navigation-empty" role="status"><LoaderCircle size={16} className="spin"/>{preparing?'正在准备聊天搜索…':'正在搜索聊天…'}</p>}
       {failure&&<div className="navigation-search-error" role="alert"><p>聊天搜索未完成：{failure}</p><button className="secondary" onClick={()=>{setResponse(null);setRevision(value=>value+1);}}>重试</button></div>}
       {!rows.length&&!loading&&!failure&&<p className="navigation-empty">{term?'没有找到匹配内容，试试其他关键词。':'还没有聊天或项目。'}</p>}
     </div>

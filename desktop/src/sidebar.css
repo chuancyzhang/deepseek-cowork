@@ -1,3 +1,26 @@
+.app-shell > .sidebar {position: relative; min-width: 0}
+.sidebar-resizer {
+  position: absolute;
+  z-index: 12;
+  inset-block: 0;
+  inset-inline-end: -6px;
+  width: 12px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.sidebar-resizer:focus-visible {outline: none}
+.sidebar:has(> .sidebar-resizer:focus-visible) {border-right-color: var(--primary)}
+.sidebar .history-select {gap: 6px; padding-inline: 7px 5px}
+.sidebar .history-select > span {flex: 1}
+.sidebar .history-select > svg, .sidebar .history-time {flex: none}
+.sidebar .history-time {
+  color: var(--muted);
+  font-size: calc(11px * var(--font-scale, 1));
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sidebar .history-row > .row-more {width: 23px; padding-inline: 3px}
+
 .sidebar-group-heading {
   display: flex;
   border-radius: 7px;

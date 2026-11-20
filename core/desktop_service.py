@@ -292,6 +292,7 @@ class DesktopService:
                 self.workbench.close()
                 self.jobs.close()
                 self.models.close()
+                self.conversations.close()
                 self.ledger.close()
                 self.shutdown_complete = True
                 log.info("service_shutdown_saved")

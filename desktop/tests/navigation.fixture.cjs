@@ -17,15 +17,19 @@ Module._load=function(name,...rest){return name==='electron'?{...electron,dialog
 app.commandLine.appendSwitch('disable-gpu');
 const {Backend}=require('../electron/backend.cjs'),originalCall=Backend.prototype.call;
 let window,backend,slowSearch,fastSearch,searchFailure=false,taskReadRelease,stopFailure=false,browserHost;
+let preparingSearch=false, retryRequested=false;
+const preparedTerms=[];
 const errors=[],runs=new Map(),stops=[],snapshots=new Map();
 const {BrowserHost}=require('../electron/browser.cjs'),originalShow=BrowserHost.prototype.show;
 BrowserHost.prototype.show=function(params){browserHost=this;return originalShow.call(this,params);};
 Backend.prototype.call=async function(method,p={}){
   backend=this;
   if(method==='conversation.search'){
+    if(p.defer_index&&preparingSearch){preparedTerms.push(p.query);return {status:'preparing'};}
     if(p.query==='旧查询')return new Promise(resolve=>slowSearch=resolve);
     if(p.query==='新查询')return new Promise(resolve=>fastSearch=resolve);
     if(p.query==='失败'&&searchFailure)throw Error('测试搜索连接失败');
+    if(p.query==='失败')retryRequested=p.retry_index;
     if(p.query==='多结果')return Array.from({length:65},(_,index)=>({id:'search-'+index,title:'匹配聊天 '+index,meta:{}}));
   }
   if(method==='conversation.stop'&&runs.has(p.conversation_id)){
@@ -78,6 +82,52 @@ async function dragSidebar(selector, label) {
     await input('mouseReleased',target,'left',0);
     await until('!document.querySelector(".sidebar-drag-preview")');
   } finally {debuggerClient.detach();}
+}
+async function checkSidebarWidth() {
+  const rail='.sidebar-resizer';
+  const center=await read(`(()=>{
+    const rect=document.querySelector(${JSON.stringify(rail)}).getBoundingClientRect();
+    return {x:Math.floor(rect.left+rect.width/2),y:Math.floor(rect.top+rect.height/2)};
+  })()`);
+  const client=window.webContents.debugger;
+  client.attach('1.3');
+  try {
+    await client.sendCommand('Input.dispatchMouseEvent',{type:'mouseMoved',...center,button:'none',buttons:0});
+    await client.sendCommand('Input.dispatchMouseEvent',{type:'mousePressed',...center,button:'left',buttons:1,clickCount:1});
+    const moved={x:center.x+38,y:center.y};
+    await client.sendCommand('Input.dispatchMouseEvent',{type:'mouseMoved',...moved,button:'none',buttons:1});
+    await until('document.querySelector(".sidebar")?.offsetWidth===278');
+    await client.sendCommand('Input.dispatchMouseEvent',{type:'mouseReleased',...moved,button:'left',buttons:0,clickCount:1});
+  } finally {client.detach();}
+  await until('localStorage.getItem("sidebar:width")==="278"');
+  await snap('sidebar-resized');
+  command('sidebar');await until('!document.querySelector(".sidebar")');
+  command('sidebar');await until('document.querySelector(".sidebar")?.offsetWidth===278');
+  const key=name=>read(`document.querySelector("${rail}").dispatchEvent(new KeyboardEvent("keydown",{key:${JSON.stringify(name)},bubbles:true}));`);
+  await key('ArrowLeft');await until('document.querySelector(".sidebar")?.offsetWidth===270');
+  await key('Home');await until('document.querySelector(".sidebar")?.offsetWidth===240');
+}
+async function checkModelPicker(name, short=false) {
+  const composerTop=await read('document.querySelector(".composer").getBoundingClientRect().top');
+  await read('document.querySelector(".model-trigger").click()');
+  await until('document.activeElement===document.querySelector(".model-menu input")');
+  const layout=await read(`(()=>{
+    const area=document.querySelector(".conversation").getBoundingClientRect();
+    const menu=document.querySelector(".model-menu"), box=menu.getBoundingClientRect();
+    const search=menu.querySelector("input"), field=search.getBoundingClientRect();
+    const footer=menu.querySelector(".single-menu > button").getBoundingClientRect();
+    const list=menu.querySelector(".picker-list");
+    return {inside:box.top>=area.top&&box.bottom<=area.bottom&&box.left>=area.left&&box.right<=area.right,
+      reachable:document.elementFromPoint(field.left+field.width/2,field.top+field.height/2)===search&&footer.bottom<=box.bottom,
+      scrolls:list.scrollHeight>list.clientHeight, top:document.querySelector(".composer").getBoundingClientRect().top};
+  })()`);
+  assert.equal(layout.inside,true);
+  assert.equal(layout.reachable,true);
+  assert.equal(layout.top,composerTop);
+  if(short)assert.equal(layout.scrolls,true);
+  await snap(name);
+  await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
+  await until('!document.querySelector(".model-menu") && document.activeElement===document.querySelector(".model-trigger")');
 }
 async function checkProjectActions(original, occupied) {
   const oldChat=await rpc('conversation.create',{workspace_dir:original});
@@ -137,6 +187,7 @@ async function checkHomeProjectMenu() {
   assert.equal(await read('(()=>{const home=document.querySelector(".workbench-home").getBoundingClientRect(),title=document.querySelector(".workbench-home .welcome").getBoundingClientRect(),footer=document.querySelector(".home-composer-footer").getBoundingClientRect();return title.top-home.top>40&&home.bottom-footer.bottom>title.top-home.top;})()'),true);
   await fill('[aria-label="消息输入"]','');
   await snap('home');
+  await checkModelPicker('model-picker');
   await read('document.querySelector(".home-project-trigger").click()');
   await until('document.activeElement===document.querySelector(".home-project-search input")');
   assert.equal(await read('document.querySelector(".home-project-list [aria-pressed=true]").textContent'),'客户档案');
@@ -244,7 +295,7 @@ async function checkSidebar() {
   await until('document.querySelector(".sidebar-user-group")?.textContent.includes("cross-platform-cowork")');
   await dragSidebar('.project-heading > button:first-child','客户资料');
   await until('document.querySelector(".sidebar-user-group")?.textContent.includes("客户资料")');
-  await dragSidebar('.history-select','检查文件预览问题');
+  await dragSidebar('.history-select > span','检查文件预览问题');
   await until('document.querySelector(".sidebar-user-group")?.textContent.includes("检查文件预览问题")');
   await openRow('客户资料 项目操作');await clickText('.sidebar-context-menu button','置顶项目');
   await until('document.querySelector("[aria-label=置顶]")?.textContent.includes("客户资料")');
@@ -278,6 +329,12 @@ async function run(){
   const docs=await rpc('conversation.create');await rpc('conversation.rename',{conversation_id:docs.id,title:'整理项目文档'});
   const review=await rpc('conversation.create');await rpc('conversation.rename',{conversation_id:review.id,title:'检查文件预览问题'});
   const report=await rpc('conversation.create');await rpc('conversation.rename',{conversation_id:report.id,title:'汇总本周工作进展'});
+  const examples=['通用对话','长文档分析','快速问答','代码助手','数据分析','任务规划','文本整理','推理模型'];
+  for(const [index, display_name] of examples.entries()) {
+    await rpc('settings.save_model',{channel_id:'demo',model_id:'demo-'+index,name:'示例服务',model_name:'chat-'+index,display_name,base_url:'http://127.0.0.1:1/v1'});
+  }
+  await rpc('settings.select_model',{model_id:'demo-0'});
+  window.webContents.send('cowork:events',[{event:'settings_changed'}]);
   const messages=[{id:'user',role:'user',content:'整理项目文档，让新同事能更快上手。'},{id:'answer',role:'assistant',content:'已整理好文档结构，按实际使用顺序分成快速开始、使用指南和开发说明。\n\n原有内容已保留，重复说明合并到对应章节。'}];
   const counts={user:1432,assistant:12128,results:15940,system:6230,tools:3500,injected:1220};
   const usageEvents=[
@@ -290,7 +347,9 @@ async function run(){
   ].map((event,index)=>({...event,run_id:'example-usage',sequence:index+1}));
   snapshots.set(docs.id,{has_messages:true,messages,render_messages:messages,events:usageEvents});
   window.webContents.send('cowork:events',[{event:'conversation_changed',conversation_id:docs.id}]);
-  await until('Array.from(document.querySelectorAll(".history-select")).some(button=>button.textContent==="检查文件预览问题")');
+  await until('Array.from(document.querySelectorAll(".history-select > span")).some(label=>label.textContent==="检查文件预览问题")');
+  assert.match(await read('document.querySelector(".history-select time").textContent'),/^\d{2}:\d{2}$/);
+  await checkSidebarWidth();
   await checkSidebar();
   await checkHomeProjectMenu();
   command('search');await until('!!document.querySelector(".global-search input")');
@@ -304,6 +363,12 @@ async function run(){
   command('sidebar');await until('!!document.querySelector(".sidebar")');
   await until('getComputedStyle(document.querySelector(".app-navigation")).fontFamily.includes("Microsoft YaHei UI")');
   await read('document.fonts.ready.then(()=>true)');
+  assert.equal(await read(`(()=>{
+    const title=document.querySelector(".window-titlebar").getBoundingClientRect(), content=document.querySelector(".window-content");
+    const native=navigator.windowControlsOverlay?.getTitlebarAreaRect();
+    return getComputedStyle(content).borderTopWidth!=="0px" && content.getBoundingClientRect().top===title.bottom &&
+      title.bottom >= (native?.y||0)+(native?.height||0);
+  })()`),true);
   await snap('navigation');
   // The native popup is the same menu, and closing it resolves the toolbar state.
   await read('document.querySelector(".application-menus button").click()');
@@ -311,7 +376,14 @@ async function run(){
   Menu.getApplicationMenu().getMenuItemById('file').submenu.closePopup(window);
   await until('document.querySelector(".application-menus button").getAttribute("aria-expanded")==="false"');
   command('search');await until('!!document.querySelector(".global-search input")');
-  await fill('.global-search input','旧查询');await wait(()=>Boolean(slowSearch));
+  preparingSearch=true;
+  await fill('.global-search input','初始查询');
+  await until('document.querySelector(".navigation-empty")?.textContent.includes("正在准备聊天搜索")');
+  await fill('.global-search input','旧查询');
+  await wait(()=>preparedTerms.includes('旧查询'));
+  assert.deepEqual([...new Set(preparedTerms)],['初始查询','旧查询']);
+  preparingSearch=false;
+  await wait(()=>Boolean(slowSearch));
   await fill('.global-search input','新查询');await wait(()=>Boolean(fastSearch));
   const result={id:review.id,title:'新查询匹配的聊天',meta:{},updated_at:1};fastSearch([result]);
   await until('document.querySelector(".global-search-results").textContent.includes("新查询匹配")');slowSearch([{...result,title:'旧查询不应出现'}]);await delay(120);
@@ -319,6 +391,7 @@ async function run(){
   searchFailure=true;await fill('.global-search input','失败');await until('!!document.querySelector(".navigation-search-error")');
   assert.equal(await read('document.querySelector(".global-search input").value'),'失败');
   searchFailure=false;await read('document.querySelector(".navigation-search-error button").click()');await until('!document.querySelector(".navigation-search-error") && !document.querySelector(".global-search-results[aria-busy=true]")');
+  assert.equal(retryRequested,true);
   await fill('.global-search input','多结果');await until('document.querySelectorAll(".global-search-result").length===40');
   await read('document.querySelector(".global-search-results .sidebar-more").click()');await until('document.querySelectorAll(".global-search-result").length===65');
   await fill('.global-search input','文档');await until('document.querySelectorAll(".global-search-result").length>0');await snap('search');
@@ -386,7 +459,7 @@ async function run(){
   await snap('project-edit-dark-scaled');
   await clickText('.project-dialog button','取消');
   await until('!document.querySelector(".project-dialog")');
-  await clickText('.history-select','整理项目文档');
+  await clickText('.history-select > span','整理项目文档');
   await until('document.querySelectorAll(".chat-header-tools button").length===3');
   assert.equal(await read('(()=>{const buttons=[...document.querySelectorAll(".chat-header-tools button")].map(button=>button.getBoundingClientRect());return buttons.every(rect=>rect.top===buttons[0].top&&rect.left>=0&&rect.right<=innerWidth);})()'),true);
   await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
@@ -395,6 +468,12 @@ async function run(){
   await snap('usage-dark-scaled');
   await read('document.querySelector(".usage-popover [aria-label=关闭用量]").click()');
   command('new-chat');await until('!!document.querySelector(".workbench-home .home-project-trigger")&&document.activeElement===document.querySelector("[aria-label=消息输入]")');
+  window.setSize(850,620);
+  window.webContents.setZoomFactor(1.5);
+  await until('innerHeight<440');
+  await checkModelPicker('model-picker-dark-short',true);
+  window.setSize(1000,720);
+  window.webContents.setZoomFactor(1.25);
   await read('document.querySelector(".home-project-trigger").click()');
   await until('!!document.querySelector(".home-project-menu")');
   assert.equal(await read('(()=>{const r=document.querySelector(".home-project-menu").getBoundingClientRect();return r.top>=0&&r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight&&document.documentElement.scrollWidth<=innerWidth+1;})()'),true);

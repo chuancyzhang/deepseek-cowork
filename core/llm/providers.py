@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import base64
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import logging
 import mimetypes
 import os
 import json
@@ -23,6 +24,8 @@ from core.conversation_integrity import ensure_tool_call_sequence
 from core.tool_images import build_responses_tool_output, build_chat_tool_image_message
 from core.data_security import project_provider_request
 from core.request_snapshot import capture_provider_request
+
+log = logging.getLogger(__name__)
 
 API_PROTOCOL_CHAT_COMPLETIONS = "chat_completions"
 API_PROTOCOL_RESPONSES = "responses"
@@ -903,16 +906,26 @@ class OpenAIProvider(LLMProvider):
         tool_states = {}
         next_tool_index = 0
         streamed_output_text = ""
+        leading_whitespace = []
+        response_id = ""
         terminal_seen = False
         for event in _iter_registered_provider_stream(request_context, stream):
             event_type = str(self._object_value(event, "type", "") or "")
             provider_sequence = self._object_value(event, "sequence_number")
             if event_type == "response.created":
                 response = self._object_value(event, "response")
+                created_id = str(self._object_value(response, "id", "") or "")
+                if leading_whitespace and response_id and created_id and response_id != created_id:
+                    log.info(
+                        "responses_discarded_unpublished_whitespace request_id=%s sequence=%s chars=%s",
+                        client_request_id, provider_sequence, sum(map(len, leading_whitespace)),
+                    )
+                    leading_whitespace.clear()
+                response_id = created_id or response_id
                 yield {
                     "type": "provider_request",
                     "client_request_id": client_request_id,
-                    "response_id": str(self._object_value(response, "id", "") or ""),
+                    "response_id": created_id,
                     "provider_sequence": provider_sequence,
                 }
                 continue
@@ -920,6 +933,14 @@ class OpenAIProvider(LLMProvider):
                 delta = self._object_value(event, "delta", "")
                 if delta:
                     text_delta = str(delta)
+                    if not streamed_output_text:
+                        # Publish leading whitespace only with the first substantive text.
+                        if text_delta.isspace():
+                            leading_whitespace.append(text_delta)
+                            continue
+                        if leading_whitespace:
+                            text_delta = "".join(leading_whitespace) + text_delta
+                            leading_whitespace.clear()
                     streamed_output_text += text_delta
                     yield {"type": "content", "content": text_delta}
                 continue

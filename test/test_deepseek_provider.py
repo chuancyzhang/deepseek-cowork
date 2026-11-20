@@ -480,6 +480,42 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
             "completed",
         )
 
+    def test_responses_unpublished_whitespace_belongs_to_its_response(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1", model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        for first_id, prefix in (("resp-placeholder", ""), ("resp-reply", " ")):
+            with self.subTest(first_id=first_id):
+                final_text = prefix + "\n    例子\n说明"
+                output = [{
+                    "id": "message-reply", "type": "message", "role": "assistant",
+                    "status": "completed", "content": [{"type": "output_text", "text": final_text}],
+                }, {
+                    "type": "function_call", "call_id": "call-confirm",
+                    "name": "lookup", "arguments": '{"q":"example"}',
+                }]
+                client.responses.create.return_value = [
+                    SimpleNamespace(type="response.created", response=SimpleNamespace(id=first_id)),
+                    SimpleNamespace(type="response.output_text.delta", delta=" ", output_index=0, content_index=0,
+                                    item_id="message-placeholder" if not prefix else "message-reply"),
+                    SimpleNamespace(type="response.created", response=SimpleNamespace(id="resp-reply")),
+                    SimpleNamespace(type="response.output_text.delta", delta="\n    ", output_index=0, content_index=0,
+                                    item_id="message-reply"),
+                    SimpleNamespace(type="response.output_text.delta", delta="例子", output_index=0, content_index=0,
+                                    item_id="message-reply"),
+                    SimpleNamespace(type="response.completed", response=SimpleNamespace(
+                        id="resp-reply", output=output, usage=None,
+                    )),
+                ]
+                chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+                self.assertEqual([chunk["content"] for chunk in chunks if chunk["type"] == "content"],
+                                 [prefix + "\n    例子", "\n说明"])
+                self.assertEqual([chunk["id"] for chunk in chunks if chunk["type"] == "tool_call"], ["call-confirm"])
+                self.assertEqual(next(chunk["items"] for chunk in chunks if chunk["type"] == "response_items"), output)
+                self.assertEqual(next(chunk["status"] for chunk in chunks if chunk["type"] == "provider_terminal"),
+                                 "completed")
+
     def test_responses_final_conflicts_preserve_streamed_text_and_require_manual_retry(self):
         provider, client = self._build_provider(
             base_url="https://api.openai.com/v1", model_name="gpt-5.6",
@@ -487,7 +523,9 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         for final_text in ("different", "part", ""):
             with self.subTest(final_text=final_text):
                 client.responses.create.return_value = [
+                    SimpleNamespace(type="response.created", response=SimpleNamespace(id="resp-partial")),
                     SimpleNamespace(type="response.output_text.delta", delta="partial"),
+                    SimpleNamespace(type="response.created", response=SimpleNamespace(id="resp-conflict")),
                     SimpleNamespace(type="response.completed", response=SimpleNamespace(
                         id="resp-conflict", output=[
                             {"id": "msg", "type": "message", "role": "assistant", "status": "completed",

@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, lazy, Suspense, useSyncExternalStore, type RefObject } from 'react';
 import {ArrowLeft, ChartColumn, ChevronDown, Copy, ExternalLink, Folder, History, LoaderCircle, MoreHorizontal, PanelRight, RefreshCw, Sparkles, X} from 'lucide-react';
 import type { Attachment, Conversation, FileSession, HostEvent, Message, Plugin, RuntimeEvent, Settings } from '../types';
-import { contextRecoveryForRun, displayMessages, messageGroups, isActive, mergeEvents, messageText, runErrorSummary, isUserStopped, unwrapEvents, turnTimings, replyParts } from '../runtime';
+import { contextRecoveryForRun, displayMessages, messageGroups, isActive, mergeEvents, messageText, runErrorSummary, isUserStopped, unwrapEvents, turnTimings } from '../runtime';
 import PluginSlot from './PluginSlot';
 import Usage, {UsageToolbarButton} from '../Usage';
 import { Drafts, type Draft } from '../drafts';
 import DraftRecovery from '../DraftRecovery';
 import Sidebar from '../Sidebar';
-import MessageBubble, {AssistantTurn, GenerationTaskStatus} from '../MessageBubble';
+import MessageBubble, {AssistantTurn, GenerationTaskStatus, RunStatus} from '../MessageBubble';
 import {activeReview} from '../reviews';
 import HistoryEditor from '../HistoryEditor';
 import Dialog from '../Dialog';
@@ -37,7 +37,7 @@ export default function BuiltinWorkbench() {
     conversations, hasMoreConversations, runningConversations, current, setCurrent, events, setEvents,
     route, loading, serviceError, setServiceError, draft, attachments, drafts, sending, sidebar,
     workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, changeWorkspace,
-    fileTree, editors, setEditors, fileChanged, interaction, setInteraction, ask, historyEdit, setHistoryEdit,
+    fileTree, editors, setEditors, fileChanged, interaction, ask, historyEdit, setHistoryEdit,
     historyUndo, setHistoryUndo, olderLoading, pluginPreview, themeCandidate, setThemeCandidate, themePreview,
     setThemePreview, showUsage, setShowUsage, selectedSkills, showSkills, rename, setRename, title, setTitle,
     scroll, nearBottom, composer, selectedId, registerEditorFlush, theme, registerLeave, active, error, confirm,
@@ -88,9 +88,11 @@ export default function BuiltinWorkbench() {
   const runLabel = current?.run?.status === 'stopping' ? '正在停止，保留已完成内容…' : interaction ? '等待你的回答' : '正在处理';
   const reviewTask = activeReview(current?.reviews || [], current?.run, current?.id || '');
   const latestGroup = groups.at(-1);
-  const activeGroup = active && latestGroup?.assistant && latestGroup.messages.some(message =>
+  const questionGroup = active && interaction && groups.find(group => group.questions?.some(question =>
+    !question.outcome && question.runId === current?.run?.id && question.request.request_id === interaction.request_id));
+  const latestActiveGroup = latestGroup?.assistant && latestGroup.messages.some(message =>
     (message.meta?.turn_id || message.meta?.ui_turn_id) === current?.run?.id) ? latestGroup.id : undefined;
-  const activeProcess = activeGroup && latestGroup && (replyParts(latestGroup.messages).hasProcess || latestGroup.questions?.length);
+  const activeGroup = active ? questionGroup?.id || latestActiveGroup : undefined;
   const userStopped = !active && isUserStopped(current?.run);
   const failedRun = !active && !userStopped && current?.run?.error ? current.run : undefined;
   const contextRecovery = useMemo(() => failedRun && contextRecoveryForRun(events, failedRun.id), [events, failedRun]);
@@ -100,6 +102,10 @@ export default function BuiltinWorkbench() {
     (message.meta?.turn_id || message.meta?.ui_turn_id) === current?.run?.id)) : undefined;
   const layout = useRef<HTMLDivElement>(null);
   const [, setSettingsTab] = useHostField('management:tab:settings', 'appearance');
+  function finishInteraction(conversationId: string, requestId: string) {
+    host.set<{request_id: string} | null>(host.sessionKey('interaction', conversationId),
+      pending => pending?.request_id === requestId ? null : pending);
+  }
   function toggleUsage() {
     setShowUsage(!showUsage);
     setShowHistory(false);
@@ -197,10 +203,17 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
       setHistoryUndo(null);
       if (selectedId.current === historyEdit.conversationId) { setCurrent(result.conversation); setEvents(unwrapEvents(result.conversation.events || [])); }
       setHistoryEdit(null); void refreshList();
-    }}/></div> : group.assistant ? <AssistantTurn reviewTask={group.id === activeGroup ? reviewTask : undefined} stopped={group.id === stoppedGroup?.id} statusLabel={runLabel} key={group.id} timing={timings.get(message.meta?.turn_id || message.meta?.ui_turn_id)} activeRun={group.id === activeGroup ? current?.run?.id : undefined} questions={group.questions} interactionRun={active ? current?.run?.id : undefined} showDuration={!groups.slice(groupIndex + 1).some(next => next.assistant && (next.messages[0].meta?.turn_id || next.messages[0].meta?.ui_turn_id) === (message.meta?.turn_id || message.meta?.ui_turn_id))} onInteractionDone={requestId => setInteraction((pending: {request_id: string} | null) => pending?.request_id === requestId ? null : pending)} messages={group.messages} cid={current!.id} active={active} onAction={onMessageAction} onFile={onMessageFile}/> : <MessageBubble key={message.id} cid={current!.id} message={message} active={active} onAction={onMessageAction} onFile={onMessageFile}/>;}) }
+    }}/></div> : group.assistant ? <AssistantTurn reviewTask={group.id === activeGroup ? reviewTask : undefined} stopped={group.id === stoppedGroup?.id}
+      statusLabel={runLabel} key={current!.id + ':' + group.id} timing={timings.get(message.meta?.turn_id || message.meta?.ui_turn_id)}
+      activeRun={group.id === activeGroup ? current?.run?.id : undefined} questions={group.questions}
+      interactionRun={active ? current?.run?.id : undefined}
+      showDuration={!groups.slice(groupIndex + 1).some(next => next.assistant && (next.messages[0].meta?.turn_id || next.messages[0].meta?.ui_turn_id) === (message.meta?.turn_id || message.meta?.ui_turn_id))}
+      onInteractionDone={requestId => finishInteraction(current!.id, requestId)}
+      messages={group.messages} cid={current!.id} active={active} onAction={onMessageAction} onFile={onMessageFile}/>
+      : <MessageBubble key={current!.id + ':' + message.id} cid={current!.id} message={message} active={active} onAction={onMessageAction} onFile={onMessageFile}/>;}) }
             {current && Boolean(current.media_tasks?.length) && <Suspense fallback={null}><ChatMediaTasks key={current.id} cid={current.id} tasks={current.media_tasks || []} configured={settings?.media_capabilities||[]} openFile={path=>void openFile(path)} configure={()=>void goRoute('multimedia')}/></Suspense>}
-            {active && !activeProcess && !(reviewTask && activeGroup) && (reviewTask ? <GenerationTaskStatus task={reviewTask} statusLabel={runLabel} waiting={current?.run?.status === 'queued'}/> : <div className="run-state"><LoaderCircle size={14} className="spin"/>{runLabel}</div>)}
-            {userStopped && !stoppedGroup && <div className="run-state" role="status">已停止</div>}
+            {active && !activeGroup && (reviewTask ? <GenerationTaskStatus task={reviewTask} statusLabel={runLabel} waiting={current?.run?.status === 'queued'}/> : <RunStatus label={runLabel}/>)}
+            {userStopped && !stoppedGroup && <RunStatus label="已停止"/>}
             {failedRun && <div className="run-error">
               <span>{failedRun.status === 'interrupted' ? '任务意外中断' : '这次任务未完成'}</span>
               <p>{adjustTarget ? '已保存聊天和已有内容。可在用量中把下次目标调到 1M，再继续这个任务。'

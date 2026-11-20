@@ -95,7 +95,7 @@ app.whenReady().then(async()=>{
   assert.match(await read('document.querySelector(".generation-task strong").textContent'),/沉淀为 Skill/);
   await read('window.taskPreview({kind:"skill",title:"工程经验整理",status:"completed"})');
   await until('!document.querySelector(".generation-task") && !document.querySelector(".process-timeline")');
-  assert.match(await read('document.querySelector(".process-summary").textContent'),/执行过程/);
+  assert.match(await read('document.querySelector(".process-summary").textContent'),/^用时 /);
   assert.equal(await read('document.querySelectorAll(".message-file-table").length'),1);
   await snap('chat-generation-completed','.task-fixture');
   await read('window.taskPreview({status:"stopping"})');

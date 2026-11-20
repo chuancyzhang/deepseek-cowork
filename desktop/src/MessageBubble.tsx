@@ -1,7 +1,7 @@
 import { createContext, useContext, memo, useRef, useState, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { BookOpen, Check, ChevronDown, ChevronRight, Copy, ExternalLink, FileText, GitBranch, Image as ImageIcon, Link, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Puzzle, RefreshCw, Sparkles, Trash2, Wrench } from 'lucide-react';
+import { BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Copy, ExternalLink, FileText, GitBranch, Image as ImageIcon, Link, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Puzzle, RefreshCw, Sparkles, Trash2, Wrench } from 'lucide-react';
 import type { FileReference, MediaTask, Message } from './types';
 import { messageText, toolErrorText, messageTime, replyParts, elapsedTime, thinkingTime, formatDuration, type TurnTiming, type QuestionRecord } from './runtime';
 import {useHost, useHostField} from './host/context';
@@ -79,7 +79,8 @@ export function Markdown({ text, onFile, files = [], streaming = false, previewS
 
 function Disclosure({ title, children, stateKey, kind = 'tool-entry' }: { title: React.ReactNode; children: React.ReactNode; stateKey: string; kind?: string }) {
   const [open, setOpen] = useHostField('disclosure:' + stateKey, false);
-  return <details className={kind} open={open} onToggle={event => {if (open !== event.currentTarget.open) setOpen(event.currentTarget.open);}}><summary>{title}<ChevronDown size={13}/></summary>{open && children}</details>;
+  const Chevron = open ? ChevronDown : ChevronRight;
+  return <details className={kind} open={open} onToggle={event => {if (open !== event.currentTarget.open) setOpen(event.currentTarget.open);}}><summary>{title}<Chevron size={13} aria-hidden="true"/></summary>{open && children}</details>;
 }
 
 function MessageTimestamp({createdAt}: {createdAt?: number}) {
@@ -152,6 +153,34 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
 });
 export default MessageBubble;
 
+const toolTitles = new Map([
+  ['run_python_code', '运行 Python'],
+  ['run_node_code', '运行 JavaScript'],
+  ['request_user_input', '向你提问'],
+  ['request_user_approval', '请求确认'],
+  ['read_file', '读取文件'],
+  ['text_file_read', '读取文件'],
+  ['write_file', '写入文件'],
+]);
+
+function processError(error: unknown) {
+  const text = toolErrorText(error).trim();
+  if (!text) return '工具执行失败';
+  if (text.includes('Traceback (most recent call last):')) {
+    const lines = text.split(/\r?\n/);
+    return lines.findLast(line => /^[\w.]+(?:Error|Exception):\s/.test(line)) || lines[0];
+  }
+  return text;
+}
+
+export function RunStatus({label, duration}: {label: string; duration?: string}) {
+  const Icon = label === '等待你的回答' ? CircleHelp : LoaderCircle;
+  return <div className="run-state">
+    {label !== '已停止' && <Icon className={Icon === LoaderCircle ? 'spin' : undefined} size={14} aria-hidden="true"/>}
+    <span role="status">{label}</span>{duration && <small className="process-duration">{duration}</small>}
+  </div>;
+}
+
 export function GenerationTaskStatus({task, statusLabel = '正在处理', duration, expanded, toggle, waiting = false}: {
   task: ReviewSummary; statusLabel?: string; duration?: number; expanded?: boolean; toggle?: () => void; waiting?: boolean;
 }) {
@@ -170,10 +199,11 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
 }) {
   const {answer, results, hasProcess: messageProcess} = replyParts(messages);
   const hasProcess = messageProcess || questions.length > 0;
-  const running = Boolean(activeRun && (messages.some(message => message.live) || timing?.id === activeRun && timing.end == null));
+  const running = Boolean(activeRun && timing?.end == null);
   const [now, setNow] = useState(() => Date.now() / 1000);
   useEffect(() => {if (!running) return; setNow(Date.now() / 1000); const timer = setInterval(() => setNow(Date.now() / 1000), 1000); return () => clearInterval(timer);}, [running]);
   const duration = showDuration ? elapsedTime(timing?.start, timing?.end ?? (running ? now : undefined)) : undefined;
+  const durationLabel = duration == null ? undefined : (running ? '已用时 ' : '用时 ') + formatDuration(duration);
   function thoughtDuration(message: Message) {
     if (message.meta?.ui_split_reasoning) return null;
     const seconds = thinkingTime(timing, message.meta?.ui_source_message_id || message.id, running ? now : undefined);
@@ -186,37 +216,65 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
     if (previousTask.current && !task) setExpanded(null);
     previousTask.current = task;
   }, [task, setExpanded]);
-  const pending = questions.some(question => !question.outcome && question.runId === interactionRun);
+  const pending = Boolean(interactionRun) && questions.some(question => !question.outcome && question.runId === interactionRun);
   const open = pending || (expanded ?? (running && !task));
+  const status = running ? statusLabel : stopped ? '已停止' : durationLabel ? '' : '执行过程';
+  const summary = <>
+    {running ? status === '等待你的回答' ? <CircleHelp size={14} aria-hidden="true"/>
+      : <LoaderCircle className="spin" size={14} aria-hidden="true"/> : !stopped && <Sparkles size={14} aria-hidden="true"/>}
+    {status && <span role={pending && running ? 'status' : undefined} className={running && status === '正在处理' ? 'sr-only' : undefined}>{status}</span>}
+    {durationLabel && <small className="process-duration">{durationLabel}</small>}
+  </>;
   const expert = messages.find(message => message.meta?.conversation_agent?.name || message.meta?.ui_conversation_agent?.name);
   const callIds = new Set(messages.flatMap(message => message.tool_calls || []).map(tool => tool.id));
   function questionRow(question: QuestionRecord) {
-    return <Interaction key={question.request.request_id} request={question.request} outcome={question.outcome}
+    return <Interaction key={cid + ':' + question.request.request_id} request={question.request} outcome={question.outcome}
       conversationId={cid} active={active && question.runId === interactionRun} done={onInteractionDone}/>;
   }
   function toolRow(message: Message, tool: any, result?: Message) {
     const resultObject = result?.result_obj;
     const failed = Boolean(resultObject?.error || ['failed', 'error'].includes(resultObject?.status));
     const toolName = tool.function?.name || tool.name || result?.meta?.tool_name;
+    const title = toolTitles.get(toolName) || toolName || '工具调用';
+    const toolQuestions = questions.filter(question => question.callId === tool.id);
     const mediaSnapshot = (toolName === 'media_create' || toolName === 'media_task') && resultObject?.task_id;
-    const state = result ? failed ? '失败' : mediaSnapshot ? '已返回' : ['running','queued'].includes(resultObject?.status) ? '运行中' : '已完成' : running ? '运行中' : '结果未确认';
+    const state = result ? failed ? '失败' : mediaSnapshot ? '已返回' : ['running','queued'].includes(resultObject?.status) ? '运行中' : '已完成'
+      : running ? toolQuestions.length ? '已发起' : '运行中' : '结果未确认';
     let args = tool.function?.arguments ?? tool.arguments ?? tool.args ?? {};
     if (typeof args === 'string') {try {args = JSON.parse(args);} catch {args = {};}}
     const paths = ['path','file_path','filename','file'].flatMap(key => typeof args?.[key] === 'string' ? [args[key]] : []);
     const images = toolName === 'view_image' && result && !failed ? (resultObject?.content_parts || []).filter((part: any) => part.type === 'input_image' && typeof part.path === 'string') : [];
     if (images.length) return <ViewedImages key={tool.id} cid={cid} callId={tool.id} images={images} onFile={onFile} onDetails={() => onAction('tool', {...message, tool_call_id: tool.id})}/>;
-    return <div className="process-step tool-step" key={tool.id}><Wrench className="timeline-node" size={14}/><button className="process-tool" onClick={() => onAction('tool', {...message, tool_call_id: tool.id})}><span>{tool.function?.name || tool.name || result?.meta?.tool_name || '工具调用'}</span><small>{state}</small><ChevronRight size={13}/></button>{paths.map(path => <button className="text-link process-path" key={path} onClick={() => onFile(path)}>{path}</button>)}{failed && <p className="error-text">{toolErrorText(resultObject.error) || '工具执行失败'}</p>}{questions.filter(question => question.callId === tool.id).map(questionRow)}</div>;
+    return <div className="process-step tool-step" key={tool.id}>
+      <Wrench className="timeline-node" size={14} aria-hidden="true"/>
+      <button className="process-tool" onClick={() => onAction('tool', {...message, tool_call_id: tool.id})}>
+        <span>{title}</span><small className="process-tool-state" data-failed={failed || undefined}>{state}</small>
+        <span className="process-tool-detail">详情 <ChevronRight size={13} aria-hidden="true"/></span>
+      </button>
+      {toolName && title !== toolName && <code className="process-tool-name">{toolName}</code>}
+      {paths.map(path => <button className="text-link process-path" key={path} onClick={() => onFile(path)}>{path}</button>)}
+      {failed && <p className="process-tool-error error-text">{processError(resultObject?.error)}</p>}
+      {toolQuestions.map(questionRow)}
+    </div>;
   }
   return <section className="assistant-turn">
     {expert && <div className="assistant-name">{expert.meta?.conversation_agent?.name || expert.meta?.ui_conversation_agent?.name}</div>}
-    {(hasProcess || task) && <div className="reply-process">{task ? <GenerationTaskStatus task={task} statusLabel={statusLabel} duration={duration} expanded={open} toggle={hasProcess && !pending ? () => setExpanded(!open) : undefined}/> : <button className="process-summary" aria-expanded={open} disabled={pending} onClick={() => setExpanded(!open)}>{running ? <LoaderCircle className="spin" size={14}/> : <Sparkles size={14}/>}<span>{running ? statusLabel : stopped ? '已停止' : '执行过程'}</span>{duration != null && <small className="process-duration">{running ? '已用时' : '用时'} {formatDuration(duration)}</small>}<ChevronRight size={13} className={open ? 'rotated' : ''}/></button>}{hasProcess && open && <div className="process-timeline">{messages.map(message => <div key={message.id} id={message !== answer ? 'message-' + message.id : undefined}>
+    {(hasProcess || task) && <div className="reply-process">
+      {task ? <GenerationTaskStatus task={task} statusLabel={statusLabel} duration={duration} expanded={open} toggle={hasProcess && !pending ? () => setExpanded(!open) : undefined}/>
+        : pending ? <div className="process-summary">{summary}</div>
+        : <button className="process-summary" aria-expanded={open} onClick={() => setExpanded(!open)}>
+          {summary}<ChevronRight size={13} className={open ? 'rotated' : ''} aria-hidden="true"/>
+        </button>}
+      {hasProcess && open && <div className="process-timeline">{messages.map(message => <div key={message.id} id={message !== answer ? 'message-' + message.id : undefined}>
       {!!message.reasoning_content && <div className="process-step"><Sparkles className="timeline-node" size={14}/><Disclosure stateKey={cid + ':' + message.id} kind="thinking" title={<>深度思考{thoughtDuration(message)}</>}><div className="markdown"><Markdown text={message.reasoning_content} streaming={message.live} onFile={onFile}/><button className="text-link" onClick={() => void window.cowork.call('clipboard.write', {text: message.reasoning_content})}>复制思考原文</button></div></Disclosure></div>}
       {message !== answer && message.role === 'assistant' && messageText(message.content) && <div className="process-step stage-text"><FileText className="timeline-node" size={14}/><Markdown text={messageText(message.content)} streaming={message.live} onFile={onFile} files={message.file_references} previewScope={cid+':'+message.id}/></div>}
       {message.tool_calls?.map(tool => toolRow(message, tool, results.get(tool.id)))}
       {message.role === 'tool' && !callIds.has(message.tool_call_id) && toolRow(message, {id: message.tool_call_id}, message)}
       {questions.filter(question => !question.callId && question.sourceId === (message.meta?.ui_source_message_id || message.id)).map(questionRow)}
     </div>)}{questions.filter(question => question.callId ? !callIds.has(question.callId) && !messages.some(message => message.tool_call_id === question.callId) : !messages.some(message => (message.meta?.ui_source_message_id || message.id) === question.sourceId)).map(questionRow)}</div>}</div>}
-    {!hasProcess && !task && (stopped || duration != null) && <div className="process-duration">{stopped && '已停止'}{duration != null && <>{stopped && ' · '}{running ? '已用时' : '用时'} {formatDuration(duration)}</>}</div>}
+    {!hasProcess && !task && (running || stopped
+      ? <RunStatus label={running ? statusLabel : '已停止'} duration={durationLabel}/>
+      : durationLabel && <div className="process-duration">{durationLabel}</div>)}
     {answer && <MessageBubble message={answer} cid={cid} active={active} onAction={onAction} onFile={onFile} answerOnly/>}
   </section>;
 }

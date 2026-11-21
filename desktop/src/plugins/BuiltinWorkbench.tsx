@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, lazy, Suspense, useSyncExternalStore, type RefObject } from 'react';
-import {ArrowLeft, ChartColumn, ChevronDown, Copy, ExternalLink, Folder, History, LoaderCircle, MoreHorizontal, PanelRight, RefreshCw, Sparkles, X} from 'lucide-react';
-import type { Attachment, Conversation, FileSession, HostEvent, Message, Plugin, RuntimeEvent, Settings } from '../types';
+import { useCallback, useEffect, useRef, useState, useMemo, lazy, Suspense, useSyncExternalStore } from 'react';
+import {ArrowLeft, ChartColumn, ChevronDown, Copy, ExternalLink, FileDiff, Folder, History, LoaderCircle, PanelRight, RefreshCw, Sparkles, X} from 'lucide-react';
+import type { Conversation } from '../types';
 import { contextRecoveryForRun, displayMessages, messageGroups, isActive, mergeEvents, messageText, runErrorSummary, isUserStopped, unwrapEvents, turnTimings } from '../runtime';
 import PluginSlot from './PluginSlot';
 import Usage, {UsageToolbarButton} from '../Usage';
@@ -13,6 +13,9 @@ import HistoryEditor from '../HistoryEditor';
 import Dialog from '../Dialog';
 import OfficeEditor from '../OfficeEditor';
 import FilePreview from '../FilePreview';
+import MoreActions, {type MenuAction} from '../MoreActions';
+import {ChangeSummary, ChangesPanel, WorkspaceDiff} from '../WorkspaceChanges';
+import {pathKey} from '../projects';
 import Workspace, { emptyWorkspace, type WorkspaceView } from '../Workspace';
 import Composer from '../Composer';
 import HomeComposerFooter from '../HomeComposerFooter';
@@ -26,10 +29,9 @@ const managementNames: Record<string, string> = { settings: '设置', capabiliti
 
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 type Ask = { title: string; detail: string; choices: string[]; resolve: (index: number) => void };
-type Editor = { file: FileSession; text: string; saved: string; plugin: Plugin };
 
 import {useWorkbench} from '../host/Host';
-import {useHostField} from '../host/context';
+import {useHostField, useSessionField} from '../host/context';
 export default function BuiltinWorkbench() {
   const {
     projectDialog, sidebarLayout, sidebarConversations, changeSidebar, host, usePluginAction,
@@ -37,7 +39,7 @@ export default function BuiltinWorkbench() {
     conversations, hasMoreConversations, runningConversations, current, setCurrent, events, setEvents,
     route, loading, serviceError, setServiceError, draft, attachments, drafts, sending, sidebar,
     workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, changeWorkspace,
-    fileTree, editors, setEditors, fileChanged, interaction, ask, historyEdit, setHistoryEdit,
+    fileTree, workspaceChanges, refreshChanges, editors, setEditors, fileChanged, interaction, ask, historyEdit, setHistoryEdit,
     historyUndo, setHistoryUndo, olderLoading, pluginPreview, themeCandidate, setThemeCandidate, themePreview,
     setThemePreview, usageView, setUsageView, selectedSkills, showSkills, rename, setRename, title, setTitle,
     scroll, nearBottom, composer, selectedId, registerEditorFlush, theme, registerLeave, active, error, confirm,
@@ -49,6 +51,27 @@ export default function BuiltinWorkbench() {
   } = useWorkbench();
   const sidebarTools = useCallback((target: HTMLDivElement | null) => {host.set('navigation:sidebarTools', target);}, [host]);
   const [showHistory, setShowHistory] = useState(false);
+  const [changeSelection, setChangeSelection] = useSessionField<{directory: string; path: string} | null>('workspaceChangeSelection', null);
+  const changes = workspaceChanges?.data;
+  const selectedChange = changeSelection?.directory === workspaceChanges?.directory ? changeSelection : null;
+  const editorPath = editor?.file.path;
+  const fileChange = useMemo(() => editorPath ? changes?.files.find(file => pathKey(file.absolute_path) === pathKey(editorPath)) : undefined, [changes, editorPath]);
+  const showingDiff = Boolean(editor?.showChanges);
+  function selectChange(path: string) {
+    setChangeSelection(path ? {directory: workspaceChanges?.directory || '', path} : null);
+  }
+  async function openChanges(path?: string) {
+    if (!current) return;
+    const cid = current.id;
+    try {
+      await saveView(cid);
+      if (selectedId.current !== cid) return;
+      if (path) selectChange(path);
+      changeWorkspace({selected: 'changes', changesOpen: true, ...(!workspaceView.filesPinned ? {filesOpen:false} : {})});
+      setWorkspaceOpen(true);
+      void refreshChanges(cid);
+    } catch (failure) {error((failure as Error).message);}
+  }
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const historyTrigger = useRef<HTMLButtonElement>(null);
   const usageTrigger = useRef<HTMLButtonElement>(null);
@@ -126,7 +149,7 @@ export default function BuiltinWorkbench() {
   }
   async function toggleWorkspace() {
     if (workspaceOpen) {closeWorkspace(); return;}
-    try {await ensureConversation(); setWorkspaceOpen(true); void refreshFiles();}
+    try {await ensureConversation(); setWorkspaceOpen(true); void refreshFiles(); void refreshChanges();}
     catch (failure) {error((failure as Error).message);}
   }
   function resizeWorkspace(clientX: number) {
@@ -137,14 +160,17 @@ export default function BuiltinWorkbench() {
     setWorkspaceExpanded(false); changeWorkspace({width: Math.min(95, width / box.width * 100)});
   }
 const fileTools = editor && current && <>{editor.file.payload.untitled?<input className="draft-file-name" aria-label="文稿文件名" value={editor.file.name} onChange={event=>setEditors(previous=>previous.map(item=>item.file.path===editor.file.path?{...item,file:{...item.file,name:event.target.value}}:item))}/>:<span title={editor.file.path}>{editor.file.name}</span>}
-  {!editor.file.payload.read_only && editor.text !== editor.saved && (!editor.file.payload.untitled || editor.text.trim()) && <button className="primary" onClick={() => void saveEditor(editor.file.path).catch(failure => error(failure.message))}>保存</button>}
-  {editor.file.payload.recovery_available && editor.text !== editor.saved && <button className="primary" onClick={() => void saveCopy()}>保存恢复副本</button>}
-  {editor.file.payload.office_family && <button className="secondary" onClick={() => void call<string>('file.external', {conversation_id:current.id,path:editor.file.path}).then(message => {if(message)error(message);}).catch(failure => error(failure.message))}>打开应用编辑</button>}
+  {!showingDiff && !editor.file.payload.read_only && editor.text !== editor.saved && (!editor.file.payload.untitled || editor.text.trim()) && <button className="primary" onClick={() => void saveEditor(editor.file.path).catch(failure => error(failure.message))}>保存</button>}
+  {!showingDiff && editor.file.payload.recovery_available && editor.text !== editor.saved && <button className="primary" onClick={() => void saveCopy()}>保存恢复副本</button>}
+  {!showingDiff && editor.file.payload.office_family && <button className="secondary" onClick={() => void call<string>('file.external', {conversation_id:current.id,path:editor.file.path}).then(message => {if(message)error(message);}).catch(failure => error(failure.message))}>打开应用编辑</button>}
+  {(fileChange || showingDiff) && <button className="secondary" onClick={() => setEditors(previous => previous.map(item =>
+    item.file.path === editor.file.path ? {...item, showChanges: !showingDiff} : item
+  ))}><FileDiff size={14} aria-hidden="true"/>{showingDiff ? '隐藏更改' : '显示更改'}</button>}
   {!editor.file.payload.untitled&&<MoreActions key={editor.file.id} label="更多文件操作" actions={[
-    ['在文件夹中显示', Folder, () => call('file.reveal', {conversation_id:current.id,path:editor.file.path})],
+    ['在资源管理器中打开', Folder, () => call('file.reveal', {conversation_id:current.id,path:editor.file.path})],
     ['复制路径', Copy, () => call('clipboard.write', {text:editor.file.path})],
-    ...(!editor.file.payload.office_family ? [['用本机应用打开', ExternalLink, async () => {const message=await call<string>('file.external', {conversation_id:current.id,path:editor.file.path});if(message)throw Error(message);}]] as MenuAction[] : []),
-    ['重新载入文件', RefreshCw, reloadFile],
+    ...(!showingDiff && !editor.file.payload.office_family ? [['用本机应用打开', ExternalLink, async () => {const message=await call<string>('file.external', {conversation_id:current.id,path:editor.file.path});if(message)throw Error(message);}]] as MenuAction[] : []),
+    ...(showingDiff ? [['刷新变更', RefreshCw, () => refreshChanges()]] : [['重新载入文件', RefreshCw, reloadFile]]) as MenuAction[],
   ]} error={error}/>}</>;
 
 return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
@@ -216,6 +242,8 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
       interactionRun={active ? current?.run?.id : undefined}
       showDuration={!groups.slice(groupIndex + 1).some(next => next.assistant && (next.messages[0].meta?.turn_id || next.messages[0].meta?.ui_turn_id) === (message.meta?.turn_id || message.meta?.ui_turn_id))}
       onInteractionDone={requestId => finishInteraction(current!.id, requestId)}
+      changeSummary={group === latestGroup && !active && !creationOpen && changes && changes.files.length > 0
+        ? <ChangeSummary files={changes.files} open={path => void openChanges(path)}/> : undefined}
       messages={group.messages} cid={current!.id} active={active} onAction={onMessageAction} onFile={onMessageFile}/>
       : <MessageBubble key={current!.id + ':' + message.id} cid={current!.id} message={message} active={active} onAction={onMessageAction} onFile={onMessageFile}/>;}) }
             {current && Boolean(current.media_tasks?.length) && <Suspense fallback={null}><ChatMediaTasks key={current.id} cid={current.id} tasks={current.media_tasks || []} configured={settings?.media_capabilities||[]} openFile={path=>void openFile(path)} configure={()=>void goRoute('multimedia')}/></Suspense>}
@@ -253,12 +281,23 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
 
         </section>
         {workspaceOpen && current && <div className="workspace-divider" role="separator" tabIndex={0} aria-label="调整工作区宽度" aria-orientation="vertical" aria-valuemin={25} aria-valuemax={100} aria-valuenow={workspaceExpanded ? 100 : workspaceView.width || 46} onPointerDown={event => {event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId);}} onPointerMove={event => {if (event.currentTarget.hasPointerCapture(event.pointerId)) resizeWorkspace(event.clientX);}} onPointerUp={event => event.currentTarget.releasePointerCapture(event.pointerId)} onKeyDown={event => {if (['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) {event.preventDefault(); if (event.key === 'End') setWorkspaceExpanded(true); else {setWorkspaceExpanded(false); changeWorkspace({width: event.key === 'Home' ? 46 : Math.max(25, Math.min(95, (workspaceExpanded ? 100 : workspaceView.width || 46) + (event.key === 'ArrowLeft' ? 5 : -5)))});}}}}/>}
-        {workspaceOpen && current && <PluginSlot kind="panel" target="workspace" scope={{conversationId:current.id}}><Workspace key={current.id} conversation={current} value={workspaceView} change={value => {if (selectedId.current === current.id) changeWorkspace(value);}} expanded={workspaceExpanded} expand={() => setWorkspaceExpanded(!workspaceExpanded)} close={closeWorkspace} obscured={Boolean(projectDialog || projectMenuOpen || showUsage || showHistory || ask || historyEdit || showSkills || pluginPreview || themePreview || creationOpen && creationTab!=='design')} dark={theme === 'dark'} editors={editors} fileTree={fileTree} preserve={saveView} openReview={openReview} registerEditorFlush={registerEditorFlush} selectFile={activateFile} openFile={openFile} closeFile={closeEditor} refreshFiles={refreshFiles} createDocument={createDocument} error={error} confirm={confirm} libraryContent={<Suspense fallback={<div className="loading">正在打开资料库…</div>}><Library scope={'workspace:' + current.id} onError={error} confirm={confirm} projectsKey={JSON.stringify(settings?.projects || [])} onReference={(source, items) => addLibraryReference(source, items, current.id)}/></Suspense>} fileContent={<>
-          {editor && !["preview", "html"].includes(editor.file.payload.kind) && <div className="file-toolbar">{fileTools}</div>}
+        {workspaceOpen && current && <PluginSlot kind="panel" target="workspace" scope={{conversationId:current.id}}><Workspace key={current.id} conversation={current} value={workspaceView} change={value => {if (selectedId.current === current.id) changeWorkspace(value);}} expanded={workspaceExpanded} expand={() => setWorkspaceExpanded(!workspaceExpanded)} close={closeWorkspace} obscured={Boolean(projectDialog || projectMenuOpen || showUsage || showHistory || ask || historyEdit || showSkills || pluginPreview || themePreview || creationOpen && creationTab!=='design')} dark={theme === 'dark'} editors={editors} fileTree={fileTree} preserve={saveView} openReview={openReview} registerEditorFlush={registerEditorFlush} selectFile={activateFile} openFile={openFile} closeFile={closeEditor} refreshFiles={refreshFiles} createDocument={createDocument}
+          canViewChanges={Boolean(changes?.repository || workspaceChanges?.error)} openChanges={() => void openChanges()}
+          changesContent={<ChangesPanel cid={current.id} read={workspaceChanges} selection={selectedChange} select={selectChange}
+            openFile={path => void openFile(path, false, true)} refresh={refreshChanges} error={error}/>}
+          error={error} confirm={confirm} libraryContent={<Suspense fallback={<div className="loading">正在打开资料库…</div>}><Library scope={'workspace:' + current.id} onError={error} confirm={confirm} projectsKey={JSON.stringify(settings?.projects || [])} onReference={(source, items) => addLibraryReference(source, items, current.id)}/></Suspense>} fileContent={<>
+          {editor && showingDiff && <div className="workspace-file-changes">
+            <div className="file-toolbar">{fileTools}</div>
+            {fileChange && changes ? <WorkspaceDiff key={fileChange.absolute_path} cid={current.id} file={fileChange} snapshot={changes} refresh={refreshChanges}/>
+              : <p className="workspace-diff-empty" role="status">{workspaceChanges?.error || (workspaceChanges?.pending ? '正在读取变更…' : '此文件没有更改。')}</p>}
+          </div>}
+          <div className="workspace-file-editor" hidden={showingDiff}>
+          {editor && !["preview", "html"].includes(editor.file.payload.kind) && <div className="file-toolbar">{!showingDiff && fileTools}</div>}
           {editor && fileChanged && <div className="file-update-notice" role="status">文件已更新<button className="text-link" onClick={() => void reloadFile()}>刷新</button></div>}
           {editor?.file.payload.recovery_available && editor.text !== editor.saved && <div className="file-update-notice" role="status">上次未保存的编辑已恢复。请保存恢复副本，再用本机应用继续编辑。</div>}
           {editor && (editor.file.conflict || editor.file.unavailable) && <div className="run-error">原文件已变化或暂时无法打开。当前编辑仍保留，可以复制内容或<button className="secondary" onClick={() => void saveCopy()}>另存副本</button>。</div>}
-          {editor ? <PluginSlot kind="editor" target={editor.file.payload.editor_target || editor.file.payload.kind} scope={{conversationId:current?.id,filePath:editor.file.path}}>{(['preview', 'html'].includes(editor.file.payload.kind) ? <FilePreview key={editor.file.id} cid={current!.id} toolbar={fileTools} file={editor.file} text={editor.text} change={text => changeEditor(editor.file.path, text)} register={registerEditorFlush}/> : editor.file.payload.kind !== 'text' ? <OfficeEditor key={editor.file.id} file={editor.file} text={editor.text} onChange={text => changeEditor(editor.file.path, text)} error={error} register={registerEditorFlush}/> : <Suspense fallback={<div className="loading">正在载入编辑器…</div>}><CodeEditor key={current.id + ":" + editor.file.path} cid={current.id} file={editor.file} text={editor.text} saved={editor.saved} change={text => changeEditor(editor.file.path,text)} save={async () => {await saveEditor(editor.file.path);}}/></Suspense> )}</PluginSlot> : <div className="empty-workspace">选择一个文件开始查看。</div>}
+          {editor ? <PluginSlot kind="editor" target={editor.file.payload.editor_target || editor.file.payload.kind} scope={{conversationId:current?.id,filePath:editor.file.path}}>{(['preview', 'html'].includes(editor.file.payload.kind) ? <FilePreview key={editor.file.id} cid={current!.id} toolbar={!showingDiff && fileTools} file={editor.file} text={editor.text} change={text => changeEditor(editor.file.path, text)} register={registerEditorFlush}/> : editor.file.payload.kind !== 'text' ? <OfficeEditor key={editor.file.id} file={editor.file} text={editor.text} onChange={text => changeEditor(editor.file.path, text)} error={error} register={registerEditorFlush}/> : <Suspense fallback={<div className="loading">正在载入编辑器…</div>}><CodeEditor key={current.id + ":" + editor.file.path} cid={current.id} file={editor.file} text={editor.text} saved={editor.saved} change={text => changeEditor(editor.file.path,text)} save={async () => {await saveEditor(editor.file.path);}}/></Suspense> )}</PluginSlot> : <div className="empty-workspace">选择一个文件开始查看。</div>}
+          </div>
         </>}/></PluginSlot>}
 
       </div> : <Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在载入…</div>}><Management returnToChat={()=>void goRoute('chat')} key={route} route={route} settings={settings} updateSettings={setSettings} openConversation={id => void switchConversation(id)} onError={error} confirm={confirm} registerLeave={registerLeave}
@@ -275,31 +314,4 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
 
   </div>;
 
-}
-
-type MenuAction = [string, React.ElementType, () => Promise<unknown>];
-export function MoreActions({label, actions, error, triggerRef, onOpenChange}: {
-  label: string; actions: MenuAction[]; error: (message: string) => void;
-  triggerRef?: RefObject<HTMLButtonElement | null>; onOpenChange?: (open: boolean) => void;
-}) {
-  const [open, setOpen] = useState(false), root = useRef<HTMLDivElement>(null), internalTrigger = useRef<HTMLButtonElement>(null);
-  const trigger = triggerRef || internalTrigger;
-  useLayoutEffect(() => {
-    onOpenChange?.(open);
-    return () => onOpenChange?.(false);
-  }, [open, onOpenChange]);
-  useEffect(() => {
-    if (!open) return;
-    const dismiss = (event: PointerEvent) => {if (!root.current?.contains(event.target as Node)) setOpen(false);};
-    const blur = () => setOpen(false);
-    document.addEventListener('pointerdown', dismiss);window.addEventListener('blur', blur);
-    root.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
-    return () => {document.removeEventListener('pointerdown', dismiss);window.removeEventListener('blur', blur);};
-  }, [open]);
-  return <div className="file-actions" ref={root} onBlur={event => {if (!event.currentTarget.contains(event.relatedTarget as Node)) setOpen(false);}} onKeyDown={event => {
-    if(event.key === 'Escape'){event.preventDefault();setOpen(false);trigger.current?.focus();}
-    if(open && ['ArrowDown','ArrowUp'].includes(event.key)){event.preventDefault();const buttons=[...root.current!.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')],index=buttons.indexOf(document.activeElement as HTMLButtonElement);buttons[(index+(event.key==='ArrowDown'?1:buttons.length-1))%buttons.length]?.focus();}
-  }}><button ref={trigger} className="icon-button" title={label} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}><MoreHorizontal size={17}/></button>
-    {open && <div className="file-actions-menu" role="menu">{actions.map(([label,Icon,action]) => <button role="menuitem" key={label} onClick={() => {setOpen(false);trigger.current?.focus();void action().catch(failure => error(failure.message));}}><Icon size={15}/>{label}</button>)}</div>}
-  </div>;
 }

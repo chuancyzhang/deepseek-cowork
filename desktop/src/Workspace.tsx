@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { ArrowLeft, BookOpen, Check, ChevronDown, ChevronRight, FileText, Folder, Globe, ListChecks, Maximize2, MessageSquare, Minimize2, Pin, PinOff, Plus, RefreshCw, Search, Terminal, X } from 'lucide-react';
+import { ArrowLeft, BookOpen, Check, ChevronDown, ChevronRight, FileDiff, FileText, Folder, Globe, ListChecks, Maximize2, MessageSquare, Minimize2, Pin, PinOff, Plus, RefreshCw, Search, Terminal, X } from 'lucide-react';
 import type { Conversation, FileSession } from './types';
 import PluginSlot from './plugins/PluginSlot';
 import {useHostField} from './host/context';
@@ -11,7 +11,7 @@ import TaskWorkspace, { type TaskView } from './TaskWorkspace';
 
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 export type WorkbenchTab = { id: string; kind: string; title: string; cwd: string; url?: string; owner: string; control_revision: number; status: string };
-export type WorkspaceView = { selected: string; newOpen: boolean; filesOpen: boolean; filesPinned: boolean; tasksOpen: boolean; tasksPinned: boolean; fileQuery: string; task: TaskView; width?: number; libraryOpen?: boolean; reviewOpen?: string[]; reviewClosed?: string[]; reviewEdits?: Record<string, ReviewEdit> };
+export type WorkspaceView = { selected: string; newOpen: boolean; filesOpen: boolean; filesPinned: boolean; tasksOpen: boolean; tasksPinned: boolean; fileQuery: string; task: TaskView; width?: number; changesOpen?: boolean; libraryOpen?: boolean; reviewOpen?: string[]; reviewClosed?: string[]; reviewEdits?: Record<string, ReviewEdit> };
 export const emptyWorkspace = (): WorkspaceView => ({ selected: 'new', newOpen: false, filesOpen: false, filesPinned: false, tasksOpen: false, tasksPinned: false, fileQuery: '', task: { section: 'calls' } });
 type Props = {
   conversation: Conversation; value: WorkspaceView; change: (value: Partial<WorkspaceView>) => void;
@@ -20,6 +20,7 @@ type Props = {
   selectFile: (path: string) => Promise<void>; openFile: (path: string) => Promise<void>; closeFile: (path: string) => Promise<void>;
   refreshFiles: (id?: string, path?: string) => Promise<void>; createDocument: () => Promise<void>;
   preserve: () => Promise<void>;
+  canViewChanges: boolean; openChanges: () => void; changesContent: ReactNode;
   openReview: (id: string) => void; registerEditorFlush: (path: string, flush?: () => Promise<string>) => void;
   error: (message: string) => void; confirm: (title: string, detail: string, choices: string[]) => Promise<number>;
 };
@@ -116,6 +117,7 @@ export default function Workspace(props: Props) {
   const returnToWorkspace = {selected:'new',newOpen:false};
   const contentTabs: TabItem[] = [
     ...(value.tasksPinned ? [{id:'tasks',name:'任务',icon:<ListChecks size={14}/>,select:()=>change({selected:'tasks'}),close:()=>change({tasksPinned:false,...(showTasks ? returnToWorkspace : {})})}] : []),
+    ...(value.changesOpen ? [{id:'changes',name:'变更',icon:<FileDiff size={14}/>,select:props.openChanges,close:()=>change({changesOpen:false,...(value.selected==='changes'?returnToWorkspace:{})})}] : []),
     ...(value.libraryOpen ? [{id:'library',name:'资料库',icon:<BookOpen size={14}/>,select:()=>change({selected:'library'}),close:()=>change({libraryOpen:false,...(value.selected==='library'?returnToWorkspace:{})})}] : []),
     ...openReviews.map(item=>({id:'review:'+item.id,name:reviewTitle(item),icon:<FileText size={14}/>,select:()=>props.openReview(item.id),close:()=>change({reviewOpen:(value.reviewOpen||[]).filter(id=>id!==item.id),reviewClosed:[...new Set([...(value.reviewClosed||[]),item.id])],...(selectedReview===item.id?returnToWorkspace:{})})})),
     ...editors.map(editor=>({id:'file:'+editor.file.path,name:editor.file.name+(editor.text!==editor.saved ? ' •' : ''),detail:editor.file.path,icon:<FileText size={14}/>,select:()=>void props.selectFile(editor.file.path),close:()=>void props.closeFile(editor.file.path)})),
@@ -137,6 +139,7 @@ export default function Workspace(props: Props) {
   return <section className="workspace" ref={root} aria-label="工作区">
     <div className="workspace-bar">
       <button data-workspace-toggle className={'icon-button ' + (value.filesOpen ? 'selected' : '')} title="工作区文件" aria-label="工作区文件" aria-expanded={value.filesOpen} onClick={() => { change({filesOpen: !value.filesOpen, tasksOpen: false}); void props.refreshFiles(); }}><Folder size={17}/></button>
+      {props.canViewChanges && !value.changesOpen && <button className="icon-button" title="查看工作目录变更" aria-label="查看工作目录变更" onClick={props.openChanges}><FileDiff size={17}/></button>}
       {!value.tasksPinned && <button data-workspace-toggle className="icon-button" title="任务" aria-label="打开任务" onClick={() => void navigate(() => {
         change({selected: 'tasks', tasksPinned: true, tasksOpen: false, ...(!value.filesPinned ? {filesOpen: false} : {})});
         requestAnimationFrame(() => root.current?.querySelector<HTMLButtonElement>('[role="tab"][title="任务"]')?.focus());
@@ -167,7 +170,7 @@ export default function Workspace(props: Props) {
       </aside></PluginSlot>}
       <div className="workspace-content" hidden={expanded && value.selected === 'conversation'}>
         {loadError && <div className="inline-error" role="alert">{loadError}<button onClick={() => void refresh()}>重试</button></div>}
-        {selectedReview ? <ReviewWorkspace key={cid + ':' + selectedReview} cid={cid} id={selectedReview} conversation={conversation} edit={value.reviewEdits?.[selectedReview]} change={edit=>change({reviewEdits:{...value.reviewEdits,[selectedReview]:edit}})} openReview={props.openReview} openFile={props.openFile} register={props.registerEditorFlush} confirm={props.confirm} saved={()=>void props.refreshFiles()}/> : value.selected === 'library'  && value.libraryOpen ? <div className="workspace-library">{props.libraryContent}</div> : showTasks ? taskContent : fileSelected ? props.fileContent : selectedTab?.kind === 'terminal' ? <PluginSlot kind="panel" target="terminal" scope={{conversationId:cid,tabId:selectedTab.id}}><TerminalWorkspace key={selectedTab.id} cid={cid} tab={selectedTab} dark={props.dark} error={error} refresh={refresh}/></PluginSlot> : selectedTab?.kind === 'web' ? <PluginSlot kind="panel" target="browser" scope={{conversationId:cid,tabId:selectedTab.id}}><BrowserWorkspace key={selectedTab.id} cid={cid} tab={selectedTab} obscured={props.obscured || floating || tabsOpen} error={error} refresh={refresh}/></PluginSlot> : <div className="workspace-start">
+        {selectedReview ? <ReviewWorkspace key={cid + ':' + selectedReview} cid={cid} id={selectedReview} conversation={conversation} edit={value.reviewEdits?.[selectedReview]} change={edit=>change({reviewEdits:{...value.reviewEdits,[selectedReview]:edit}})} openReview={props.openReview} openFile={props.openFile} register={props.registerEditorFlush} confirm={props.confirm} saved={()=>void props.refreshFiles()}/> : value.selected === 'library'  && value.libraryOpen ? <div className="workspace-library">{props.libraryContent}</div> : showTasks ? taskContent : value.selected === 'changes' && value.changesOpen ? props.changesContent : fileSelected ? props.fileContent : selectedTab?.kind === 'terminal' ? <PluginSlot kind="panel" target="terminal" scope={{conversationId:cid,tabId:selectedTab.id}}><TerminalWorkspace key={selectedTab.id} cid={cid} tab={selectedTab} dark={props.dark} error={error} refresh={refresh}/></PluginSlot> : selectedTab?.kind === 'web' ? <PluginSlot kind="panel" target="browser" scope={{conversationId:cid,tabId:selectedTab.id}}><BrowserWorkspace key={selectedTab.id} cid={cid} tab={selectedTab} obscured={props.obscured || floating || tabsOpen} error={error} refresh={refresh}/></PluginSlot> : <div className="workspace-start">
           <h2>新标签页</h2>
           <section><label htmlFor={'address-' + cid}><Globe size={17}/>打开网页</label><form className="new-page-address" onSubmit={event => {event.preventDefault(); void openNative('web');}}><input id={'address-' + cid} aria-label="新网页地址" placeholder="输入网址" value={address} onChange={event => setAddress(event.target.value)}/><button className="icon-button" title="打开网页" disabled={!address.trim() || busy}><ChevronRight size={17}/></button></form></section>
           <section className="workspace-start-row"><div><FileText size={18}/><span>页面<small>记录想法或撰写内容</small></span></div><button className="secondary" onClick={() => void props.createDocument()}>新增页面</button></section>

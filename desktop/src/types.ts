@@ -21,6 +21,13 @@ export type SidebarLayout = {
 };
 export type SidebarSnapshot = { value: SidebarLayout; revision: number };
 export type SidebarMethod = 'sidebar.create_group' | 'sidebar.move' | 'sidebar.pin_project';
+export type WorkspaceChange = {
+  path: string; absolute_path: string;
+  status: 'added' | 'modified' | 'deleted' | 'submodule' | 'untracked_after_delete';
+  added: number | null; removed: number | null;
+};
+export type WorkspaceChangeList = { repository: boolean; files: WorkspaceChange[] };
+export type WorkspaceChangeRead = { directory: string; data?: WorkspaceChangeList; pending?: boolean; error?: string };
 export type FileSession = { id: string; path: string; name: string; fingerprint: string; payload: any; conflict?: boolean; unavailable?: boolean };
 export type Extension = {id:string; kind:'workbench'|'page'|'panel'|'editor'|'command'|'menu'|'toolbar'; target:string; entry?:string; mode?:'replace'|'append'; command?:string; title?:string; action?:'usage'; showRate?:boolean};
 export type Plugin = { id: string; name: string; version: string; description: string; capabilities: string[]; hash: string; builtin?: boolean; previous?: boolean; html?: string; url?: string; token?: string; hostApi:1|2; stateVersion?:number; entry?:string; contributes:Extension[]; enabled?:boolean };

@@ -323,3 +323,74 @@ def test_builtin_browser_image_uses_conversation_attachment_pipeline(tmp_path):
     assert 'screenshot' not in result
     from pathlib import Path
     assert Path(parts[0]['path']).is_file()
+
+
+def test_workspace_changes_read_index_and_saved_files_inside_conversation_directory(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    from pathlib import Path
+
+    import pytest
+
+    from core.desktop_workbench import DesktopFiles
+    from core.sandbox_runtime import get_workspace_git
+    from core.workbench import WorkbenchError
+
+    git = get_workspace_git()
+    if not git:
+        pytest.skip('Git runtime is required for this integration test')
+    if os.name == 'nt':
+        monkeypatch.setenv('PATH', str(Path(os.environ['SystemRoot']) / 'System32'))
+        assert get_workspace_git() == git
+    monkeypatch.setenv('GIT_CONFIG_NOSYSTEM', '1')
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL', os.devnull)
+    monkeypatch.setenv('GIT_CEILING_DIRECTORIES', str(tmp_path.parent))
+    root = tmp_path / 'repository'
+    folder = root / '报告'
+    folder.mkdir(parents=True)
+
+    def run(*args):
+        subprocess.run([git, *args], cwd=root, check=True, capture_output=True)
+
+    run('init', '--quiet', '--template=')
+    run('config', 'core.autocrlf', 'false')
+    source = folder / '[报告] totals.py'
+    source.write_text('total = 1\nprint(total)\n', encoding='utf-8')
+    deleted = folder / 'old.txt'
+    deleted.write_bytes(b'old text\n')
+    outside = root / 'outside.txt'
+    outside.write_bytes(b'outside\n')
+    (root / '.gitignore').write_bytes(b'ignored.txt\n')
+    run('add', '--all')
+    storage = SimpleNamespace(get_conversation_record=lambda cid: {'meta': {'workspace_dir': str(folder if cid == 'report' else tmp_path)}})
+    files = DesktopFiles(storage, None)
+
+    def read(method='workspace.changes', **params):
+        return files.dispatch(method, {'conversation_id': 'report', **params})
+
+    unborn = read()
+    assert unborn['repository'] and {item['path'] for item in unborn['files']} == {source.name, deleted.name}
+    run('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--quiet', '-m', 'Baseline')
+    source.write_text('total = 2\nprint(total)\n', encoding='utf-8')
+    run('add', '--', source.relative_to(root).as_posix())
+    source.write_text('total = 2\nprint(total)\n# 已更新\n', encoding='utf-8')
+    outside.write_bytes(b'changed outside the conversation\n')
+    deleted.unlink()
+    (folder / 'new.txt').write_bytes(b'first line\nsecond line')
+    (folder / 'ignored.txt').write_bytes(b'ignored\n')
+    (folder / 'binary.dat').write_bytes(b'\x00\x01')
+    index = (root / '.git' / 'index').read_bytes()
+
+    rows = {item['path']: item for item in read()['files']}
+    assert set(rows) == {source.name, deleted.name, 'new.txt', 'binary.dat'}
+    assert [(item['status'], item['added'], item['removed']) for item in rows.values()] == [
+        ('modified', 2, 1), ('added', None, None), ('added', 2, 0), ('deleted', 0, 1),
+    ]
+    patch = read('workspace.diff', path=str(source))['patch']
+    assert '-total = 1' in patch and '+total = 2' in patch and '+# 已更新' in patch
+    assert '+second line' in read('workspace.diff', path='new.txt')['patch']
+    assert '-old text' in read('workspace.diff', path=str(deleted))['patch']
+    assert files.dispatch('workspace.changes', {'conversation_id': 'plain'}) == {'repository': False, 'files': []}
+    with pytest.raises(WorkbenchError, match='文件不属于当前工作目录'):
+        read('workspace.diff', path=str(outside))
+    assert (root / '.git' / 'index').read_bytes() == index

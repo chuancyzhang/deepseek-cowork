@@ -1,5 +1,5 @@
 import {useCallback,useEffect,useLayoutEffect,useRef,useState,useMemo} from 'react';
-import type {Attachment,Conversation,FileSession,HostEvent,Message,Plugin,ProjectAction,ProjectRecord,Run,RuntimeEvent,Settings,SidebarMethod,SidebarSnapshot} from '../types';
+import type {Attachment,Conversation,FileSession,HostEvent,Message,Plugin,ProjectAction,ProjectRecord,Run,RuntimeEvent,Settings,SidebarMethod,SidebarSnapshot,WorkspaceChangeList,WorkspaceChangeRead} from '../types';
 import type {LibrarySelection} from '../management/libraryCatalog';
 import type {UsageView} from '../Usage';
 import {MessageProjection,isActive,mergeEvents,unwrapEvents,messageText,interactionRecords} from '../runtime';
@@ -9,8 +9,10 @@ import {emptyWorkspace,type WorkspaceView} from '../Workspace';
 import {themeStyle} from '../theme';
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 type Ask = { title: string; detail: string; choices: string[]; resolve: (index: number) => void };
-type Editor = { file: FileSession; text: string; saved: string; plugin: Plugin };
+type Editor = { file: FileSession; text: string; saved: string; plugin: Plugin; showChanges?: boolean };
 type ProjectForm = {kind: 'create'; openChat: boolean} | {kind: 'edit'; project: ProjectRecord};
+
+const workspaceDirectory = (conversation: Conversation): string => conversation.meta.workspace_dir || conversation.meta.workspace_path || '';
 
 import {useHost,useHostField,useSessionField,useConversation} from './context';
 import {conversationAt,receiveConversation,receiveEvents,receiveRun} from './conversations';
@@ -51,6 +53,24 @@ export function useWorkbenchController() {
   const [workspaceView, setWorkspaceView] = useSessionField<WorkspaceView>('workspaceView', emptyWorkspace);
   const changeWorkspace = useCallback((value: Partial<WorkspaceView>) => setWorkspaceView(previous => ({...previous, ...value})), []);
   const [fileTree, setFileTree] = useSessionField<any>('fileTree', { files: [] });
+  const [changeRead] = useSessionField<WorkspaceChangeRead | null>('workspaceChanges', null);
+  const directory = current ? workspaceDirectory(current) : '';
+  const workspaceChanges = changeRead?.directory === directory ? changeRead : null;
+  const refreshChanges = useCallback(async (id = host.get('navigation:selected', '')) => {
+    if (!id || id !== host.get('navigation:selected', '')) return;
+    const conversation = conversationAt(host, id);
+    if (!conversation) return;
+    const key = host.sessionKey('workspaceChanges', id), directory = workspaceDirectory(conversation);
+    const previous = host.get<WorkspaceChangeRead | null>(key, null);
+    const pending: WorkspaceChangeRead = {directory, data: previous?.directory === directory ? previous.data : undefined, pending: true};
+    host.set(key, pending);
+    const finish = (result: WorkspaceChangeRead) => {
+      const latest = conversationAt(host, id);
+      if (latest && workspaceDirectory(latest) === directory && host.get(key, null) === pending) host.set(key, result);
+    };
+    try { finish({directory, data: await call<WorkspaceChangeList>('workspace.changes', {conversation_id: id})}); }
+    catch (failure) { finish({directory, data: pending.data, error: (failure as Error).message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')}); }
+  }, [host]);
   const [editors, setEditors] = useSessionField<Editor[]>('editors', []);
   const [activeFile, setActiveFile] = useSessionField('activeFile', '');
   const [fileChanged, setFileChanged] = useState(false);
@@ -93,6 +113,9 @@ export function useWorkbenchController() {
   const leaveManagement = useRef<() => Promise<boolean>>(async () => true);
   const registerLeave = useCallback((callback: () => Promise<boolean>) => { leaveManagement.current = callback; }, []);
   const active = isActive(current?.run?.status);
+  useEffect(() => {
+    if (route === 'chat' && !active && !loading && !serviceError && current?.id) void refreshChanges(current.id);
+  }, [route, active, loading, serviceError, current?.id, directory, refreshChanges]);
   useEffect(() => {
     setFileChanged(false);
     if (!activeFile || !current?.id || !workspaceOpen) return;
@@ -441,7 +464,7 @@ export function useWorkbenchController() {
     const timer = setTimeout(() => { void saveView().catch(failure => error('工作区草稿尚未保存：' + failure.message)); }, 500);
     return () => clearTimeout(timer);
   }, [editors, activeFile, workspaceOpen, workspaceView, creationOpen, creationTab, creationScope, saveView, error, loading]);
-  useLayoutEffect(() => { if (nearBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [events, current?.messages, current?.media_tasks, interaction]);
+  useLayoutEffect(() => { if (nearBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [events, current?.messages, current?.media_tasks, interaction, workspaceChanges?.data]);
 
   useEffect(() => window.cowork.onEvents((batch: HostEvent[]) => {
     receiveEvents(host,batch);
@@ -618,30 +641,30 @@ export function useWorkbenchController() {
   async function activateFile(path: string) {
     try { await saveView(); setActiveFile(path); changeWorkspace({selected: 'file:' + path}); } catch (failure) { error((failure as Error).message); }
   }
-  async function openFile(path: string, edit = false) {
+  async function openFile(path: string, edit = false, showChanges = false) {
     const id = selectedId.current;
     try { await saveView(); } catch (failure) { error((failure as Error).message); return; }
     if (selectedId.current !== id) return;
-    const active = editorsRef.current.find(item => item.file.path === path);
-    if (active) {
-      if (edit && active.file.payload.kind === 'html') host.set('file-source:' + active.file.id, true);
-      setActiveFile(path); changeWorkspace({selected: 'file:' + path, ...(!workspaceView.filesPinned ? {filesOpen: false} : {})}); setWorkspaceOpen(true); return;
-    }
+    const select = (file: FileSession) => {
+      if (edit && file.payload.kind === 'html') host.set('file-source:' + file.id, true);
+      if (showChanges || edit) setEditors(previous => previous.map(item => item.file.path === file.path ? {...item, showChanges} : item));
+      setActiveFile(file.path);
+      changeWorkspace({selected: 'file:' + file.path, ...(!workspaceView.filesPinned ? {filesOpen: false} : {})});
+      setWorkspaceOpen(true);
+    };
+    const alreadyOpen = editorsRef.current.find(item => item.file.path === path);
+    if (alreadyOpen) { select(alreadyOpen.file); return; }
     try {
       const file = await call<FileSession>('file.open', { conversation_id: id, path });
       if (selectedId.current !== id) return;
-      if (editorsRef.current.some(item => item.file.path === file.path)) {
-        setActiveFile(file.path); changeWorkspace({selected:'file:' + file.path, ...(!workspaceView.filesPinned ? {filesOpen:false} : {})}); setWorkspaceOpen(true); return;
+      if (!editorsRef.current.some(item => item.file.path === file.path)) {
+        const plugin = await call<Plugin>('plugins.load', { id: 'cowork.writing' });
+        if (selectedId.current !== id) return;
+        const text = file.payload.text ?? file.payload.content ?? '';
+        if (edit && !file.payload.read_only) file.payload.start_edit = true;
+        setEditors(previous => previous.some(item => item.file.path === file.path) ? previous : [...previous, {file, text, saved: text, plugin}]);
       }
-
-      const plugin = await call<Plugin>('plugins.load', { id: 'cowork.writing' });
-      if (selectedId.current !== id) return;
-      const text = file.payload.text ?? file.payload.content ?? '';
-      if (edit && !file.payload.read_only) {
-        file.payload.start_edit = true;
-        if (file.payload.kind === 'html') host.set('file-source:' + file.id, true);
-      }
-      setEditors(previous => [...previous, { file, text, saved: text, plugin }]); setActiveFile(file.path); changeWorkspace({selected: 'file:' + file.path, ...(!workspaceView.filesPinned ? {filesOpen: false} : {})}); setWorkspaceOpen(true);
+      select(editorsRef.current.find(item => item.file.path === file.path)?.file || file);
     } catch (failure) { if (selectedId.current === id) error((failure as Error).message); }
   }
   async function saveEditor(path: string, id = selectedId.current): Promise<any> {
@@ -670,12 +693,12 @@ export function useWorkbenchController() {
       const activeKey=host.sessionKey('activeFile',id),workspaceKey=host.sessionKey('workspaceView',id);
       if(host.get(activeKey,'')===path)host.set(activeKey,file.path);
       host.set<WorkspaceView>(workspaceKey, previous=>previous.selected==='file:'+path?{...previous,selected:'file:'+file.path}:previous);
-      await saveView(id);void refreshFiles(id);
+      await saveView(id);void refreshFiles(id);void refreshChanges(id);
       return file;
     }
     const result = await call('file.save', { conversation_id: id, id: editor.file.id, payload: ['text', 'html'].includes(editor.file.payload.kind) ? text : JSON.parse(text) });
     host.set<Editor[]>(editorKey, previous => previous.map(e => e.file.path === path ? { ...e, saved: text, file: { ...e.file, fingerprint: result.fingerprint } } : e));
-    void refreshFiles(id);return {...result,path};
+    void refreshFiles(id);void refreshChanges(id);return {...result,path};
   }
   async function reloadFile() {
     const id = selectedId.current, item = editorsRef.current.find(item => item.file.path === activeFile);
@@ -697,7 +720,7 @@ export function useWorkbenchController() {
       const name = editor.file.name.replace(/\.[^.]+$/, '') + '-恢复-' + Date.now() + extension;
       const file = await call<FileSession>('file.save_copy', { conversation_id: selectedId.current, id: editor.file.id, name, payload: ['text', 'html'].includes(editor.file.payload.kind) ? text : JSON.parse(text) });
       setEditors(previous => previous.map(e => e.file.path === editor.file.path ? { ...e, file, text, saved: text } : e));
-      setActiveFile(file.path); await refreshFiles();
+      setActiveFile(file.path); void refreshChanges(); await refreshFiles();
     } catch (failure) { error((failure as Error).message); }
   }
   function changeEditor(path: string, text: string) {
@@ -798,6 +821,6 @@ export function useWorkbenchController() {
     for(const id of drafts.entries.keys()) await saveDraft(id);
     for(const key of host.values.keys()) if(key.startsWith('session:')&&key.endsWith(':current')&&host.get(key)) await saveView(key.slice(8,-8));
   }), [saves]);
-  return {projectDialog, setProjectDialog, saveProject, sidebarLayout:sidebarSnapshot?.value || null, sidebarConversations, changeSidebar, usePluginAction,creationOpen,setCreationOpen,creationTab,setCreationTab,creationScope,setCreationScope,enterCreation,exitCreation,settings, setSettings, conversations, setConversations, hasMoreConversations, setHasMoreConversations, runningConversations, current, setCurrent, events, setEvents, route, setRoute, loading, setLoading, serviceError, setServiceError, notice, setNotice, draft, attachments, drafts, sending, setSending, query, setQuery, sidebar, setSidebar, workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, setWorkspaceView, changeWorkspace, fileTree, setFileTree, editors, setEditors, activeFile, setActiveFile, fileChanged, setFileChanged, interaction, setInteraction, ask, setAsk, historyEdit, setHistoryEdit, historyUndo, setHistoryUndo, olderLoading, setOlderLoading, pluginPreview, setPluginPreview, themeCandidate, setThemeCandidate, themePreview, setThemePreview, previewText, setPreviewText, usageView, setUsageView, skills, setSkills, selectedSkills, showSkills, setShowSkills, modelForm, setModelForm, formBusy, setFormBusy, rename, setRename, title, setTitle, scroll, nearBottom, composer, selectedId, loadGeneration, draftRef, editorsRef, editorFlush, registerEditorFlush, stateRef, pendingSteering, closePending, viewRevisions, viewQueue, theme, leaveManagement, registerLeave, active, error, confirm, applyDraft, setDraft, setAttachments, refreshList, moreConversations, loadOlder, messageActionRef, fileActionRef, onMessageAction, onMessageFile, addProject, conversationAction, projectAction, saveDraft, saveView, refreshFiles, loadConversation, switchConversation, newConversation, closeApp, send, stop, stopRun, recoverSend, creatingConversation, ensureConversation, preferences, attach, browseLibrary, addLibraryReference, openReview, activateFile, openFile, saveEditor, reloadFile, saveCopy, changeEditor, closeEditor, createDocument, goRoute, applyPlugin, messages, questions, editor, filtered, saves, host};
+  return {projectDialog, setProjectDialog, saveProject, sidebarLayout:sidebarSnapshot?.value || null, sidebarConversations, changeSidebar, usePluginAction,creationOpen,setCreationOpen,creationTab,setCreationTab,creationScope,setCreationScope,enterCreation,exitCreation,settings, setSettings, conversations, setConversations, hasMoreConversations, setHasMoreConversations, runningConversations, current, setCurrent, events, setEvents, route, setRoute, loading, setLoading, serviceError, setServiceError, notice, setNotice, draft, attachments, drafts, sending, setSending, query, setQuery, sidebar, setSidebar, workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, setWorkspaceView, changeWorkspace, fileTree, setFileTree, workspaceChanges, refreshChanges, editors, setEditors, activeFile, setActiveFile, fileChanged, setFileChanged, interaction, setInteraction, ask, setAsk, historyEdit, setHistoryEdit, historyUndo, setHistoryUndo, olderLoading, setOlderLoading, pluginPreview, setPluginPreview, themeCandidate, setThemeCandidate, themePreview, setThemePreview, previewText, setPreviewText, usageView, setUsageView, skills, setSkills, selectedSkills, showSkills, setShowSkills, modelForm, setModelForm, formBusy, setFormBusy, rename, setRename, title, setTitle, scroll, nearBottom, composer, selectedId, loadGeneration, draftRef, editorsRef, editorFlush, registerEditorFlush, stateRef, pendingSteering, closePending, viewRevisions, viewQueue, theme, leaveManagement, registerLeave, active, error, confirm, applyDraft, setDraft, setAttachments, refreshList, moreConversations, loadOlder, messageActionRef, fileActionRef, onMessageAction, onMessageFile, addProject, conversationAction, projectAction, saveDraft, saveView, refreshFiles, loadConversation, switchConversation, newConversation, closeApp, send, stop, stopRun, recoverSend, creatingConversation, ensureConversation, preferences, attach, browseLibrary, addLibraryReference, openReview, activateFile, openFile, saveEditor, reloadFile, saveCopy, changeEditor, closeEditor, createDocument, goRoute, applyPlugin, messages, questions, editor, filtered, saves, host};
 }
 export type WorkbenchController = ReturnType<typeof useWorkbenchController>;

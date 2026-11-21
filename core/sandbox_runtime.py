@@ -371,6 +371,15 @@ def _bash_runtime_dirs():
     )
 
 
+def get_workspace_git():
+    """Resolve the Git client shipped alongside Bash on Windows."""
+    if os.name != "nt":
+        return shutil.which("git") or ""
+    return _candidate_existing_file(_runtime_file_candidates_from_dirs(
+        "git_bash", _bash_runtime_dirs(), [os.path.join("cmd", "git.exe")],
+    ))
+
+
 def _bash_candidate_paths():
     candidates = [os.getenv("COWORK_BASH_EXE")]
     candidates.extend(

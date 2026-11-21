@@ -191,7 +191,7 @@ class DesktopWorkbench:
 
 
 class DesktopFiles:
-    methods = frozenset(['workspace.list', 'workspace.attach', 'workspace.attach_data', 'workspace.create', 'file.describe', 'file.open', 'file.save', 'file.save_copy',
+    methods = frozenset(['workspace.list', 'workspace.changes', 'workspace.diff', 'workspace.attach', 'workspace.attach_data', 'workspace.create', 'file.describe', 'file.open', 'file.save', 'file.save_copy',
                          'file.render', 'file.render_result', 'file.install_renderer', 'file.preview'])
 
     def __init__(self, storage, config, jobs=None):
@@ -235,6 +235,17 @@ class DesktopFiles:
             path = self.preview_file(cid, result["path"])
             return {"id": job["id"], "path": str(path), "name": path.name, "fingerprint": result["fingerprint"],
                     "payload": {"kind": "preview", "preview_kind": "pdf", "read_only": True, "preview_path": result["preview_path"]}}
+        if method in {"workspace.changes", "workspace.diff"}:
+            from core.workspace_changes import read_changes
+            try:
+                result = read_changes(self.workspace(cid), p["path"] if method == "workspace.diff" else None)
+            except (WorkbenchError, OSError) as failure:
+                log.warning("workspace_git_read_failed session=%s method=%s reason=%s", cid, method, getattr(failure, "code", type(failure).__name__))
+                if isinstance(failure, OSError):
+                    raise ValueError("无法读取变更文件，请重试。") from failure
+                raise
+            log.debug("workspace_git_read_completed session=%s method=%s files=%s", cid, method, len(result.get("files", [])))
+            return result
         if method == "workspace.list":
             root = self.workspace(cid)
             folder = self.checked_file(cid, p.get("path") or ".")

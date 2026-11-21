@@ -8,7 +8,7 @@ import {previewSnapshot} from '../../host/sdk';
 import {themeStyle} from '../../theme';
 import type {Conversation, Extension, Plugin, RuntimeEvent} from '../../types';
 import PluginFrame from '../PluginFrame';
-import {MoreActions} from '../BuiltinWorkbench';
+import MoreActions from '../../MoreActions';
 import './creation.css';
 
 export const previewPages = [['对话','对话'], ['首页布局','首页'], ['工作区','工作区'], ['管理页面','管理页面']] as const;

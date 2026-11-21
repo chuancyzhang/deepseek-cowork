@@ -1,6 +1,7 @@
-import { useEffect, useId, useMemo, useRef, useState, type Ref } from 'react';
-import { ChartColumn, ChevronRight, Info, X } from 'lucide-react';
-import type { RuntimeEvent, Settings } from './types';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type Ref } from 'react';
+import { ArrowLeft, ChartColumn, ChevronRight, Files, FileText, Gauge, Info, X } from 'lucide-react';
+import type { Message, RuntimeEvent, Settings } from './types';
+import { conversationFiles } from './attachments';
 import { generationRates, SPEED_TREND_SECONDS, UsageProjection, type SpeedRequest } from './usageMetrics';
 import './usage.css';
 
@@ -13,7 +14,9 @@ const groups = [
 ] as const;
 const percent = (value: number, sum: number) => sum > 0 ? value / sum * 100 : 0;
 
-function SpeedTrend({ rates, reference }: { rates: (number | undefined)[]; reference?: number }) {
+export type UsageView = 'overview' | 'details';
+
+function SpeedTrend({ rates, reference, compact }: { rates: (number | undefined)[]; reference?: number; compact?: boolean }) {
   const width = 320, height = 64;
   const peak = Math.max(reference ?? 0, ...rates.map(rate => rate ?? 0));
   const step = peak <= 20 ? 5 : 20;
@@ -23,16 +26,17 @@ function SpeedTrend({ rates, reference }: { rates: (number | undefined)[]; refer
   const line = points.map(point => point.join(',')).join(' ');
   const [endX, endY] = points[points.length - 1];
 
-  return <div className="usage-trend" role="img" aria-label={`近 ${SPEED_TREND_SECONDS} 秒的生成速度走势${reference == null ? '' : '，虚线为上次完成均速'}`}>
-    <div className="usage-trend-scale" aria-hidden="true"><span>{max}</span><span>{max / 2}</span><span>0</span></div>
+  return <div className={compact ? 'usage-sparkline' : 'usage-trend'} role="img"
+    aria-label={`近 ${SPEED_TREND_SECONDS} 秒的生成速度走势${reference == null ? '' : '，虚线为上次完成均速'}`}>
+    {!compact && <div className="usage-trend-scale" aria-hidden="true"><span>{max}</span><span>{max / 2}</span><span>0</span></div>}
     <svg viewBox="-4 -4 328 72" preserveAspectRatio="none" aria-hidden="true">
       <polygon className="usage-trend-area" points={`${points[0][0]},${height} ${line} ${endX},${height}`}/>
-      {[0, height / 2, height].map(level => <line key={level} className="usage-trend-grid" x1={0} y1={level} x2={width} y2={level}/>)}
+      {!compact && [0, height / 2, height].map(level => <line key={level} className="usage-trend-grid" x1={0} y1={level} x2={width} y2={level}/>)}
       {reference != null && <line className="usage-trend-reference" x1={0} y1={y(reference)} x2={width} y2={y(reference)}/>}
       <polyline className="usage-trend-line" points={line}/>
       <circle className="usage-trend-dot" cx={endX} cy={endY} r={3}/>
     </svg>
-    <div className="usage-trend-time" aria-hidden="true"><span>{SPEED_TREND_SECONDS} 秒前</span><span>{SPEED_TREND_SECONDS / 2} 秒前</span><span>现在</span></div>
+    {!compact && <div className="usage-trend-time" aria-hidden="true"><span>{SPEED_TREND_SECONDS} 秒前</span><span>{SPEED_TREND_SECONDS / 2} 秒前</span><span>现在</span></div>}
   </div>;
 }
 
@@ -53,9 +57,9 @@ function useGenerationRates(request?: SpeedRequest) {
   return generationRates(request, now);
 }
 
-function useUsage(events: RuntimeEvent[], activeRunId?: string) {
+function useUsage(events: RuntimeEvent[], activeRunId?: string, turnId?: string) {
   const [projection] = useState(() => new UsageProjection());
-  return useMemo(() => projection.project(events, activeRunId), [projection, events, activeRunId]);
+  return useMemo(() => projection.project(events, activeRunId, turnId), [projection, events, activeRunId, turnId]);
 }
 
 export function UsageToolbarButton({ events, activeRunId, showRate, open, onClick, buttonRef, iconOnly = false }: {
@@ -70,10 +74,23 @@ export function UsageToolbarButton({ events, activeRunId, showRate, open, onClic
     {rate != null && <small className="usage-toolbar-rate">{rate.toFixed(1)} tok/s</small>}</button>;
 }
 
-function GenerationSpeed({ request, lastSpeed }: { request?: SpeedRequest; lastSpeed?: number }) {
+function GenerationSpeed({ request, lastSpeed, compact }: { request?: SpeedRequest; lastSpeed?: number; compact: boolean }) {
   const measuring = request?.firstOutputAt != null;
   const rates = useGenerationRates(request);
   const rate = rates.at(-1);
+
+  if (compact) {
+    const value = request ? rate : lastSpeed;
+    return <section className="usage-compact-speed">
+      <div>
+        <h4><Gauge size={15} aria-hidden="true"/>{!request && lastSpeed != null ? '上次均速' : '生成速度'}</h4>
+        {value != null ? <RateValue value={value}/> : <p className="usage-empty">
+          {request ? measuring ? '采样中' : '等待输出' : '暂无速度记录'}
+        </p>}
+      </div>
+      {rate != null && <SpeedTrend rates={rates} compact/>}
+    </section>;
+  }
 
   return <section className="usage-speed">
     <div className="usage-heading"><h4>生成速度</h4>{request && <small className="usage-live">{measuring ? '生成中' : '等待输出'}</small>}</div>
@@ -89,16 +106,35 @@ function GenerationSpeed({ request, lastSpeed }: { request?: SpeedRequest; lastS
   </section>;
 }
 
-export default function Usage({ events, activeRunId, settings, onSave, onClose }: {
+export default function Usage({ events, activeRunId, turnId, messages, hasMoreHistory, settings, view, onView, onSave, onOpenFile, onClose }: {
   events: RuntimeEvent[];
   activeRunId?: string;
+  turnId?: string;
+  messages?: Message[];
+  hasMoreHistory?: boolean;
   settings: Pick<Settings, 'context_policy'>;
+  view: UsageView;
+  onView: (view: UsageView) => void;
   onSave?: (target: number) => Promise<void>;
+  onOpenFile?: (path: string) => void;
   onClose: () => void;
 }) {
-  const usage = useUsage(events, activeRunId);
+  const usage = useUsage(events, activeRunId, turnId);
+  const files = useMemo(() => messages ? conversationFiles(messages) : [], [messages]);
+  const [filesOpen, setFilesOpen] = useState(false);
   const targetId = useId();
+  const pane = useRef<HTMLElement>(null);
+  const back = useRef<HTMLButtonElement>(null);
+  const reveal = useRef<HTMLButtonElement>(null);
+  const previousView = useRef(view);
   const details = useRef<HTMLDetailsElement>(null);
+  const expanded = view === 'details';
+  useLayoutEffect(() => {
+    if (previousView.current === view) return;
+    previousView.current = view;
+    pane.current?.scrollTo(0, 0);
+    (expanded ? back : reveal).current?.focus({preventScroll:true});
+  }, [expanded, view]);
   const saved = settings.context_policy.enabled ? settings.context_policy.target_tokens : 0;
   const [draftTarget, setDraftTarget] = useState<number>();
   const target = draftTarget ?? saved;
@@ -113,6 +149,12 @@ export default function Usage({ events, activeRunId, settings, onSave, onClose }
   const used = Math.max(0, budget?.used_tokens ?? usage.context?.total ?? 0);
   const usedPercent = percent(used, capacity);
   const cachePercent = usage.cacheInput ? Math.round(percent(usage.cached, usage.cacheInput)) : undefined;
+  const cacheStyle = cachePercent == null ? undefined : {
+    background: `conic-gradient(var(--usage-accent) ${cachePercent}%, var(--soft) 0)`,
+  };
+  const cacheLabel = cachePercent == null ? '—' : `${cachePercent}%`;
+  const totalLabel = hasMoreHistory ? '已载入累计' : '对话累计';
+  const totalTokens = usage.count ? format(usage.input + usage.output) : '—';
   const hasComposition = usage.context?.status === 'available';
   const hasContext = hasComposition || capacity > 0;
   const current = activeRunId != null && usage.contextRunId === activeRunId;
@@ -135,82 +177,117 @@ export default function Usage({ events, activeRunId, settings, onSave, onClose }
     }
   }
 
-  return <section className="usage-popover" role="dialog" aria-label="用量概览">
-    <div className="usage-heading usage-title"><h3>用量</h3><button autoFocus className="icon-button" title="关闭用量" aria-label="关闭用量" onClick={onClose}><X size={16}/></button></div>
-    <GenerationSpeed request={usage.request} lastSpeed={usage.lastSpeed}/>
-
-    <section className="usage-section">
-      <div className="usage-heading"><h4>对话累计</h4><small>{usage.count} 次请求有用量记录</small></div>
-      <div className="usage-metrics">
-        <div>
-          <span>输入与输出</span>
-          <div className="usage-total"><strong>{usage.count ? format(usage.input + usage.output) : '—'}</strong><small>Token</small></div>
-        </div>
-        <div className="usage-cache">
-          <div className="usage-cache-ring" style={cachePercent == null ? undefined : {
-            background: `conic-gradient(var(--usage-accent) ${cachePercent}%, var(--soft) 0)`,
-          }}><strong>{cachePercent == null ? '—' : `${cachePercent}%`}</strong></div>
-          <div><span>输入缓存命中</span><small>仅计有缓存数据的请求</small></div>
-        </div>
+  return <section ref={pane} className={expanded ? 'usage-popover' : 'usage-popover usage-overview'}
+    role="dialog" aria-label={expanded ? '用量详情' : '用量概览'}>
+    <div className="usage-heading usage-title">
+      <div className="usage-title-start">
+        {expanded && <button ref={back} className="icon-button" title="返回用量概览" aria-label="返回用量概览"
+          onClick={() => onView('overview')}><ArrowLeft size={16} aria-hidden="true"/></button>}
+        <h3>{expanded ? '用量详情' : 'Token 用量'}</h3>
       </div>
-    </section>
+      <button autoFocus className="icon-button" title="关闭用量" aria-label="关闭用量" onClick={onClose}><X size={16} aria-hidden="true"/></button>
+    </div>
+    <GenerationSpeed request={usage.request} lastSpeed={usage.lastSpeed} compact={!expanded}/>
 
-    <section className="usage-section">
-      <div className="usage-heading"><h4>{hasContext ? current ? '本次上下文' : '上次请求' : '上下文'}</h4>
-        {hasContext && <small>{capacity > 0 ? '估算' : '文本估算'}{excludedMedia ? ' · 部分媒体未计入' : ''}</small>}
+    {!expanded ? <>
+      <dl className="usage-overview-metrics">
+        <div><dt>本轮用量</dt><dd>{usage.turnTokens == null ? '—' : format(usage.turnTokens)}</dd></div>
+        <div><dt>{totalLabel}</dt><dd>{totalTokens}</dd></div>
+        <div><dt>缓存命中率</dt><dd className="usage-cache-value">{cacheLabel}{cachePercent != null &&
+          <i className="usage-cache-indicator" style={cacheStyle} aria-hidden="true"/>}</dd></div>
+      </dl>
+      <div className="usage-overview-footer">
+        {onOpenFile && files.length > 0 && <details className="usage-files" open={filesOpen}
+          onToggle={event => {if (event.currentTarget.open !== filesOpen) setFilesOpen(event.currentTarget.open);}}>
+          <summary aria-label={`文件，${files.length} 个`}><Files size={15} aria-hidden="true"/>文件
+            <small aria-hidden="true">· {format(files.length)}</small><ChevronRight size={14} className="usage-files-chevron" aria-hidden="true"/>
+          </summary>
+          {filesOpen && <ul>{files.map(file => {
+            const dot = file.name.lastIndexOf('.');
+            const extension = dot > 0 ? file.name.slice(dot) : '';
+            return <li key={file.path}><button title={file.path} aria-label={'打开文件 ' + file.name}
+              onClick={() => {onClose(); onOpenFile(file.path);}}><FileText size={15} aria-hidden="true"/>
+              <span className="usage-file-name"><span>{extension ? file.name.slice(0, dot) : file.name}</span>{extension}</span>
+            </button></li>;
+          })}</ul>}
+        </details>}
+        <button className="usage-reveal" ref={reveal} onClick={() => onView('details')}>
+          详情 <ChevronRight size={14} aria-hidden="true"/>
+        </button>
       </div>
-      {hasContext ? <>
-        <div className="usage-budget">
-          <div><strong>{format(used)}</strong><small>{capacity > 0 ? `/ ${format(capacity)} Token` : 'Token'}</small>
-            {budgetNote && <button className="icon-button usage-budget-info" title={budgetNote} aria-label="查看可用上限说明"
-              onClick={() => {if (details.current) {details.current.open = true; details.current.scrollIntoView({block: 'nearest'});}}}>
-              <Info size={13} aria-hidden="true"/>
-            </button>}
+    </> : <>
+      <section className="usage-section">
+        <div className="usage-heading"><h4>{totalLabel}</h4><small>{usage.count} 次请求有用量记录</small></div>
+        <div className="usage-metrics">
+          <div>
+            <span>输入与输出</span>
+            <div className="usage-total"><strong>{totalTokens}</strong><small>Token</small></div>
           </div>
-          <small>{capacity > 0 ? <>占用 <b>{usedPercent.toFixed(1)}%</b></> : '预算未知'}</small>
+          <div className="usage-cache">
+            <div className="usage-cache-ring" style={cacheStyle}><strong>{cacheLabel}</strong></div>
+            <div><span>缓存命中率</span><small>仅计有缓存数据的请求</small></div>
+          </div>
         </div>
-        {capacity > 0 && <div className="usage-capacity" role="meter" aria-label="上下文占用" aria-valuemin={0} aria-valuemax={capacity}
-          aria-valuenow={Math.min(used, capacity)} aria-valuetext={`${format(used)} / ${format(capacity)} Token`}>
-          <span style={{ width: Math.min(100, usedPercent) + '%' }}/>
+      </section>
+
+      <section className="usage-section">
+        <div className="usage-heading"><h4>{hasContext ? current ? '本次上下文' : '上次请求' : '上下文'}</h4>
+          {hasContext && <small>{capacity > 0 ? '估算' : '文本估算'}{excludedMedia ? ' · 部分媒体未计入' : ''}</small>}
+        </div>
+        {hasContext ? <>
+          <div className="usage-budget">
+            <div><strong>{format(used)}</strong><small>{capacity > 0 ? `/ ${format(capacity)} Token` : 'Token'}</small>
+              {budgetNote && <button className="icon-button usage-budget-info" title={budgetNote} aria-label="查看可用上限说明"
+                onClick={() => {if (details.current) {details.current.open = true; details.current.scrollIntoView({block: 'nearest'});}}}>
+                <Info size={13} aria-hidden="true"/>
+              </button>}
+            </div>
+            <small>{capacity > 0 ? <>占用 <b>{usedPercent.toFixed(1)}%</b></> : '预算未知'}</small>
+          </div>
+          {capacity > 0 && <div className="usage-capacity" role="meter" aria-label="上下文占用" aria-valuemin={0} aria-valuemax={capacity}
+            aria-valuenow={Math.min(used, capacity)} aria-valuetext={`${format(used)} / ${format(capacity)} Token`}>
+            <span style={{ width: Math.min(100, usedPercent) + '%' }}/>
+          </div>}
+          {hasComposition && <><p className="usage-composition-title">文本组成</p>
+          <div className="usage-composition" aria-hidden="true">{parts.map(part =>
+            <span key={part.label} className={`usage-part-${part.index}`} style={{ width: percent(part.value, total) + '%' }}/>)}</div>
+          <ul className="usage-groups" aria-label="文本组成与占比">{parts.map(part =>
+            <li key={part.label}>
+              <span><i className={`usage-part-${part.index}`} aria-hidden="true"/>{part.label}</span>
+              <span>{format(part.value)}</span>
+              <small>{percent(part.value, total).toFixed(1)}%</small>
+            </li>)}</ul></>}
+        </> : <>
+          <p className="usage-empty">{usage.context ? '暂无文本估算' : '首次请求发出后显示上下文用量'}</p>
+        </>}
+      </section>
+
+      {onSave && <section className="usage-section">
+        <div className="usage-heading usage-limit">
+          <label htmlFor={targetId}>下次目标</label>
+          <select id={targetId} value={target} disabled={busy}
+            onChange={event => {
+              const next = Number(event.target.value);
+              setDraftTarget(next === saved ? undefined : next);
+              setError('');
+            }}>
+            <option value={0}>未启用</option><option value={300000}>300K</option><option value={1000000}>1M</option>
+          </select>
+        </div>
+        {target !== saved && <div className="button-row">
+          <button className="secondary" disabled={busy} onClick={() => { setDraftTarget(undefined); setError(''); }}>取消</button>
+          <button className="primary" disabled={busy} onClick={save}>{busy ? '正在保存…' : '保存'}</button>
         </div>}
-        {hasComposition && <><p className="usage-composition-title">文本组成</p>
-        <div className="usage-composition" aria-hidden="true">{parts.map(part =>
-          <span key={part.label} className={`usage-part-${part.index}`} style={{ width: percent(part.value, total) + '%' }}/>)}</div>
-        <ul className="usage-groups" aria-label="文本组成与占比">{parts.map(part =>
-          <li key={part.label}>
-            <span><i className={`usage-part-${part.index}`} aria-hidden="true"/>{part.label}</span>
-            <span>{format(part.value)}</span>
-            <small>{percent(part.value, total).toFixed(1)}%</small>
-          </li>)}</ul></>}
-      </> : <>
-        <p className="usage-empty">{usage.context ? '暂无文本估算' : '首次请求发出后显示上下文用量'}</p>
-      </>}
-    </section>
+        {error && <p className="error-text" role="alert">{error}</p>}
+      </section>}
 
-    {onSave && <section className="usage-section">
-      <div className="usage-heading usage-limit">
-        <label htmlFor={targetId}>下次目标</label>
-        <select id={targetId} value={target} disabled={busy}
-          onChange={event => {
-            const next = Number(event.target.value);
-            setDraftTarget(next === saved ? undefined : next);
-            setError('');
-          }}>
-          <option value={0}>未启用</option><option value={300000}>300K</option><option value={1000000}>1M</option>
-        </select>
-      </div>
-      {target !== saved && <div className="button-row">
-        <button className="secondary" disabled={busy} onClick={() => { setDraftTarget(undefined); setError(''); }}>取消</button>
-        <button className="primary" disabled={busy} onClick={save}>{busy ? '正在保存…' : '保存'}</button>
-      </div>}
-      {error && <p className="error-text" role="alert">{error}</p>}
-    </section>}
-
-    <details className="usage-section usage-details" ref={details}>
-      <summary><ChevronRight size={14} aria-hidden="true"/>统计口径与详情</summary>
-      <p className="muted">生成速度根据收到的思考和正文片段估算。请求用量由模型服务返回，不同模型的请求合计展示。上下文占用按最近一次请求估算，组成图仅计文本。</p>
-      {budgetNote && <p className="muted">{budgetNote}</p>}
-      <pre>{JSON.stringify({ input_tokens: usage.input, output_tokens: usage.output, last_request: usage.last ?? null, capacity: usage.capacity ?? null }, null, 2)}</pre>
-    </details>
+      <details className="usage-section usage-details" ref={details}>
+        <summary><ChevronRight size={14} aria-hidden="true"/>统计口径与详情</summary>
+        <p className="muted">生成速度根据收到的思考和正文片段估算。本轮用量合计当前或最近一轮由模型服务上报的输入与输出。上下文占用按最近一次请求估算，组成图仅计文本。</p>
+        {hasMoreHistory && <p className="muted">累计用量与缓存命中率按已载入的请求统计。</p>}
+        {budgetNote && <p className="muted">{budgetNote}</p>}
+        <pre>{JSON.stringify({ input_tokens: usage.input, output_tokens: usage.output, last_request: usage.last ?? null, capacity: usage.capacity ?? null }, null, 2)}</pre>
+      </details>
+    </>}
   </section>;
 }

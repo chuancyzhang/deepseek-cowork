@@ -1,4 +1,4 @@
-import type { Attachment, FileReference } from './types';
+import type { Attachment, FileReference, Message } from './types';
 import { defaultUrlTransform } from 'react-markdown';
 
 export function markdownUrl(url: string): string {
@@ -14,6 +14,30 @@ export function markdownFilePath(url: string): string {
   // A literal percent is valid in a file name; decode only well-formed escapes.
   try { value = decodeURIComponent(value); } catch { /* Already a literal path. */ }
   return value.replace(/^\/([a-z]:[\\/])/i, '$1');
+}
+
+type MessageFile = Pick<Attachment, 'path' | 'name'>;
+
+export function messageAttachments(message: Message): MessageFile[] {
+  return message.meta?.desktop_attachments || (message.meta?.user_added_files || [])
+    .map((path: string) => ({path, name: path.split(/[\\/]/).pop() || path}));
+}
+
+/** Use only files already surfaced in the conversation, newest mention first. */
+export function conversationFiles(messages: Message[]): MessageFile[] {
+  const files = new Map<string, MessageFile>();
+  for (const message of messages) {
+    if (message.meta?.hidden || message.meta?.ui_hidden || message.meta?.context_hidden) continue;
+    const entries = message.role === 'user' ? messageAttachments(message)
+      : message.role === 'assistant' ? message.file_references ?? [] : [];
+    for (const {path, name} of entries) {
+      if (!path) continue;
+      const key = /^(?:[a-z]:[\\/]|\\\\|\/\/)/i.test(path) ? path.replaceAll('\\', '/').toLowerCase() : path;
+      files.delete(key);
+      files.set(key, {path, name: name?.split(/[\\/]/).pop() || path.split(/[\\/]/).pop() || path});
+    }
+  }
+  return [...files.values()].reverse();
 }
 
 /** Link validated file references in prose/inline code, never fenced commands. */

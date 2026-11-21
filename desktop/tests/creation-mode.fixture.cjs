@@ -96,6 +96,7 @@ async function tryToolbar(cid, workspace) {
     await until('Boolean(document.querySelector(".creation-preview-content [aria-label=用量概览]"))');
     await read('document.querySelector(".creation-preview-content [aria-label=模拟生成]").click()');
     await until('document.querySelector(".creation-preview-content .usage-toolbar-rate")?.textContent.includes("tok/s")');
+    await until('!!document.querySelector(".creation-preview-content .usage-sparkline")');
     assert.equal((await rpc('conversation.get',{conversation_id:cid})).run.status,'completed');
     await snapshot('creation-workbench');
     // A later disk edit must not replace the version the user just previewed.

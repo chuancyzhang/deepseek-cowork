@@ -89,6 +89,7 @@ app.whenReady().then(async()=>{
   if(process.env.COWORK_ATTACHMENT_SCREENSHOTS){await fs.mkdir(process.env.COWORK_ATTACHMENT_SCREENSHOTS,{recursive:true});await fs.writeFile(path.join(process.env.COWORK_ATTACHMENT_SCREENSHOTS,'skills-picker.png'),(await window.webContents.capturePage()).toPNG());}
   await read("[...document.querySelectorAll('.composer-submenu .picker-row')].find(e=>e.textContent==='Image Review').click()");
   await until("document.querySelectorAll('.composer .skill-chip').length===1&&!!document.querySelector('[aria-label=\"选择技能 summary-writing\"]')");
+  await until("document.querySelector('[aria-label=\"移除能力 summary-writing\"]')?.disabled===false");
   await read("document.querySelector('[aria-label=\"移除能力 summary-writing\"]').click();document.querySelector('textarea[aria-label=\"消息输入\"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
   await until("document.querySelectorAll('.composer .skill-chip').length===0");
   assert.equal(await read("document.querySelectorAll('.composer .image-attachment').length"),3,'changing skills preserves attachments');

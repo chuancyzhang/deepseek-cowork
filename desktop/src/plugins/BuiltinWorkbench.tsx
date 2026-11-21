@@ -39,7 +39,7 @@ export default function BuiltinWorkbench() {
     workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, changeWorkspace,
     fileTree, editors, setEditors, fileChanged, interaction, ask, historyEdit, setHistoryEdit,
     historyUndo, setHistoryUndo, olderLoading, pluginPreview, themeCandidate, setThemeCandidate, themePreview,
-    setThemePreview, showUsage, setShowUsage, selectedSkills, showSkills, rename, setRename, title, setTitle,
+    setThemePreview, usageView, setUsageView, selectedSkills, showSkills, rename, setRename, title, setTitle,
     scroll, nearBottom, composer, selectedId, registerEditorFlush, theme, registerLeave, active, error, confirm,
     setDraft, setAttachments, refreshList, moreConversations, loadOlder, onMessageAction, onMessageFile, addProject,
     conversationAction, projectAction, saveView, refreshFiles, switchConversation, newConversation, send, stop,
@@ -53,13 +53,14 @@ export default function BuiltinWorkbench() {
   const historyTrigger = useRef<HTMLButtonElement>(null);
   const usageTrigger = useRef<HTMLButtonElement>(null);
   const chatPanels = useRef<HTMLDivElement>(null);
+  const showUsage = usageView != null;
   const hasMessages = messages.length > 0;
   const home = !hasMessages && !creationOpen;
   const closeChatPanels = useCallback((restoreFocus?: 'history' | 'usage') => {
-    setShowUsage(false);
+    setUsageView(null);
     setShowHistory(false);
     if (restoreFocus) (restoreFocus === 'usage' ? usageTrigger : historyTrigger).current?.focus({preventScroll: true});
-  }, [setShowUsage]);
+  }, [setUsageView]);
   useEffect(() => {closeChatPanels();}, [route, current?.id, hasMessages, closeChatPanels]);
   useEffect(() => {
     if (!showUsage && !showHistory) return;
@@ -107,7 +108,7 @@ export default function BuiltinWorkbench() {
       pending => pending?.request_id === requestId ? null : pending);
   }
   function toggleUsage() {
-    setShowUsage(!showUsage);
+    setUsageView(showUsage ? null : 'overview');
     setShowHistory(false);
   }
   function continueTask() {
@@ -156,7 +157,7 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
       </div><div className="header-actions">{themeCandidate && !creationOpen && <button className="toolbar-button" title="查看 AI 主题候选" onClick={async () => {try {const value = await call('themes.preview'); setThemeCandidate(value.preview); if (value.preview) setThemePreview(value);} catch (failure) {error((failure as Error).message);}}}><Sparkles size={16}/>主题预览</button>}
       {route === 'chat' && <div className="chat-header-tools" role="group" aria-label="聊天工具">
         {hasMessages && <button ref={historyTrigger} className="icon-button" aria-label="历史提问"
-          aria-haspopup="dialog" aria-expanded={showHistory} onClick={() => {setShowHistory(!showHistory);setShowUsage(false);}}>
+          aria-haspopup="dialog" aria-expanded={showHistory} onClick={() => {setShowHistory(!showHistory);setUsageView(null);}}>
           <History size={16} aria-hidden="true"/>
         </button>}
         {hasMessages && settings && (usageToolbar?.showRate
@@ -168,12 +169,18 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
           onClick={() => void toggleWorkspace()}><PanelRight size={16} aria-hidden="true"/></button>
       </div>}
       </div></header>
-      {route === 'chat' && settings && <div className="header-popovers" ref={chatPanels}>{showUsage && <Usage
+      {route === 'chat' && settings && <div className="header-popovers" ref={chatPanels}>{usageView && <Usage
         key={current?.id}
         events={events}
         activeRunId={activeRunId}
+        turnId={current?.run?.id}
+        messages={current?.render_messages || current?.messages}
+        hasMoreHistory={current?.has_more}
         settings={settings}
+        view={usageView}
+        onView={setUsageView}
         onClose={() => closeChatPanels('usage')}
+        onOpenFile={onMessageFile}
         onSave={async target => setSettings(await call('settings.context', {target_tokens: target}))}
       />}
       {showHistory && <section className="history-popover" role="dialog" aria-label="历史提问">
@@ -216,12 +223,12 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
             {userStopped && !stoppedGroup && <RunStatus label="已停止"/>}
             {failedRun && <div className="run-error">
               <span>{failedRun.status === 'interrupted' ? '任务意外中断' : '这次任务未完成'}</span>
-              <p>{adjustTarget ? '已保存聊天和已有内容。可在用量中把下次目标调到 1M，再继续这个任务。'
+              <p>{adjustTarget ? '已保存聊天和已有内容。可在用量详情中把下次目标调到 1M，再继续这个任务。'
                 : contextRecovery === 'new_chat' ? '当前内容超过模型可用长度，聊天已保留。可以新建聊天，或减少本次材料后再试。'
                 : contextRecovery ? '聊天和已有内容已保留。' : runErrorSummary(failedRun.error)}</p>
               <details><summary>查看具体原因</summary><pre>{failedRun.error}</pre></details>
               <div className="button-row">
-                {adjustTarget ? <button className="secondary" onClick={() => {setShowHistory(false); setShowUsage(true);}}>打开用量</button>
+                {adjustTarget ? <button className="secondary" onClick={() => {setShowHistory(false); setUsageView('details');}}>打开用量详情</button>
                   : contextRecovery !== 'new_chat' && <button className="secondary" disabled={sending} onClick={continueTask}>继续这个任务</button>}
                 {contextRecovery && !adjustTarget && <button className="secondary"
                   onClick={() => void newConversation(current?.meta.workspace_dir).catch(failure => error(failure.message))}>新建聊天</button>}

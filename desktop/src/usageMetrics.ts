@@ -58,11 +58,13 @@ export class UsageProjection {
   private previous: RuntimeEvent[] = [];
   private usage = emptyUsage();
   private counted = new Set<string>();
+  private turnTokens = new Map<string, number>();
+  private lastUsageRunId?: string;
   private requests = new Map<string, SpeedRequest>();
   private lastSpeed?: { rate: number; at: number };
   private pendingCapacity?: { runId: string; value: Capacity };
 
-  project(events: RuntimeEvent[], activeRunId?: string) {
+  project(events: RuntimeEvent[], activeRunId?: string, turnId = activeRunId) {
     // History can be replaced or prepended. Live batches keep the previous objects.
     const previous = this.previous;
     if (events.length < previous.length || previous.length &&
@@ -70,14 +72,18 @@ export class UsageProjection {
       this.previous = [];
       this.usage = emptyUsage();
       this.counted.clear();
+      this.turnTokens.clear();
+      this.lastUsageRunId = undefined;
       this.requests.clear();
       this.lastSpeed = undefined;
       this.pendingCapacity = undefined;
     }
     for (let i = this.previous.length; i < events.length; i++) this.apply(events[i]);
     this.previous = events;
+    const runId = turnId ?? this.usage.contextRunId ?? this.lastUsageRunId;
     return {
       ...this.usage,
+      turnTokens: runId ? this.turnTokens.get(runId) : undefined,
       request: activeRunId ? this.requests.get(activeRunId) : undefined,
       lastSpeed: this.lastSpeed?.rate,
     };
@@ -148,6 +154,8 @@ export class UsageProjection {
     this.usage.output += output_tokens;
     this.usage.count++;
     this.usage.last = usage;
+    this.lastUsageRunId = runId;
+    if (runId) this.turnTokens.set(runId, (this.turnTokens.get(runId) ?? 0) + input_tokens + output_tokens);
     if (typeof cached_input_tokens === 'number') {
       this.usage.cached += cached_input_tokens;
       this.usage.cacheInput += input_tokens;

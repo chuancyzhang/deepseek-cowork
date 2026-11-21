@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { contextRecoveryForRun, displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, conversationTime, turnTimings, elapsedTime, thinkingTime, interactionRecords, isUserStopped, toolErrorText } from '../src/runtime.ts';
 import { UsageProjection, generationRates } from '../src/usageMetrics.ts';
+import { conversationFiles } from '../src/attachments.ts';
 
 const providerEvent = (run_id, type, created_at, status) => ({
   type: 'observability', run_id, created_at, data: { type, request_id: run_id + ':request:1', status },
@@ -71,6 +72,37 @@ test('usage pairs each request with its own budget, including legacy and disable
   const latest = [...fresh, observation('new', {type: 'system_prompt', context_usage: text, context_capacity: limited})];
   assert.deepEqual(projection.project(latest, 'new').capacity, limited);
   assert.equal(projection.project(latest, 'new').contextRunId, 'new');
+});
+
+test('the latest turn sums reported requests without inheriting another turn’s usage', () => {
+  const projection = new UsageProjection();
+  const receipt = (run_id, request_id, input_tokens, output_tokens, cached_input_tokens) => ({
+    type: 'observability', run_id, data: {type:'llm_usage', usage:{request_id,input_tokens,output_tokens,cached_input_tokens}},
+  });
+  const second = receipt('current', 'two', 30, 10);
+  const events = [receipt('prior','one',40,10,20), receipt('current','one',100,20,60), second, second];
+  const active = projection.project(events, 'current');
+  assert.deepEqual([active.turnTokens, active.input + active.output, active.cached, active.cacheInput], [160, 210, 80, 140]);
+  assert.equal(projection.project(events, undefined, 'current').turnTokens, 160);
+  assert.equal(projection.project(events, 'waiting').turnTokens, undefined);
+  const history = projection.project([receipt('older','one',20,5,0), ...events], undefined, 'current');
+  assert.deepEqual([history.turnTokens, history.input + history.output], [160, 235]);
+  assert.equal(projection.project([]).turnTokens, undefined);
+});
+
+test('conversation files combine confirmed reply files and sent attachments by path', () => {
+  const input = 'D:/docs/资料.txt';
+  const same = 'd:\\docs\\资料.txt';
+  const output = 'D:/docs/output/纪要.md';
+  assert.deepEqual(conversationFiles([
+    {role:'user',meta:{user_added_files:[input]}},
+    {role:'assistant',meta:{hidden:true},file_references:[{path:'D:/skill/SKILL.md'}]},
+    {role:'tool',file_references:[{path:'D:/implementation/run.log'}]},
+    {role:'assistant',file_references:[{path:same,name:'资料.txt'},{path:output,name:'output/纪要.md'}]},
+    {role:'user',meta:{desktop_attachments:[{path:'D:/docs/表格.csv',name:'表格.csv'}]}},
+  ]), [
+    {path:'D:/docs/表格.csv',name:'表格.csv'}, {path:output,name:'纪要.md'}, {path:same,name:'资料.txt'},
+  ]);
 });
 
 test('context recovery follows the failed run after a reload', () => {

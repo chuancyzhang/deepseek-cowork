@@ -6,7 +6,7 @@ import type { FileReference, MediaTask, Message } from './types';
 import { messageText, toolErrorText, messageTime, replyParts, elapsedTime, thinkingTime, formatDuration, type TurnTiming, type QuestionRecord } from './runtime';
 import {useHost, useHostField} from './host/context';
 import InlineVisualization from './InlineVisualization';
-import { markdownFilePath, markdownUrl, remarkFileReferences } from './attachments';
+import { markdownFilePath, markdownUrl, messageAttachments, remarkFileReferences } from './attachments';
 import Interaction from './Interaction';
 import MermaidDiagram from './MermaidDiagram';
 import SnippetPreview from './SnippetPreview';
@@ -132,7 +132,7 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
     return () => {document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', key);};
   }, [more]);
   const text = message.role === 'user' && typeof message.meta?.display_content === 'string' ? message.meta.display_content : messageText(message.content);
-  const files = message.meta?.desktop_attachments || (message.meta?.user_added_files || []).map((path: string) => ({ path, name: path.split(/[\\/]/).pop() }));
+  const files = messageAttachments(message);
   const references = message.role === 'user' ? message.meta?.conversation_refs || [] : [];
   const context = message.role === 'user' ? message.meta?.ui_context || {} : {};
   const referencedFiles = (message.file_references || []).filter(file => file.references.some(reference => text.includes(reference)));
@@ -152,7 +152,7 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
     </div>}
     {!answerOnly && !!message.reasoning_content && <Disclosure stateKey={cid + ':' + message.id} kind="thinking" title={<><Sparkles size={13}/>深度思考</>}><div className="markdown"><Markdown text={message.reasoning_content} streaming={message.live} onFile={onFile} cid={cid}/></div></Disclosure>}
     {!answerOnly && !!message.tool_calls?.length && <div className="message-tool-calls">{message.tool_calls.map((tool, index) => <button className="message-tool-link" key={tool.id || index} onClick={() => onAction('tool', {...message, tool_call_id: tool.id})}><Wrench size={14}/><span>{tool.function?.name || tool.name || '工具调用'}</span><ChevronDown size={13}/></button>)}</div>}
-    {!!otherFiles.length && <div className="message-files">{otherFiles.map((file: any) => <button key={file.path} title={file.path} onClick={() => onFile(file.path)}><FileText size={14}/>{file.name}</button>)}</div>}
+    {!!otherFiles.length && <div className="message-files">{otherFiles.map(file => <button key={file.path} title={file.path} onClick={() => onFile(file.path)}><FileText size={14}/>{file.name}</button>)}</div>}
     {text && <div className="markdown">{message.role === 'user' ? <div className="user-text">{text}</div> : text.split(/^::cowork-inline-vis\{file="([a-z0-9][a-z0-9.-]*\.html)"\}\s*$/m).map((part, index) => index % 2 ? <InlineVisualization key={part} cid={cid} file={part}/> : <Markdown key={index} text={part} streaming={message.live} onFile={onFile} files={referencedFiles} previewScope={cid+':'+message.id+':'+index} cid={cid}/>)}</div>}
     {message.role === 'user' && imageFiles.length > 0 && <ImageAttachments cid={cid} files={imageFiles} onOpen={onFile}/>}
     {documents.length > 0 && <section className="message-file-table" aria-label="回复中的文件"><strong>共 {documents.length} 个文件</strong>{(filesExpanded ? documents : documents.slice(0,3)).map(file => <button key={file.path} title={file.path} aria-label={'打开文件 ' + file.name} onClick={() => onFile(file.path)}><FileText size={16}/><span>{file.name}</span><small>{file.label}</small></button>)}{documents.length > 3 && <button className="message-files-toggle" onClick={() => setFilesExpanded(!filesExpanded)}>{filesExpanded ? '收起文件列表' : `再显示 ${documents.length - 3} 个文件`}</button>}</section>}

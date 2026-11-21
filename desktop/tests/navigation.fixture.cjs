@@ -1,5 +1,6 @@
 const electron=require('electron'),Module=require('node:module');
 const {app,Menu,screen}=electron,fs=require('node:fs/promises'),path=require('node:path'),assert=require('node:assert/strict');
+const {pathToFileURL}=require('node:url');
 const originalLoad=Module._load;
 let selectedFolder;
 const dialog=Object.create(electron.dialog);
@@ -244,11 +245,22 @@ async function checkChatHeader() {
   await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
   await until('!document.querySelector(".history-popover")&&document.activeElement.getAttribute("aria-label")==="历史提问"');
   await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
-  await until('document.querySelector(".usage-budget").textContent.includes("300,000 Token")');
+  await until('!!document.querySelector(".usage-overview")');
+  assert.deepEqual(await read('[...document.querySelectorAll(".usage-overview-metrics dd")].map(el=>el.textContent)'),['40,610','99,310','61%']);
+  assert.equal(await read('Boolean(document.querySelector(".usage-budget, .usage-files ul"))'),false);
+  assert.equal(await read('document.querySelector(".usage-files summary").getAttribute("aria-label")'),'文件，2 个');
+  await snap('usage','.usage-popover',0);
+  await read('document.querySelector(".usage-files summary").click()');
+  await until('document.querySelectorAll(".usage-files li").length===2');
+  assert.deepEqual(await read('[...document.querySelectorAll(".usage-files .usage-file-name")].map(el=>el.textContent)'),['快速开始.md','需求说明.txt']);
+  await snap('usage-files','.usage-popover',0);
+  await clickText('.usage-reveal','详情');
+  await until('document.querySelector(".usage-budget")?.textContent.includes("300,000 Token")');
+  assert.equal(await read('document.activeElement.getAttribute("aria-label")'),'返回用量概览');
   assert.equal(await read('document.querySelector(".usage-popover select").value'),'1000000');
   assert.equal(await read('document.querySelector(".usage-limit label").textContent'),'下次目标');
   assert.equal(await read('document.querySelector(".usage-capacity").getAttribute("aria-valuetext")'),'40,830 / 300,000 Token');
-  await snap('usage','.usage-popover',0);
+  await snap('usage-details','.usage-popover',0);
   for(const value of ['300000','1000000']){
     await read(`(()=>{const select=document.querySelector('.usage-popover select');select.value=${JSON.stringify(value)};select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
     await clickText('.usage-popover .button-row button','保存');
@@ -256,6 +268,15 @@ async function checkChatHeader() {
     assert.equal((await rpc('settings.get')).context_policy.target_tokens,Number(value));
     assert.equal(await read('document.querySelector(".usage-capacity").getAttribute("aria-valuemax")'),'300000');
   }
+  await read('document.querySelector("[aria-label=返回用量概览]").click()');
+  await until('document.activeElement===document.querySelector(".usage-reveal")&&document.querySelectorAll(".usage-files li").length===2');
+  await clickText('.usage-files li > button','快速开始.md');
+  await until('!document.querySelector(".usage-popover")&&[...document.querySelectorAll(".workspace-tab")].some(tab=>tab.textContent.includes("快速开始.md"))');
+  await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
+  await until('!document.querySelector(".workspace-bar")');
+
+  await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
+  await until('!!document.querySelector(".usage-overview")&&!document.querySelector(".usage-files[open]")');
   await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
   await until('!document.querySelector(".usage-popover")&&document.activeElement.getAttribute("aria-label")==="用量统计"');
   await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
@@ -342,7 +363,13 @@ async function run(){
   }
   await rpc('settings.select_model',{model_id:'demo-0'});
   window.webContents.send('cowork:events',[{event:'settings_changed'}]);
-  const messages=[{id:'user',role:'user',content:'整理项目文档，让新同事能更快上手。'},{id:'answer',role:'assistant',content:'已整理好文档结构，按实际使用顺序分成快速开始、使用指南和开发说明。\n\n原有内容已保留，重复说明合并到对应章节。'}];
+  const input=await rpc('workspace.attach_data',{conversation_id:docs.id,name:'需求说明.txt',base64:Buffer.from('先介绍项目的启动流程。').toString('base64')});
+  const output=await rpc('workspace.create',{conversation_id:docs.id,name:'快速开始.md',text:'# 快速开始\n\n从工作台打开项目。'});
+  const messages=[
+    {id:'user',role:'user',content:'整理项目文档，让新同事能更快上手。',meta:{desktop_attachments:[input]}},
+    {id:'answer',role:'assistant',content:'已把项目的快速开始、使用指南和开发说明整理到快速开始.md。',
+      file_references:[{path:output.path,url:pathToFileURL(output.path).href,name:'快速开始.md',kind:'markdown',label:'Markdown',references:['快速开始.md']}]},
+  ];
   const counts={user:1432,assistant:12128,results:15940,system:6230,tools:3500,injected:1220};
   const usageEvents=[
     {type:'observability',data:{type:'system_prompt',context_usage:{status:'available',counts,total:40450},
@@ -352,7 +379,9 @@ async function run(){
     {type:'observability',data:{type:'llm_usage',usage:{request_id:'example-provider',input_tokens:38520,output_tokens:2090,cached_input_tokens:26520}}},
     {type:'observability',data:{type:'provider_request_finish',request_id:'example-provider',status:'completed'},created_at:102.1},
   ].map((event,index)=>({...event,run_id:'example-usage',sequence:index+1}));
-  snapshots.set(docs.id,{has_messages:true,messages,render_messages:messages,events:usageEvents});
+  const priorUsage={type:'observability',run_id:'earlier-usage',sequence:1,data:{type:'llm_usage',
+    usage:{request_id:'earlier-provider',input_tokens:54500,output_tokens:4200,cached_input_tokens:30000}}};
+  snapshots.set(docs.id,{has_messages:true,messages,render_messages:messages,events:[priorUsage,...usageEvents]});
   window.webContents.send('cowork:events',[{event:'conversation_changed',conversation_id:docs.id}]);
   await until('Array.from(document.querySelectorAll(".history-select > span")).some(label=>label.textContent==="检查文件预览问题")');
   assert.match(await read('document.querySelector(".history-select time").textContent'),/^\d{2}:\d{2}$/);
@@ -363,7 +392,7 @@ async function run(){
   await until('document.activeElement===document.querySelector(".global-search input")');
   await fill('.global-search input','整理项目文档');await until('document.querySelectorAll(".global-search-result").length===1');
   await read('document.querySelector(".global-search input").dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))');
-  await until('document.querySelector(".title-button")?.textContent==="整理项目文档"');
+  await until('document.querySelector(".title-button")?.textContent==="整理项目文档"&&!!document.querySelector("[aria-label=消息输入]")');
   await fill('[aria-label="消息输入"]','按这个结构继续完善快速开始部分。');
   command('sidebar');await until('!document.querySelector(".sidebar")');
   assert.equal(await read('!!document.querySelector(".navigation-tools [aria-label=搜索聊天与项目]")'),true);
@@ -470,6 +499,10 @@ async function run(){
   await until('document.querySelectorAll(".chat-header-tools button").length===3');
   assert.equal(await read('(()=>{const buttons=[...document.querySelectorAll(".chat-header-tools button")].map(button=>button.getBoundingClientRect());return buttons.every(rect=>rect.top===buttons[0].top&&rect.left>=0&&rect.right<=innerWidth);})()'),true);
   await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
+  await until('!!document.querySelector(".usage-overview")');
+  assert.equal(await read('document.querySelector(".usage-overview").scrollWidth<=document.querySelector(".usage-overview").clientWidth+1'),true);
+  await snap('usage-overview-dark-scaled');
+  await clickText('.usage-reveal','详情');
   await until('document.querySelector(".usage-capacity")?.getAttribute("aria-valuemax")==="300000"');
   assert.equal(await read('(()=>{const r=document.querySelector(".usage-popover").getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;})()'),true);
   await snap('usage-dark-scaled');

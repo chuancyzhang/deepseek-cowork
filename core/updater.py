@@ -34,7 +34,8 @@ INTERNAL_DIR_NAME = "_internal"
 DESKTOP_EXE_NAMES = ("deepseek-cowork.exe", "Cowork.exe")
 UPDATE_DIR_NAME = "updates"
 UPDATE_PLAN_FORMAT = 1
-UPDATE_EXCLUDED_ROOTS = {"user_data"}
+DESKTOP_STAGE_ROOT = ".cowork-update"
+UPDATE_EXCLUDED_ROOTS = {"user_data", DESKTOP_STAGE_ROOT}
 LOCAL_UPDATE_PACKAGE_PATTERN = re.compile(
     r"^deepseek-cowork-v(?P<version>\d+\.\d+\.\d+)\.zip$",
     re.IGNORECASE,
@@ -386,11 +387,15 @@ def _collect_app_files(root_dir, cancel_event=None):
     native_root = platform_runtime.filesystem_path(root_dir)
     for current_root, dirs, names in os.walk(native_root):
         check_cancel(cancel_event)
+        dirs[:] = [name for name in dirs if not os.path.islink(os.path.join(current_root, name))
+                   and not os.path.isjunction(os.path.join(current_root, name))]
         relative_root = os.path.relpath(current_root, native_root)
         if relative_root == ".":
             dirs[:] = [name for name in dirs if not _is_update_excluded(name)]
         for name in names:
             full_path = os.path.join(current_root, name)
+            if os.path.islink(full_path):
+                continue
             relative_path = os.path.relpath(full_path, native_root).replace("\\", "/")
             if _is_update_excluded(relative_path):
                 continue
@@ -503,7 +508,7 @@ def same_release_asset(left, right):
     return left == right
 
 
-def is_cached_asset_valid(asset, zip_path):
+def is_cached_asset_valid(asset, zip_path, *, verify_archive=True):
     zip_path = platform_runtime.filesystem_path(zip_path)
     if not os.path.isfile(zip_path):
         return False
@@ -515,6 +520,8 @@ def is_cached_asset_valid(asset, zip_path):
         return False
     if not is_windows():
         return expected_size > 0 and bool(re.fullmatch(r"sha256:[a-f0-9]{64}", digest))
+    if not verify_archive:
+        return zipfile.is_zipfile(zip_path)
     try:
         with zipfile.ZipFile(zip_path) as archive:
             return archive.testzip() is None
@@ -552,7 +559,7 @@ def cleanup_update_artifacts(target_dir=None, keep_paths=None, progress_callback
     return removed
 
 
-def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, cancel_event=None, connection=None, public_source=False):
+def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, cancel_event=None, connection=None, public_source=False, *, verify_archive=True):
     if isinstance(asset, dict):
         asset = ReleaseAsset(
             name=str(asset.get("name") or ""),
@@ -567,7 +574,8 @@ def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, c
     os.makedirs(platform_runtime.filesystem_path(target_dir), exist_ok=True)
     zip_path = expected_asset_path(asset, target_dir=target_dir)
     check_cancel(cancel_event)
-    if is_cached_asset_valid(asset, zip_path):
+    validation = {} if verify_archive else {"verify_archive": False}
+    if is_cached_asset_valid(asset, zip_path, **validation):
         _emit(progress_callback, f"已找到本地安装包，跳过下载：{zip_path}", 100)
         return zip_path
     if os.path.isfile(platform_runtime.filesystem_path(zip_path)):
@@ -593,7 +601,7 @@ def download_asset(asset, target_dir=None, progress_callback=None, timeout=30, c
         if asset.size and actual_size != asset.size:
             raise UpdaterError(f"下载大小校验失败：期望 {asset.size} 字节，实际 {actual_size} 字节。")
         check_cancel(cancel_event)
-        if not is_cached_asset_valid(asset, temp_path):
+        if not is_cached_asset_valid(asset, temp_path, **validation):
             raise UpdaterError("安装包校验失败，请重新下载。")
         os.replace(platform_runtime.filesystem_path(temp_path), platform_runtime.filesystem_path(zip_path))
     except Exception as exc:
@@ -640,10 +648,12 @@ def desktop_executable(path):
     return next((name for name in DESKTOP_EXE_NAMES if os.path.isfile(platform_runtime.filesystem_path(os.path.join(path, name)))), None)
 
 
-def _safe_extractall(archive, target_dir, cancel_event=None, progress_callback=None):
+def _safe_zip_members(archive, target_dir, cancel_event=None):
     target_root = os.path.abspath(target_dir)
     seen = set()
+    members = {}
     for member in archive.infolist():
+        check_cancel(cancel_event)
         name = member.filename.replace("\\", "/").rstrip("/")
         parts = name.split("/")
         kind = stat.S_IFMT(member.external_attr >> 16)
@@ -656,6 +666,14 @@ def _safe_extractall(archive, target_dir, cancel_event=None, progress_callback=N
         member_path = os.path.abspath(os.path.join(target_root, *parts))
         if os.path.commonpath([target_root, member_path]) != target_root:
             raise UpdaterError("更新包包含不安全的路径。")
+        if not member.is_dir():
+            members[name] = member
+    return members
+
+
+def _safe_extractall(archive, target_dir, cancel_event=None, progress_callback=None):
+    target_root = os.path.abspath(target_dir)
+    _safe_zip_members(archive, target_root, cancel_event)
     # All I/O uses native long paths; manifests and user-visible paths stay ordinary.
     total = max(1, sum(item.file_size for item in archive.infolist()))
     copied, last_percent = 0, -1
@@ -731,17 +749,9 @@ def validate_desktop_staged(staged, version, connection):
     validate_online_package(staged, connection)
 
 
-def prepare_desktop_local(path, root, current_version, connection, cancel, progress):
-    from core.update_coordinator import persist_prepared
+def desktop_local_sidecar(path, version, size, digest):
     from core.update_manifest import release_filename
-    identity = desktop_package_metadata(path)
-    version = identity["version"]
-    if compare_versions(version, current_version) < 0:
-        raise UpdaterError("安装包版本低于当前版本，不能降级安装。")
-    check_cancel(cancel)
-    native = platform_runtime.filesystem_path(path)
-    size, digest = os.path.getsize(native), _hash_file(native)
-    sidecar = native.parent / "latest-desktop-windows-x64.json"
+    sidecar = platform_runtime.filesystem_path(path).parent / "latest-desktop-windows-x64.json"
     notes, verified = "", False
     if sidecar.is_file():
         with sidecar.open(encoding="utf-8") as handle:
@@ -752,6 +762,29 @@ def prepare_desktop_local(path, root, current_version, connection, cancel, progr
             if manifest["version"] != version or manifest["size"] != size or manifest["sha256"] != digest:
                 raise UpdaterError("本地 ZIP 与配套更新清单不一致，请重新获取完整安装包。")
             notes, verified = manifest["notes"], True
+    return notes, verified
+
+
+def prepare_desktop_local(path, root, current_version, connection, cancel, progress, *, install_dir=None, update_id=""):
+    from core.update_coordinator import persist_prepared
+    if install_dir is not None:
+        from core.desktop_update_payload import prepare_payload
+        payload = prepare_payload(root, path, install_dir, current_version, connection, cancel, progress, update_id=update_id)
+        digest = payload["sha256"]
+        asset = ReleaseAsset(f"local-{digest}.zip", "", payload.pop("package_size"), digest, "sha256:" + digest)
+        result = {**payload, "app_layout": "electron", "update_source": "local", "source_name": "local",
+                  "update_available": True, "install_enabled": True, "connection": connection, "asset": asset.as_dict(),
+                  "release": {"tag_name": payload["package_version"], "body": payload["package_notes"]},
+                  "updates_dir": root, "current_version": current_version}
+        persist_prepared(root, result)
+        return result
+    version = desktop_package_metadata(path)["version"]
+    if compare_versions(version, current_version) < 0:
+        raise UpdaterError("安装包版本低于当前版本，不能降级安装。")
+    check_cancel(cancel)
+    native = platform_runtime.filesystem_path(path)
+    size, digest = os.path.getsize(native), _hash_file(native, cancel)
+    notes, verified = desktop_local_sidecar(path, version, size, digest)
     downloads = os.path.join(root, "downloads")
     os.makedirs(platform_runtime.filesystem_path(downloads), exist_ok=True)
     asset = ReleaseAsset(f"local-{digest}.zip", "", size, digest, "sha256:" + digest)
@@ -897,13 +930,16 @@ def prepare_local_update(
 
 
 
-def create_windows_update_script(install_dir, staged_app_dir, change_plan_path, current_pid=None, exe_name=APP_EXE_NAME, target_dir=None, extra_wait_pids=None, theme=None, version="", *, layout="qt", transaction_id=None):
+def create_windows_update_script(install_dir, staged_app_dir, change_plan_path, current_pid=None, exe_name=APP_EXE_NAME, target_dir=None, extra_wait_pids=None, theme=None, version="", *, layout="qt", transaction_id=None, prepared=None, cancel=None):
     from core.update_installer import write_installer
     if sys.platform != "win32":
         raise UpdaterError("自动安装更新仅支持 Windows。")
     install_dir = os.path.abspath(install_dir)
     staged_app_dir = os.path.abspath(staged_app_dir)
-    if not _is_valid_app_dir(staged_app_dir, layout=layout):
+    if prepared is not None:
+        from core.desktop_update_payload import verify_prepared
+        verify_prepared(install_dir, prepared, cancel)
+    elif not _is_valid_app_dir(staged_app_dir, layout=layout):
         raise UpdaterError("待安装目录结构无效。")
     with open(platform_runtime.filesystem_path(change_plan_path), encoding="utf-8") as handle:
         plan = json.load(handle)
@@ -920,7 +956,8 @@ def create_windows_update_script(install_dir, staged_app_dir, change_plan_path, 
     if transaction_id is not None and not re.fullmatch(r"[0-9a-f]{32}", transaction_id):
         raise UpdaterError("更新事务编号无效。")
     return write_installer(install_dir, staged_app_dir, os.path.abspath(change_plan_path), target_dir or updates_dir(), pids, exe_name, theme, version,
-                           transaction_id=transaction_id, previous_version=APP_VERSION)
+                           transaction_id=transaction_id, previous_version=APP_VERSION,
+                           plan_digest=prepared["change_plan_sha256"] if prepared is not None else "")
 
 
 def launch_windows_update_script(script_path):

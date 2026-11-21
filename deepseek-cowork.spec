@@ -773,6 +773,9 @@ a = Analysis(
         'duckduckgo_search', 
         'matplotlib',
         'scipy',
+        # Rich's optional IPython display hook is unused by the desktop service.
+        # Notebook execution keeps its own IPython and Jedi in python_env.
+        'IPython',
         'PySide6', 'PyQt5', 'PyQt6', 'shiboken6', 'qtawesome', 'qdarktheme', 'ui',
     ],
     win_no_prefer_redirects=False,

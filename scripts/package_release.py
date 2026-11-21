@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.app_version import APP_VERSION  # noqa: E402
+from core.update_manifest import DESKTOP_FILES_NAME  # noqa: E402
 from web.platform.server.package_policy import (  # noqa: E402
     MAX_DEFAULT_CONFIG_BYTES, validate_default_config,
 )
@@ -499,11 +499,21 @@ def create_deterministic_zip(dist_dir: Path, output_path: Path) -> str:
             compresslevel=9,
             allowZip64=True,
         ) as archive:
-            files = [path for path in _relative_files(dist_dir) if not _is_python_cache(path)]
+            files = [path for path in _relative_files(dist_dir)
+                     if not _is_python_cache(path) and path.as_posix().casefold() != DESKTOP_FILES_NAME]
+            inventory = {}
             for relative, archive_name in _release_entries(files):
+                file_digest = hashlib.sha256()
+                size = 0
                 with (dist_dir / relative).open("rb") as source:
                     with archive.open(_zip_info(archive_name), "w", force_zip64=True) as destination:
-                        shutil.copyfileobj(source, destination, length=1024 * 1024)
+                        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                            destination.write(chunk)
+                            file_digest.update(chunk)
+                            size += len(chunk)
+                inventory[relative.as_posix()] = {"size": size, "sha256": file_digest.hexdigest()}
+            manifest = json.dumps({"schema_version": 1, "files": inventory}, ensure_ascii=False, separators=(",", ":"))
+            archive.writestr(_zip_info(f"{ARCHIVE_ROOT}/{DESKTOP_FILES_NAME}"), manifest.encode("utf-8"))
         os.replace(temp_path, output_path)
     except Exception:
         temp_path.unlink(missing_ok=True)

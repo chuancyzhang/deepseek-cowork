@@ -11,10 +11,9 @@ import time
 
 from core import updater
 from core.app_version import APP_VERSION, compare_versions
-from core.update_coordinator import UpdateCoordinator, atomic_json, release_notes_text
+from core.update_coordinator import UpdateCoordinator, atomic_json, release_notes_text, verify_enterprise_recommendation
 
 log = logging.getLogger("desktop.updates")
-PREPARE_TIMEOUT = 600
 OWNER_TIMEOUT = 30
 INSTALLER_READY_TIMEOUT = 15
 
@@ -40,14 +39,11 @@ class DesktopUpdates:
         self.transaction = None
         self.attempt = None
         self.install_thread = None
-        self.plan = None
-        self.plan_ready = threading.Event()
         self.dismissed = set()
         self.revision = time.time_ns()
         self.timer = None
         self.closed = False
         self.coordinator.changed.subscribe(self._changed)
-        self.coordinator.installation_ready.subscribe(self._plan_ready)
         self.startup_request = {"id": os.environ.pop("COWORK_UPDATE_ID", ""), "receipt": os.environ.pop("COWORK_UPDATE_RECEIPT", ""), "install_dir": str(self.install_dir)}
         self.last_install_result = self._recover_transactions()
 
@@ -82,10 +78,6 @@ class DesktopUpdates:
         self.revision = max(self.revision + 1, time.time_ns())
         self.s.publish({"event": "update_state", "data": self.snapshot()})
 
-    def _plan_ready(self, plan):
-        self.plan = plan
-        self.plan_ready.set()
-
     def snapshot(self):
         state = self.coordinator.snapshot()
         result = self.coordinator.prepared or state.get("result") or {}
@@ -96,7 +88,7 @@ class DesktopUpdates:
         return {"revision": str(self.revision), "phase": state["phase"], "message": state["message"],
                 "error": state.get("error", ""), "percent": state.get("percent", -1), "busy": state["busy"],
                 "current_version": APP_VERSION, "version": version, "ready": ready,
-                "can_install": ready and self.packaged and not state["install_requested"],
+                "can_install": ready and self.packaged and not state["install_requested"] and not state["busy"],
                 "notice": ready and self.packaged and version not in self.dismissed,
                 "identity": identity, "source": result.get("source_name") or state.get("source_name") or "",
                 "reinstall": bool(version) and compare_versions(version, APP_VERSION) == 0,
@@ -237,30 +229,24 @@ class DesktopUpdates:
 
     def _monitor_install(self, host_pid):
         attempt = self.attempt
-        started = time.monotonic()
         def check():
             if attempt["cancel"].is_set():
                 raise updater.UpdateCancelled("已取消安装准备，当前版本继续可用。")
             if time.monotonic() - attempt["last_seen"] > OWNER_TIMEOUT:
                 raise updater.UpdaterError("应用连接已中断，已撤销安装准备。")
-            if time.monotonic() - started > PREPARE_TIMEOUT:
-                raise updater.UpdaterError("安装准备超时，已撤销本次安装，请重试。")
         try:
-            self.plan = None
-            self.plan_ready.clear()
             check()
-            self.coordinator.request_install()
-            while not self.plan_ready.wait(.1):
-                check()
-                snapshot = self.coordinator.snapshot()
-                if not snapshot["busy"]:
-                    raise ValueError(snapshot.get("error") or "更新准备已取消，当前版本继续可用。")
-            plan = self.plan
+            plan = self.coordinator.begin_desktop_install()
+            connection = updater.update_connection(self.install_dir)
+            if (connection != plan.get("connection") or plan.get("update_source") == "online"
+                    and connection is None and plan.get("source_config") != updater.community_source_config()):
+                raise updater.UpdaterError("更新来源已改变，请重新选择安装包或检查更新。")
+            verify_enterprise_recommendation(plan, connection, "electron")
             check()
             script = updater.create_windows_update_script(str(self.install_dir), plan["staged_app_dir"], plan["change_plan_path"],
-                current_pid=host_pid, exe_name=updater.desktop_executable(plan["staged_app_dir"]),
+                current_pid=host_pid, exe_name=plan["exe_name"],
                 target_dir=str(self.root), extra_wait_pids=[os.getpid()], version=plan["release"]["tag_name"], layout="electron",
-                transaction_id=attempt["id"])
+                transaction_id=attempt["id"], prepared=plan, cancel=attempt["cancel"])
             check()
             process = updater.launch_windows_update_script(script)
             attempt["process"] = process
@@ -301,10 +287,6 @@ class DesktopUpdates:
                     # A full/unavailable disk must not skip stopping the owned, uncommitted helper.
                     log.exception("install_abort_record_failed transaction=%s", attempt["id"])
                     self._changed(None)
-            self.coordinator.cancel()
-            worker = self.coordinator.worker
-            if worker:
-                worker.join()  # The input gate remains closed until all late callbacks settle.
             process = attempt["process"]
             try:
                 if process and process.poll() is None:
@@ -353,16 +335,21 @@ class DesktopUpdates:
                 raise ValueError("安装器已退出，请重新准备。")
             self._set_install_phase("committing")
         try:
+            # Pin the staged files before yielding the app lock to the next launch.
+            from core.desktop_update_payload import stage_dir
+            stage = stage_dir(self.install_dir, self.coordinator.prepared["stage_id"])
+            backup = updater.platform_runtime.filesystem_path(stage / "backup")
+            backup.mkdir(exist_ok=True)
             self.s.dispatch("app.shutdown", {})
             atomic_json(self.transaction / "commit.json", {"id": self.transaction.name})
-            with self.lock:
-                self._set_install_phase("committed")
-                return self._attempt_snapshot()
         except Exception:
             with self.lock:
                 self._set_install_phase("ready", "应用尚未完成退出，安装未提交。")
                 self.attempt["cancel"].set()
             raise
+        with self.lock:
+            self._set_install_phase("committed")
+            return self._attempt_snapshot()
 
     def dispatch(self, method, p):
         if method == "updates.get":
@@ -381,9 +368,10 @@ class DesktopUpdates:
                     self.last_install_result = None
                 self.coordinator._select_channel()
                 prepared = Path(self.coordinator.cache_root) / "prepared.json"
-                if prepared.exists():
+                if prepared.exists() and recorded.get("phase") in {"installed", "installed_not_opened", "complete"}:
                     value = json.loads(prepared.read_text(encoding="utf-8"))
-                    if value.get("release", {}).get("tag_name") == APP_VERSION:
+                    config = json.loads((transaction / "config.json").read_text(encoding="utf-8-sig"))
+                    if value.get("staged_app_dir") == config.get("source_dir"):
                         prepared.unlink()
                 self._changed(None)
             self.start_automatic()

@@ -4,20 +4,23 @@ import os
 import uuid
 
 
-def write_installer(install_dir, staged_dir, plan_path, root, wait_pids, exe_name, theme=None, version="", *, transaction_id=None, previous_version=""):
+def write_installer(install_dir, staged_dir, plan_path, root, wait_pids, exe_name, theme=None, version="", *,
+                    transaction_id=None, previous_version="", plan_digest=""):
     transaction = os.path.join(root, "transactions", transaction_id or uuid.uuid4().hex)
     os.makedirs(transaction, exist_ok=bool(transaction_id))
     config = {"install_dir": install_dir, "source_dir": staged_dir, "plan_path": plan_path,
               "wait_pids": wait_pids, "exe_name": exe_name, "version": version,
-              "theme": theme or {}, "id": os.path.basename(transaction), "previous_version": previous_version}
+              "theme": theme or {}, "id": os.path.basename(transaction), "previous_version": previous_version,
+              "plan_digest": plan_digest, "same_volume": bool(plan_digest)}
     with open(os.path.join(transaction, "config.json"), "w", encoding="utf-8") as handle:
         json.dump(config, handle, ensure_ascii=False)
     script = os.path.join(transaction, "install.ps1")
     with open(script, "w", encoding="utf-8-sig", newline="\r\n") as handle:
         handle.write(INSTALLER_SCRIPT)
     with open(os.path.join(transaction, "恢复说明.txt"), "w", encoding="utf-8") as handle:
+        backup = os.path.dirname(staged_dir) if plan_digest else os.path.join(transaction, "backup")
         handle.write('如果安装中断，请先关闭应用，再在 PowerShell 中执行以下命令恢复本次已修改的文件。\n'
-                     '恢复前请保留本目录、backup 目录和更新清单。\n'
+                     '恢复前请保留本目录和暂存及备份位置：' + backup + '\n'
                      'powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "' + script + '" -Recover\n')
     return script
 
@@ -63,9 +66,16 @@ function Write-Diagnostic($phase, $fields=@{}) {
   [IO.File]::AppendAllText((Join-Path $directory ('update-'+$PID+'.log')), $line+[Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
  } catch { [Console]::Error.WriteLine('update diagnostic write failed: '+$_.Exception.Message) }
 }
-function Save-Json($name, $value) {
+function Save-Json($name, $value, $durable=$false) {
  $path = Join-Path $root $name
  $temp = $path + '.tmp'
+ if($durable) {
+  $bytes=[Text.Encoding]::UTF8.GetBytes(($value | ConvertTo-Json -Depth 12 -Compress))
+  $stream=[IO.File]::Create((Native-Path $temp))
+  try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+  [CoworkLocks]::MoveFile((Native-Path $temp),(Native-Path $path),$true)
+  return
+ }
  $value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temp -Encoding UTF8
  Move-Item -LiteralPath $temp -Destination $path -Force
 }
@@ -123,12 +133,21 @@ $script:diagnosticStage='configuration'
 $cfg = Get-Content -LiteralPath (Join-Path $root 'config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $install = [IO.Path]::GetFullPath($cfg.install_dir).TrimEnd('\')
 $source = [IO.Path]::GetFullPath($cfg.source_dir).TrimEnd('\')
-$backup = Join-Path $root 'backup'
+$stage = [IO.Path]::GetDirectoryName($source)
+$backup = if($cfg.same_volume){Join-Path $stage 'backup'}else{Join-Path $root 'backup'}
+if($cfg.same_volume) {
+ $stageName=[IO.Path]::GetFileName($stage)
+ if($stageName -notmatch '^[a-f0-9]{32}$' -or $stage -ne (Join-Path (Join-Path $install '.cowork-update') $stageName) -or
+    $source -ne (Join-Path $stage 'files') -or $cfg.plan_path -ne (Join-Path $stage 'plan.json')) {
+  throw '更新暂存目录不属于当前安装。'
+ }
+}
 Write-Diagnostic 'installer_configuration' @{install_dir=$install; version=$cfg.version; wait_pids=$cfg.wait_pids;
  theme=@{bg=$cfg.theme.bg; text=$cfg.theme.text; primary=$cfg.theme.primary; font=$cfg.theme.font; font_size=$cfg.theme.font_size; spacing=$cfg.theme.spacing}}
 $script:busy = $false
 $script:committed = $false
 $script:mutated = $false
+$script:cursor = 0
 $script:written = New-Object 'System.Collections.Generic.List[string]'
 $script:removed = New-Object 'System.Collections.Generic.List[string]'
 $script:owned = @{}
@@ -159,6 +178,13 @@ using System;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
 public static class CoworkLocks {
+ [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+ static extern bool MoveFileEx(string source, string destination, int flags);
+ public static void MoveFile(string source, string destination, bool replace) {
+  // WRITE_THROUGH, optionally REPLACE_EXISTING. COPY_ALLOWED is clear.
+  if(!MoveFileEx(source, destination, 8 | (replace ? 1 : 0)))
+   throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+ }
  [StructLayout(LayoutKind.Sequential)] public struct UniqueProcess { public int pid; public System.Runtime.InteropServices.ComTypes.FILETIME start; }
  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct ProcessInfo {
   public UniqueProcess process;
@@ -215,11 +241,23 @@ function Within($path, $directory) {
 function App-Path($path) {
  return (Within $path $install) -and -not (Within $path (Join-Path $install 'user_data'))
 }
+function Assert-LocalPath($path) {
+ for($part=$path; (Within $part $install); $part=[IO.Path]::GetDirectoryName($part)) {
+  if((Path-Exists $part) -and ([IO.File]::GetAttributes((Native-Path $part)) -band [IO.FileAttributes]::ReparsePoint)) {
+   throw ('更新路径包含链接：'+$part)
+  }
+ }
+}
 function Safe-Path($directory, $relative) {
  if([string]::IsNullOrWhiteSpace($relative) -or [IO.Path]::IsPathRooted($relative)) { throw "Unsafe update path: $relative" }
  $path=[IO.Path]::GetFullPath((Join-Path $directory $relative.Replace('/', '\')))
- if(-not (Within $path $directory) -or $relative -match '^(?i:user_data)(/|\\|$)') { throw "Unsafe update path: $relative" }
+ if(-not (Within $path $directory) -or $relative -match '^(?i:user_data|\.cowork-update)(/|\\|$)') { throw "Unsafe update path: $relative" }
+ if($cfg.same_volume) { Assert-LocalPath $path }
  return $path
+}
+function Move-UpdateFile($from,$to) {
+ [IO.Directory]::CreateDirectory((Native-Path ([IO.Path]::GetDirectoryName($to)))) | Out-Null
+ [CoworkLocks]::MoveFile((Native-Path $from),(Native-Path $to),$false)
 }
 function Copy-File($from, $to) {
  $nativeTo=Native-Path $to
@@ -232,6 +270,15 @@ function File-Hash($path) {
  $stream=[IO.File]::OpenRead((Native-Path $path)); $hash=[Security.Cryptography.SHA256]::Create()
  try { return [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
  finally { $stream.Dispose(); $hash.Dispose() }
+}
+function Read-Plan {
+ if($cfg.same_volume) {
+  Assert-LocalPath $cfg.plan_path
+  if((File-Hash $cfg.plan_path) -ne $cfg.plan_digest) { throw '更新计划在准备完成后发生变化，请重新准备。' }
+ }
+ $plan=[IO.File]::ReadAllText((Native-Path $cfg.plan_path)) | ConvertFrom-Json
+ if([int]$plan.format_version -ne 1) { throw '更新文件清单格式无效。' }
+ return $plan
 }
 function Identity($process) {
  return $process.StartTime.ToUniversalTime().Ticks.ToString()
@@ -335,6 +382,10 @@ function Release-Files($paths) {
  throw '应用文件仍被占用，尚未替换文件。请关闭相关程序后重试。'
 }
 function Record-Transaction($phase) {
+ if($cfg.same_volume) {
+  Save-Json 'transaction.json' @{ id=$cfg.id; phase=$phase; cursor=$script:cursor } $true
+  return
+ }
  Save-Json 'transaction.json' @{ id=$cfg.id; phase=$phase; written=@($script:written.ToArray()); removed=@($script:removed.ToArray()); updated=(Get-Date -Format 'o') }
 }
 function Open-App {
@@ -386,6 +437,10 @@ function Reopen-InstalledApp {
   Record-Transaction 'complete'; $script:outcome='complete'; Status '更新完成' 100
   Save-Json 'result.json' @{id=$cfg.id; phase='complete'}
   Write-Diagnostic 'install_complete'
+  if($cfg.same_volume) {
+   try { Assert-LocalPath $stage; [IO.Directory]::Delete((Native-Path $stage),$true) }
+   catch { Write-Diagnostic 'cleanup_failed' (Error-Details $_) }
+  }
   $script:busy=$false
   if(-not $Headless) { $form.Close() }
  } catch {
@@ -416,6 +471,35 @@ function Reopen-PreviousApp {
 }
 function Rollback($plan) {
  Status '正在恢复原版本…'
+ if($cfg.same_volume) {
+  $operations=@($plan.added)+@($plan.modified)+@($plan.deleted)
+  if($script:cursor -lt 0 -or $script:cursor -gt $operations.Count) { throw '更新恢复进度无效。' }
+  for($i=0; $i -lt $script:cursor; $i++) {
+   $item=$operations[$i]
+   if($item.before_sha256) {
+    $old=Safe-Path $backup $item.path
+    if(-not (File-Exists $old)) { $old=Safe-Path $install $item.path }
+    if(-not (File-Exists $old) -or (File-Hash $old) -ne $item.before_sha256) { throw ('原版本文件校验失败：'+$item.path) }
+   }
+  }
+  while($script:cursor -gt 0) {
+   $item=$operations[$script:cursor-1]
+   $dest=Safe-Path $install $item.path
+   $old=Safe-Path $backup $item.path
+   $candidate=Safe-Path $source $item.path
+   if($item.sha256 -and -not (File-Exists $candidate)) {
+    if(-not (File-Exists $dest) -or (File-Hash $dest) -ne $item.sha256) { throw ('待恢复文件已改变：'+$item.path) }
+    Move-UpdateFile $dest $candidate
+   }
+   if(File-Exists $old) { Move-UpdateFile $old $dest }
+   $script:cursor--
+   Record-Transaction 'writing'
+  }
+  Record-Transaction 'rolled_back'
+  try { Assert-LocalPath $backup; if([IO.Directory]::Exists((Native-Path $backup))) { [IO.Directory]::Delete((Native-Path $backup),$true) } }
+  catch { Write-Diagnostic 'cleanup_failed' (Error-Details $_) }
+  return
+ }
  # Verify every required backup before touching the installation.
  foreach($item in @($plan.modified)+@($plan.deleted)) {
   if($item.path -in $script:written -or $item.path -in $script:removed) {
@@ -444,9 +528,12 @@ function Recover-Update {
   Discover-Owned
   if(@(Live-Owned).Count) { throw '请先关闭应用及其后台任务，再恢复原版本。' }
   $record=Get-Content -LiteralPath (Join-Path $root 'transaction.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-  if($record.id -ne $cfg.id -or $record.phase -notin @('writing','rollback_failed')) { throw '本次事务没有需要恢复的中断写入。' }
-  $plan=Get-Content -LiteralPath $cfg.plan_path -Raw -Encoding UTF8 | ConvertFrom-Json
+  $recoverable=@('writing','rollback_failed')
+  if($cfg.same_volume) { $recoverable+=@('installed','installed_not_opened') }
+  if($record.id -ne $cfg.id -or $record.phase -notin $recoverable) { throw '本次事务没有需要恢复的中断写入。' }
+  $plan=Read-Plan
   $script:written.Clear(); $script:removed.Clear()
+  $script:cursor=[int]$record.cursor
   foreach($relative in $record.written) { $script:written.Add([string]$relative) }
   foreach($relative in $record.removed) { $script:removed.Add([string]$relative) }
   Rollback $plan
@@ -465,32 +552,48 @@ function Apply-Update {
  $script:diagnosticStage='validate_install'
  Write-Diagnostic 'install_start'
  $script:busy=$true
- $script:written.Clear(); $script:removed.Clear(); $script:mutated=$false
+ $script:written.Clear(); $script:removed.Clear(); $script:cursor=0; $script:mutated=$false
  $plan=$null
  try {
   if(-not (Test-Path -LiteralPath (Join-Path $root 'commit.json'))) { throw '应用尚未完成保存，未执行安装。' }
   $commit=Get-Content -LiteralPath (Join-Path $root 'commit.json') -Raw -Encoding UTF8 | ConvertFrom-Json
   if($commit.id -ne $cfg.id) { throw '安装许可不匹配。' }
-  $plan=Get-Content -LiteralPath $cfg.plan_path -Raw -Encoding UTF8 | ConvertFrom-Json
-  if([int]$plan.format_version -ne 1) { throw '更新文件清单格式无效。' }
+  $plan=Read-Plan
   # Validate every path and all source hashes before making any mutation.
   $files=@($plan.added)+@($plan.modified)
-  $paths=@()
+  $paths=New-Object 'System.Collections.Generic.List[string]'
   foreach($item in @($files)+@($plan.deleted)) {
    $dest=Safe-Path $install ([string]$item.path)
-   if(File-Exists $dest) { $paths += $dest }
+   if(File-Exists $dest) { $paths.Add($dest) }
   }
   foreach($item in $files) {
    $from=Safe-Path $source ([string]$item.path)
    if((File-Hash $from) -ne $item.sha256) { throw ('安装包文件校验失败：'+$item.path) }
   }
-  Release-Files $paths
+  Release-Files ($paths.ToArray())
   foreach($item in @($files)+@($plan.deleted)) {
    $dest=Safe-Path $install $item.path
    if($item.before_sha256) {
     if(-not (File-Exists $dest) -or (File-Hash $dest) -ne $item.before_sha256) { throw '安装目录在准备期间发生了变化，请重新打开应用后重试更新。' }
    } elseif(Path-Exists $dest) { throw '安装目录在准备期间出现了新文件，请重新检查更新。' }
   }
+  if($cfg.same_volume) {
+   Assert-LocalPath $backup
+   [IO.Directory]::CreateDirectory((Native-Path $backup)) | Out-Null
+   $script:diagnosticStage='write_files'
+   $operations=@($files)+@($plan.deleted)
+   $lastPercent=-1
+   foreach($item in $operations) {
+    $dest=Safe-Path $install $item.path
+    $script:cursor++
+    Record-Transaction 'writing'
+    $script:mutated=$true
+    if($item.before_sha256) { Move-UpdateFile $dest (Safe-Path $backup $item.path) }
+    if($item.sha256) { Move-UpdateFile (Safe-Path $source $item.path) $dest }
+    $percent=15+[int](65*$script:cursor/$operations.Count)
+    if($percent -ne $lastPercent) { Status '正在安装更新…' $percent; $lastPercent=$percent }
+   }
+  } else {
    $script:diagnosticStage='backup'
    Status '正在备份原版本…' 10
   foreach($item in @($plan.modified)+@($plan.deleted)) {
@@ -513,6 +616,7 @@ function Apply-Update {
     Remove-File $dest
    }
    $index++; Status '正在安装更新…' (15+[int](65*$index/$total))
+  }
   }
    $script:diagnosticStage='verify_install'
    Status '正在检查安装结果…' 85

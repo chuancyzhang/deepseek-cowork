@@ -63,7 +63,32 @@ def update_log(root, phase, **fields):
 
 def persist_prepared(root, result):
     """Publish the new cache first; only then retire owned, obsolete artifacts."""
-    atomic_json(os.path.join(root, "prepared.json"), result)
+    manifest = backend.platform_runtime.filesystem_path(os.path.join(root, "prepared.json"))
+    if result.get("stage_id"):
+        from core.desktop_update_payload import stage_dir
+        try:
+            previous = json.loads(manifest.read_bytes())
+        except (OSError, ValueError):
+            previous = {}
+        try:
+            atomic_json(manifest, result)
+        except OSError:
+            try:
+                stage = stage_dir(result["install_dir"], result["stage_id"])
+                shutil.rmtree(backend.platform_runtime.filesystem_path(stage))
+            except (OSError, backend.UpdaterError) as exc:
+                update_log(root, "cache_cleanup_failed", artifact=result["stage_id"], error=str(exc))
+            raise
+        if (isinstance(previous, dict) and previous.get("install_dir") == result["install_dir"]
+                and previous.get("stage_id") and previous["stage_id"] != result["stage_id"]):
+            try:
+                old = backend.platform_runtime.filesystem_path(stage_dir(result["install_dir"], previous["stage_id"]))
+                if old.is_dir() and not (old / "backup").exists():
+                    shutil.rmtree(old)
+            except (OSError, backend.UpdaterError) as exc:
+                update_log(root, "cache_cleanup_failed", artifact=previous.get("stage_id"), error=str(exc))
+        return
+    atomic_json(manifest, result)
     if result.get("app_layout") != "electron":
         return
     native_root = backend.platform_runtime.filesystem_path(os.path.abspath(root))
@@ -89,7 +114,7 @@ def persist_prepared(root, result):
                 update_log(root, "cache_cleanup_failed", artifact=item.name, error=str(exc))
 
 
-def load_prepared(root, current_version, connection=None, source_config=None, *, layout="qt", cancel=None):
+def load_prepared(root, current_version, connection=None, source_config=None, *, layout="qt", cancel=None, install_dir=None):
     manifest = os.path.join(root, "prepared.json")
     if not os.path.isfile(backend.platform_runtime.filesystem_path(manifest)):
         return None
@@ -107,10 +132,14 @@ def load_prepared(root, current_version, connection=None, source_config=None, *,
     comparison = backend.compare_versions(result["release"]["tag_name"], current_version)
     if comparison < 0 or (comparison == 0 and not local):
         return None
-    if connection and not local:
-        current = backend.fetch_enterprise_release(connection, **({"layout": layout} if layout != "qt" else {}))
-        if not current or not backend.same_release_asset(result.get("asset", {}), backend.select_release_asset(current, **({"layout": layout} if layout != "qt" else {})).as_dict()):
-            raise backend.UpdaterError("企业推荐版本已变更或撤回，请重新检查更新。")
+    verify_enterprise_recommendation(result, connection, layout)
+    if install_dir is not None:
+        from core.desktop_update_payload import verify_prepared
+        if not result.get("stage_id") or result.get("install_dir") != os.path.abspath(install_dir):
+            return None
+        verify_prepared(install_dir, result, cancel, payload=True)
+        result["cache_reused"] = True
+        return result
     zip_path = result.get("zip_path", "")
     # The manifest is a cache, never authority to read/delete arbitrary paths.
     expected = backend.expected_asset_path(result["asset"], os.path.join(root, "downloads"))
@@ -133,7 +162,16 @@ def load_prepared(root, current_version, connection=None, source_config=None, *,
     return result
 
 
-def prepare_online(root, current_version, install_enabled, cancel, emit, retry_delays=RETRY_DELAYS, update_id="", connection=None, source_config=None, *, layout="qt"):
+def verify_enterprise_recommendation(result, connection, layout):
+    if connection and result.get("update_source") == "online":
+        options = {"layout": layout} if layout != "qt" else {}
+        current = backend.fetch_enterprise_release(connection, **options)
+        if not current or not backend.same_release_asset(result.get("asset", {}), backend.select_release_asset(current, **options).as_dict()):
+            raise backend.UpdaterError("企业推荐版本已变更或撤回，请重新检查更新。")
+
+
+def prepare_online(root, current_version, install_enabled, cancel, emit, retry_delays=RETRY_DELAYS, update_id="", connection=None,
+                   source_config=None, *, layout="qt", install_dir=None, cached=None):
     """One retry budget across check and download; successful checks do not reset it."""
     result = None
     config = None if connection else (source_config if source_config is not None else backend.community_source_config())
@@ -162,10 +200,13 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
                 result["asset"] = backend.select_release_asset(release, **layout_options).as_dict()
                 if layout != "qt":
                     result["app_layout"] = layout
+                if cached and backend.same_release_asset(result["asset"], cached.get("asset", {})):
+                    return cached
                 emit("available", message="发现新版本", result=result)
             if not install_enabled and backend.is_windows():
                 return result
             expected = backend.expected_asset_path(result["asset"], downloads)
+            validation = {"verify_archive": False} if install_dir is not None else {}
             identity_path = os.path.join(downloads, "asset.json")
             try:
                 with open(identity_path, encoding="utf-8") as handle:
@@ -174,7 +215,7 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
                 identity = {}
             if not isinstance(identity, dict):
                 identity = {}
-            matches = backend.same_release_asset(identity.get("asset") or {}, result["asset"]) and backend.is_cached_asset_valid(result["asset"], expected)
+            matches = backend.same_release_asset(identity.get("asset") or {}, result["asset"]) and backend.is_cached_asset_valid(result["asset"], expected, **validation)
             if matches:
                 matches = identity.get("sha256") == backend._hash_file(expected)
             result["cache_reused"] = matches
@@ -184,7 +225,18 @@ def prepare_online(root, current_version, install_enabled, cancel, emit, retry_d
             backend.cleanup_update_artifacts(downloads, keep_paths=[expected] if matches else [])
             progress = lambda message, percent: emit("downloading", message="正在下载更新…", percent=percent if percent is not None else -1, attempt=attempt)
             zip_path = backend.download_asset(result["asset"], target_dir=downloads, progress_callback=progress, cancel_event=cancel,
-                                              **({"connection": connection} if connection else {"public_source": True} if source == "public" else {}))
+                                              **({"connection": connection} if connection else {"public_source": True} if source == "public" else {}),
+                                              **validation)
+            if install_dir is not None:
+                from core.desktop_update_payload import prepare_payload
+                payload = prepare_payload(root, zip_path, install_dir, current_version, connection, cancel,
+                    lambda message, percent: emit("validating", message=message, percent=percent), asset=result["asset"],
+                    version=result["release"]["tag_name"], update_id=update_id)
+                result.update(payload, zip_path=zip_path)
+                persist_prepared(root, result)
+                atomic_json(identity_path, {"asset": result["asset"], "sha256": result["sha256"],
+                                            "source_name": result["source_name"], "fallback_reason": result["fallback_reason"]})
+                return result
             atomic_json(identity_path, {"asset": result["asset"], "sha256": backend._hash_file(zip_path),
                                         "source_name": result["source_name"], "fallback_reason": result["fallback_reason"]})
             backend.check_cancel(cancel)
@@ -252,25 +304,30 @@ class UpdateWorker(TaskWorker):
             update_log(self.root, "start", update_id=self.update_id, operation=self.operation,
                        channel="enterprise" if self.connection else "community",
                        platform_id=(self.connection or {}).get("platform_id"))
+            desktop_options = {"install_dir": self.install_dir} if self.layout == "electron" and self.install_enabled else {}
             if self.operation == "restore":
-                cached = load_prepared(self.root, self.current_version, self.connection, self.source_config, layout=self.layout, cancel=self.cancel)
+                cached = load_prepared(self.root, self.current_version, self.connection, self.source_config, layout=self.layout,
+                                       cancel=self.cancel, **desktop_options)
                 self.result = cached or {"release": {}, "update_available": False, "message": "检查是否有可用更新"}
             elif self.operation == "online":
+                cached = None
                 try:
                     # Enterprise caches are reused only after checking the current recommendation.
                     cached = None if self.connection else load_prepared(self.root, self.current_version, source_config=self.source_config,
-                        **({"layout": self.layout, "cancel": self.cancel} if self.layout != "qt" else {}))
+                        **({"layout": self.layout, "cancel": self.cancel} if self.layout != "qt" else {}), **desktop_options)
                     if cached and not cached.get("manual_install"):
                         self.emit_state("ready", message="更新已准备好", result=cached)
                 except (ValueError, KeyError, OSError, backend.UpdaterError) as exc:
                     update_log(self.root, "cache_invalid", error=str(exc))
                 self.result = prepare_online(self.root, self.current_version, self.install_enabled, self.cancel, self.emit_state,
                                              update_id=self.update_id, connection=self.connection, source_config=self.source_config,
-                                             **({"layout": self.layout} if self.layout != "qt" else {}))
+                                             **({"layout": self.layout} if self.layout != "qt" else {}),
+                                             **({**desktop_options, "cached": cached} if desktop_options else {}))
             elif self.operation == "local":
                 if self.layout == "electron":
                     self.result = backend.prepare_desktop_local(self.payload, self.root, self.current_version, self.connection, self.cancel,
-                        lambda message, percent: self.emit_state("validating", message=message, percent=percent))
+                        lambda message, percent: self.emit_state("validating", message=message, percent=percent),
+                        install_dir=self.install_dir, update_id=self.update_id)
                 else:
                     self.result = self._prepare_legacy_local()
             elif self.operation == "plan":
@@ -308,11 +365,6 @@ class UpdateWorker(TaskWorker):
             current = backend.update_connection(self.install_dir)
             if current != self.result.get("connection"):
                 raise backend.UpdaterError("安装包所属的企业或更新来源已改变，请重新选择安装包。")
-            # Re-extract the verified owned ZIP: staged files may have changed since preparation.
-            self.result = load_prepared(self.result["updates_dir"], self.current_version, current, self.source_config,
-                                        layout=self.layout, cancel=self.cancel)
-            if not self.result:
-                raise backend.UpdaterError("更新缓存已失效，请重新准备安装包。")
         plan = backend.build_update_plan(self.install_dir, self.result["staged_app_dir"], **({"layout": self.layout, "cancel_event": self.cancel} if self.layout != "qt" else {}))
         backend.check_cancel(self.cancel)
         target_version = self.result["release"]["tag_name"]
@@ -395,7 +447,7 @@ class UpdateCoordinator:
     @_serialized
     def check(self):
         self.automatic_started = True
-        if self.worker is None:
+        if self.worker is None and self.state["phase"] != "installing":
             if self.layout == "electron":
                 try:
                     self._select_channel()
@@ -470,6 +522,14 @@ class UpdateCoordinator:
         elif self.worker is None:
             self.check()
         self.publish()
+
+    @_serialized
+    def begin_desktop_install(self):
+        if self.worker or not self.prepared or not self.prepared.get("stage_id"):
+            raise backend.UpdaterError("更新文件尚未准备好，请稍候。")
+        self.install_requested = True
+        self.publish(phase="installing", message="正在准备关闭应用…")
+        return self.prepared
 
     @_serialized
     def select_local(self, path):

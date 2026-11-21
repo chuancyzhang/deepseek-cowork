@@ -311,6 +311,43 @@ $context=New-Object Windows.Forms.ApplicationContext
         transaction = json.loads((script.parent / "transaction.json").read_text(encoding="utf-8-sig"))
         self.assertEqual(transaction["phase"], "installed_not_opened")
 
+    def prepare_move(self):
+        from core.update_coordinator import atomic_json
+        from core.update_installer import write_installer
+        stage = self.install / ".cowork-update" / ("a" * 32)
+        stage.mkdir(parents=True)
+        staged = self.source.rename(stage / "files")
+        plan = stage / "plan.json"
+        atomic_json(plan, build_update_plan(str(self.install), str(staged)))
+        import hashlib
+        script = write_installer(str(self.install), str(staged), str(plan), str(self.root / "updates"), [os.getpid()],
+                                 "deepseek-cowork.exe", version="9.0.0", plan_digest=hashlib.sha256(plan.read_bytes()).hexdigest())
+        return Path(script), stage
+
+    def test_prepared_files_move_once_and_backups_clear_after_startup(self):
+        self.compile_relaunch_fixture(receipt_version="9.0.0")
+        script, stage = self.prepare_move()
+        inode = (stage / "files/_internal/data.txt").stat().st_ino
+        result = self.execute(script)
+        self.assertEqual(result.returncode, 0, (script.parent / "result.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual((self.install / "_internal/data.txt").stat().st_ino, inode)
+        self.assertFalse(stage.exists())
+        self.assertEqual((self.install / "user_data/private.txt").read_text(), "keep")
+
+    def test_recover_between_backup_and_placement_moves(self):
+        script, stage = self.prepare_move()
+        marker = "    if($item.sha256) { Move-UpdateFile (Safe-Path $source $item.path) $dest }"
+        interrupted = script.read_text(encoding="utf-8-sig").replace(
+            marker, "    if($item.before_sha256) { exit 77 }\n" + marker, 1)
+        script.write_text(interrupted, encoding="utf-8-sig")
+        self.assertEqual(self.execute(script).returncode, 77)
+        self.assertFalse((self.install / "_internal/data.txt").exists())
+        self.assertEqual((stage / "backup/_internal/data.txt").read_text(), "old")
+        self.execute(script, recover=True)
+        self.assertEqual((self.install / "_internal/data.txt").read_text(), "old")
+        self.assertFalse((self.install / "_internal/added.txt").exists())
+        self.assertEqual((stage / "files/_internal/added.txt").read_text(), "added")
+
     def test_long_path_copy_delete_backup_and_rollback(self):
         from core.platform_runtime import platform_runtime
         import shutil

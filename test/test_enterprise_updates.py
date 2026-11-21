@@ -255,9 +255,10 @@ def test_local_enterprise_zip_needs_no_network(tmp_path):
         worker = UpdateWorker("local", str(tmp_path / "updates"), install, "5.3.0", True, str(path), connection=CONNECTION, layout="electron")
         worker.run()
         assert worker.error is None
-        plan = UpdateWorker("plan", str(tmp_path / "updates"), install, "5.3.0", True, worker.result, connection=CONNECTION, layout="electron")
-        plan.run()
-        assert plan.error is None
+        from core.desktop_update_payload import verify_prepared
+        from core.update_coordinator import verify_enterprise_recommendation
+        verify_enterprise_recommendation(worker.result, CONNECTION, "electron")
+        verify_prepared(install, worker.result, payload=True)
 
 
 def test_enterprise_outage_has_bounded_retry_without_github_fallback(tmp_path):

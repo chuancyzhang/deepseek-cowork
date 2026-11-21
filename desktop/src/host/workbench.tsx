@@ -713,7 +713,7 @@ export function useWorkbenchController() {
     }
     const editorKey=host.sessionKey('editors',id),activeKey=host.sessionKey('activeFile',id);
     const remaining=host.get<Editor[]>(editorKey,[]).filter(e=>e.file.path!==path);host.set(editorKey,remaining);
-    if(host.get(activeKey,'')===path){const next=remaining[0]?.file.path||'';host.set(activeKey,next);host.set<WorkspaceView>(host.sessionKey('workspaceView',id),previous=>({...previous,selected:next?'file:'+next:'new',newOpen:true}));}
+    if(host.get(activeKey,'')===path){const next=remaining[0]?.file.path||'';host.set(activeKey,next);host.set<WorkspaceView>(host.sessionKey('workspaceView',id),previous=>({...previous,...(previous?.selected==='file:'+path?{selected:next?'file:'+next:'new',newOpen:false}:{})}));}
     await saveView(id);
   }
   async function createDocument() {

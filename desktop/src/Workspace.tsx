@@ -12,7 +12,7 @@ import TaskWorkspace, { type TaskView } from './TaskWorkspace';
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 export type WorkbenchTab = { id: string; kind: string; title: string; cwd: string; url?: string; owner: string; control_revision: number; status: string };
 export type WorkspaceView = { selected: string; newOpen: boolean; filesOpen: boolean; filesPinned: boolean; tasksOpen: boolean; tasksPinned: boolean; fileQuery: string; task: TaskView; width?: number; libraryOpen?: boolean; reviewOpen?: string[]; reviewClosed?: string[]; reviewEdits?: Record<string, ReviewEdit> };
-export const emptyWorkspace = (): WorkspaceView => ({ selected: 'new', newOpen: true, filesOpen: false, filesPinned: false, tasksOpen: false, tasksPinned: false, fileQuery: '', task: { section: 'calls' } });
+export const emptyWorkspace = (): WorkspaceView => ({ selected: 'new', newOpen: false, filesOpen: false, filesPinned: false, tasksOpen: false, tasksPinned: false, fileQuery: '', task: { section: 'calls' } });
 type Props = {
   conversation: Conversation; value: WorkspaceView; change: (value: Partial<WorkspaceView>) => void;
   expanded: boolean; expand: () => void; close: () => void; obscured: boolean; dark: boolean;
@@ -56,10 +56,10 @@ export default function Workspace(props: Props) {
   }, []);
   const selectedTab = tabs.find(tab => 'workbench:' + tab.id === value.selected);
   const showTasks = value.selected === 'tasks' && value.tasksPinned;
-  const selectedReview = value.selected.startsWith('review:') ? value.selected.slice(7) : '';
   const openReviews = reviews.filter(item => !(value.reviewClosed || []).includes(item.id) || (value.reviewOpen || []).includes(item.id));
+  const selectedReview = openReviews.find(item=>'review:'+item.id===value.selected)?.id || '';
   const floating = value.filesOpen && !value.filesPinned;
-  const fileSelected = value.selected.startsWith('file:');
+  const fileSelected = editors.some(editor=>'file:'+editor.file.path===value.selected);
   useEffect(() => {setTabsOpen(false);setTabQuery('');},[cid]);
   useEffect(() => {
     if (!tabsOpen) return;
@@ -98,7 +98,8 @@ export default function Workspace(props: Props) {
     try {
       await call(tab.kind === 'web' ? 'browser.close' : 'workbench.close', { conversation_id: cid, tab_id: tab.id });
       if (!alive.current) return;
-      await refresh(); if (value.selected === 'workbench:' + tab.id) change({ selected: 'new', newOpen: true });
+      await refresh();
+      if (current.current.value.selected === 'workbench:' + tab.id) change({ selected: 'new', newOpen: false });
     } catch (failure) { error((failure as Error).message); }
   }
   async function navigate(action: () => void) {
@@ -106,19 +107,30 @@ export default function Workspace(props: Props) {
     catch (failure) {error((failure as Error).message);}
   }
   function tabButton(id: string, name: string, icon: ReactNode, select: () => void, close?: () => void) {
-    return <div className={'workspace-tab ' + (value.selected === id ? 'active' : '')} key={id}>
-      <button role="tab" aria-selected={value.selected === id} title={name} onClick={()=>void navigate(select)}>{icon}<span>{name}</span></button>
+    return <div className={'workspace-tab ' + (activeTab === id ? 'active' : '')} key={id}>
+      <button role="tab" aria-selected={activeTab === id} title={name} onClick={()=>void navigate(select)}>{icon}<span>{name}</span></button>
       {close && <button className="tab-close" aria-label={'关闭 ' + name} onClick={()=>void navigate(close)}><X size={13}/></button>}
     </div>;
   }
-  const tabItems: {id:string;name:string;detail?:string;icon:ReactNode;select:()=>void;close?:()=>void}[] = [
-    ...(expanded ? [{id:'conversation',name:'对话',icon:<MessageSquare size={14}/>,select:()=>change({selected:'conversation'})}] : []),
-    ...(value.tasksPinned ? [{id:'tasks',name:'任务',icon:<ListChecks size={14}/>,select:()=>change({selected:'tasks'}),close:()=>change({tasksPinned:false,...(showTasks ? {selected:'new',newOpen:true} : {})})}] : []),
-    ...(value.libraryOpen ? [{id:'library',name:'资料库',icon:<BookOpen size={14}/>,select:()=>change({selected:'library'}),close:()=>change({libraryOpen:false,...(value.selected==='library'?{selected:'new',newOpen:true}:{})})}] : []),
-    ...openReviews.map(item=>({id:'review:'+item.id,name:reviewTitle(item),icon:<FileText size={14}/>,select:()=>props.openReview(item.id),close:()=>change({reviewOpen:(value.reviewOpen||[]).filter(id=>id!==item.id),reviewClosed:[...new Set([...(value.reviewClosed||[]),item.id])],...(selectedReview===item.id?{selected:'new',newOpen:true}:{})})})),
+  type TabItem = {id:string;name:string;detail?:string;icon:ReactNode;select:()=>void;close?:()=>void};
+  const returnToWorkspace = {selected:'new',newOpen:false};
+  const contentTabs: TabItem[] = [
+    ...(value.tasksPinned ? [{id:'tasks',name:'任务',icon:<ListChecks size={14}/>,select:()=>change({selected:'tasks'}),close:()=>change({tasksPinned:false,...(showTasks ? returnToWorkspace : {})})}] : []),
+    ...(value.libraryOpen ? [{id:'library',name:'资料库',icon:<BookOpen size={14}/>,select:()=>change({selected:'library'}),close:()=>change({libraryOpen:false,...(value.selected==='library'?returnToWorkspace:{})})}] : []),
+    ...openReviews.map(item=>({id:'review:'+item.id,name:reviewTitle(item),icon:<FileText size={14}/>,select:()=>props.openReview(item.id),close:()=>change({reviewOpen:(value.reviewOpen||[]).filter(id=>id!==item.id),reviewClosed:[...new Set([...(value.reviewClosed||[]),item.id])],...(selectedReview===item.id?returnToWorkspace:{})})})),
     ...editors.map(editor=>({id:'file:'+editor.file.path,name:editor.file.name+(editor.text!==editor.saved ? ' •' : ''),detail:editor.file.path,icon:<FileText size={14}/>,select:()=>void props.selectFile(editor.file.path),close:()=>void props.closeFile(editor.file.path)})),
     ...tabs.map(tab=>({id:'workbench:'+tab.id,name:tab.title,detail:tab.kind==='web'?tab.url:tab.cwd,icon:tab.kind==='web'?<Globe size={14}/>:<Terminal size={14}/>,select:()=>{change({selected:'workbench:'+tab.id});void call('workbench.activate',{conversation_id:cid,tab_id:tab.id}).catch(failure=>error(failure.message));},close:()=>void closeNative(tab)})),
-    ...(value.newOpen ? [{id:'new',name:'新标签页',icon:<Plus size={14}/>,select:()=>change({selected:'new'}),close:()=>change({newOpen:false,selected:editors[0]?'file:'+editors[0].file.path:tabs[0]?'workbench:'+tabs[0].id:value.tasksPinned?'tasks':'empty'})}] : []),
+  ];
+  const fallbackTab = contentTabs[0];
+  useEffect(() => {
+    if (fallbackTab && (value.selected === 'empty' || value.selected === 'new' && !value.newOpen)) fallbackTab.select();
+  }, [fallbackTab, value.selected, value.newOpen]);
+  const showNew = !contentTabs.length || value.selected === 'new' && value.newOpen;
+  const activeTab = !contentTabs.length && !(expanded && value.selected === 'conversation') ? 'new' : value.selected;
+  const tabItems: TabItem[] = [
+    ...(expanded ? [{id:'conversation',name:'对话',icon:<MessageSquare size={14}/>,select:()=>change({selected:'conversation'})}] : []),
+    ...contentTabs,
+    ...(showNew ? [{id:'new',name:'新标签页',icon:<Plus size={14}/>,select:()=>change({selected:'new',newOpen:!!fallbackTab}),close:fallbackTab ? () => {change({newOpen:false});fallbackTab.select();} : undefined}] : []),
   ];
   const matchingTabs=tabItems.filter(tab=>(tab.name+' '+(tab.detail||'')).toLocaleLowerCase().includes(tabQuery.trim().toLocaleLowerCase()));
   const taskContent = <PluginSlot kind="panel" target="tasks" scope={{conversationId:cid}}><TaskWorkspace cid={cid} conversation={conversation} value={value.task} change={task => change({task: {...value.task, ...task}})} error={error} openReview={props.openReview}/></PluginSlot>;

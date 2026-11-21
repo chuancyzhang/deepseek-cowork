@@ -41,6 +41,7 @@ app.whenReady().then(async()=>{
  assert.equal(await run("document.querySelector('[aria-label=更新安装进度]').innerText.includes('正在取消')"),true);
  await run("window.setUpdate({phase:'ready',busy:false,ready:true,can_install:true,notice:true,install:{id:'a'.repeat(32),phase:'cancelled',error:''},message:'已取消本次安装，当前版本继续可用。'})");await delay(50);
  assert.equal(await run("Boolean(document.querySelector('[aria-label=可安装的更新]'))"),true);
+ if(process.env.COWORK_UPDATE_SCREENSHOTS){await run("window.setUpdate({message:'更新已准备好。'})");await delay(200);await fs.writeFile(path.join(process.env.COWORK_UPDATE_SCREENSHOTS,'update-ready.png'),(await window.webContents.capturePage()).toPNG());}
  window.setSize(850,620);window.webContents.setZoomFactor(1.5);await run("document.documentElement.dataset.theme='dark';window.setUpdate({last_install_result:{phase:'rolled_back',error:'更新未完成，已恢复原版本。安装文件校验失败，可重新准备安装包。'}})");await delay(200);
  assert.equal(await run('document.documentElement.scrollWidth<=innerWidth'),true);
  assert.equal(await run("document.body.innerText.includes('已恢复原版本')"),true);

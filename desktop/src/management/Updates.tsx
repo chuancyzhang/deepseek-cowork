@@ -55,7 +55,7 @@ export default function Updates() {
       {state.last_install_result?.error&&<div className="inline-error" role="alert"><p>{state.last_install_result.error}</p></div>}
       {state.notes&&<div className="update-notes">{state.notes}</div>}
       {state.ready&&<><button className="primary" disabled={!state.can_install||requesting} onClick={async()=>{setRequesting(true);setFailure('');try{await install();}catch(error){setFailure((error as Error).message);}finally{setRequesting(false);}}}>{installLabel(state)}</button>
-        {state.source==='local'&&<p className="muted">{state.local_manifest_verified?'已核对配套清单、包结构及完整性。':'已检查包结构及完整性；此包未附配套清单，未验证发布者身份。'}</p>}</>}
+        {state.source==='local'&&<p className="muted">{state.local_manifest_verified?'已核对配套清单，并校验本次需要安装的文件。':'已校验本次需要安装的文件。此包未附配套清单，未验证发布者身份。'}</p>}</>}
       {(failure||state.error)&&<div className="inline-error" role="alert"><p>{failure||'可重新检查更新或选择本地安装包，原有内容已保留。'}</p>
         {state.error&&<details><summary>错误详情</summary><pre>{state.error}</pre></details>}</div>}
     </section>

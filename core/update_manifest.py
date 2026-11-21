@@ -1,6 +1,8 @@
 """Platform-specific static release contracts; the Windows v1 format is unchanged."""
 import re
 
+DESKTOP_FILES_NAME = "desktop-files.json"
+
 
 def release_filename(version, target="windows-x64", *, layout="qt"):
     if layout == "electron":

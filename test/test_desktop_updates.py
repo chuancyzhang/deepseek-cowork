@@ -16,6 +16,7 @@ from core.app_version import APP_VERSION
 from core.desktop_updates import DesktopUpdates
 from core.platform_runtime import platform_runtime
 from core.update_coordinator import UpdateCoordinator, UpdateWorker, load_prepared, prepare_online
+from core.update_manifest import DESKTOP_FILES_NAME
 
 
 def desktop_zip(path, version=APP_VERSION, connection=None, extra=None, root="Cowork"):
@@ -25,6 +26,10 @@ def desktop_zip(path, version=APP_VERSION, connection=None, extra=None, root="Co
     if connection:
         files["enterprise_connection.json"] = json.dumps(connection).encode()
     files.update(extra or {})
+    files[DESKTOP_FILES_NAME] = json.dumps({"schema_version": 1, "files": {
+        name: {"size": len(contents), "sha256": hashlib.sha256(contents).hexdigest()}
+        for name, contents in files.items() if name != "enterprise_connection.json"
+    }}).encode()
     with zipfile.ZipFile(path, "w") as archive:
         for name, contents in files.items():
             archive.writestr(root + "/" + name, contents)
@@ -36,6 +41,36 @@ def desktop_zip(path, version=APP_VERSION, connection=None, extra=None, root="Co
 def wait(coordinator):
     while worker := coordinator.worker:
         assert worker.join(10), "update worker did not finish"
+
+
+def test_desktop_prepares_only_changed_files_and_keeps_ready_after_zip_removed(tmp_path):
+    old = tmp_path / "installed.zip"
+    desktop_zip(old, "1.0.0", extra={"stable.txt": b"same", "old.txt": b"removed"})
+    install = tmp_path / "install"
+    with zipfile.ZipFile(old) as archive:
+        for member in archive.infolist():
+            path = install / member.filename.split("/", 1)[1]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(archive.read(member))
+    (install / "keep.txt").write_bytes(b"user file")
+    package = tmp_path / "update.zip"
+    desktop_zip(package, "2.0.0", extra={"stable.txt": b"same", "new.txt": b"added"})
+    root = tmp_path / "cache"
+    result = updater.prepare_desktop_local(str(package), str(root), "1.0.0", None, threading.Event(), None,
+                                           install_dir=install)
+    stage = Path(result["staged_app_dir"])
+    assert stage.is_relative_to(install)
+    assert {p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file()} == {
+        "new.txt", "desktop-release.json", DESKTOP_FILES_NAME}
+    plan = json.loads(Path(result["change_plan_path"]).read_bytes())
+    assert [item["path"] for item in plan["deleted"]] == ["old.txt"]
+    assert (install / "old.txt").exists() and (install / "keep.txt").exists()
+    package.unlink()
+    restored = load_prepared(str(root), "1.0.0", layout="electron", install_dir=install)
+    assert restored["stage_id"] == result["stage_id"]
+    (stage / "new.txt").write_bytes(b"changed after preparation")
+    with pytest.raises(updater.UpdaterError, match="发生变化"):
+        load_prepared(str(root), "1.0.0", layout="electron", install_dir=install)
 
 
 @pytest.mark.parametrize("archive_root", ["Cowork", "DeepSeek Cowork-win32-x64"])
@@ -282,15 +317,15 @@ def test_cancel_before_prepare_is_idempotent_and_never_freezes(install_service):
     assert not launches and not service.state.update_preparing
 
 
-def test_cancel_during_slow_plan_blocks_late_installer_and_restores_input(install_service, monkeypatch):
+def test_cancel_during_installer_creation_blocks_late_launch_and_restores_input(install_service, monkeypatch):
     updates, service, launches = install_service
     started, release = threading.Event(), threading.Event()
-    original = updater.build_update_plan
+    original = updater.create_windows_update_script
     def slow(*args, **kwargs):
         started.set()
         assert release.wait(5)
         return original(*args, **kwargs)
-    monkeypatch.setattr(updater, "build_update_plan", slow)
+    monkeypatch.setattr(updater, "create_windows_update_script", slow)
     request = {"id": "2" * 32, "host_pid": os.getpid()}
     assert updates.dispatch("updates.prepare_install", request)["phase"] == "preparing"
     assert started.wait(5)

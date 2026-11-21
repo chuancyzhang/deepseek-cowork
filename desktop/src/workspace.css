@@ -31,16 +31,6 @@
 .messages .message-footer{min-height:28px}
 .messages .message-actions button{min-width:26px;min-height:28px}
 .messages .message:has(.message-more-menu){content-visibility:visible}
-@media(hover:hover){
-  @container(min-width:640px){
-    .messages>.message.user:not(:has(>.image-attachments,>.error-text)){
-      flex-direction:row-reverse;align-items:center;gap:8px;max-width:100%;
-    }
-    .messages>.message.user:not(:has(>.image-attachments,>.error-text))>.message-footer{
-      flex:0 0 auto;margin:0;
-    }
-  }
-}
 @media(hover:none){.messages .message-actions{opacity:1}}
 .assistant-turn{overflow-wrap:anywhere}
 .assistant-turn>.message{margin:0}

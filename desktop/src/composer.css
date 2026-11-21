@@ -69,7 +69,25 @@
   .questionnaire .choice,.question-heading,.question-custom .custom-answer,.questionnaire .questionnaire-footer>.primary{min-height:44px}
 }
 
-.inline-history-editor{width:100%;padding:12px 16px;border:1px solid var(--line);border-radius:12px;background:var(--bg);margin:20px 0}.inline-history-editor:focus-within{border-color:var(--muted)}.inline-history-editor textarea{display:block;min-height:78px;max-height:min(240px,35vh);resize:none;background:transparent;border:0;border-radius:0;box-shadow:none;outline:none;padding:4px 0;margin:0 0 10px;font-size:14px;line-height:1.8}.inline-history-editor .composer-contexts:not(:empty){margin-bottom:10px}.inline-history-editor .button-row{justify-content:flex-end}.inline-history-editor .button-row>.icon-button{margin-right:auto}.inline-history-editor .composer-contexts{padding:0}.inline-history-editor .muted{margin-bottom:12px}
+.inline-history-editor{
+  display:grid;gap:8px;width:min(100%,640px);min-width:0;margin-inline-start:auto;padding:12px 14px;
+  border:1px solid var(--line);border-radius:calc(12px * var(--radius-scale,1));
+  background:var(--composer-bg,var(--bg));color:var(--composer-text,var(--text));
+}
+.inline-history-editor:focus-within{border-color:color-mix(in srgb,var(--muted) 48%,var(--line))}
+.inline-history-editor .message-contexts{margin:0}
+.inline-history-editor textarea{
+  display:block;width:100%;min-height:2.2em;max-height:min(240px,35vh);field-sizing:content;resize:none;
+  background:transparent;border:0;border-radius:0;outline:none;padding:4px 0;
+  font-size:calc(14px * var(--font-scale,1));line-height:1.6;
+}
+.inline-history-editor>.error-text{margin:0;overflow-wrap:anywhere}
+.history-editor-footer{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding-top:8px;border-top:1px solid var(--line);
+}
+.history-editor-footer>.icon-button{flex-shrink:0}
+.history-editor-actions{justify-content:flex-end;align-items:center;gap:6px;min-width:0}
 
 .process-duration{font-size:calc(12px * var(--font-scale,1));line-height:20px;color:var(--muted);font-weight:400;font-variant-numeric:tabular-nums;white-space:nowrap}
 

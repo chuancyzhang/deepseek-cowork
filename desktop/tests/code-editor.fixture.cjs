@@ -183,7 +183,7 @@ async function run(){
     window.setSize(960,760);window.webContents.setZoomFactor(1.25);
     await click('设置');await click('模型与服务');
     await until('[...document.querySelectorAll(".model-service h3")].some(el=>el.textContent==="本地验证")');
-    await read('[...document.querySelectorAll(".model-service h3")].find(el=>el.textContent==="本地验证").closest(".model-service").querySelector(".secondary").click()');await click('获取模型');
+    await read('document.querySelector(\'[aria-label="编辑服务 本地验证"]\').click()');await click('获取模型');
     await until('document.querySelectorAll(".model-catalog input[type=checkbox]").length===3');
     const picked=()=>read('document.querySelectorAll(".model-catalog input:checked").length');
     assert.equal(await picked(),0);

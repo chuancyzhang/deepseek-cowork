@@ -1,4 +1,24 @@
 export type LibrarySelection = {collection: string; item: string; title: string};
+export type LibraryVisit = {
+  source: string; identity: string; category: string; collection: string; collectionName: string; time: number;
+  item: {id: string; title: string; is_folder: boolean; folder_path?: string; relative?: string; readable?: boolean};
+  parents: {id: string; title: string; is_folder: boolean; folder_path?: string}[];
+};
+
+const recentKey = 'cowork-library-recent';
+export const libraryIdentity = (account: any) => account && !account.unavailable
+  ? JSON.stringify([account.connection_id, account.user_id, account.tenant_id]) : '';
+export const libraryVisitKey = (visit: LibraryVisit) => JSON.stringify([visit.source, visit.identity, visit.collection, visit.item.id]);
+export function loadLibraryVisits(): LibraryVisit[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(recentKey) || '[]');
+    return Array.isArray(value) ? value.filter(visit => typeof visit?.item?.id === 'string' && Array.isArray(visit.parents)) : [];
+  } catch {return [];}
+}
+export function saveLibraryVisits(visits: LibraryVisit[]) {
+  localStorage.setItem(recentKey, JSON.stringify(visits));
+  return visits;
+}
 export const libraryItemId = (item: any) => String(item.item_id ?? item.id ?? item.knowledge_id ?? item.folder_path ?? '');
 export const libraryItemKey = (item: any) => JSON.stringify([item.collection_id ?? item.knowledge_base_id ?? '', libraryItemId(item), Boolean(item.is_folder)]);
 

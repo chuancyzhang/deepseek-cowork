@@ -12,6 +12,7 @@ class Connections:
         "library.logout", "library.catalog", "library.children", "library.search", "library.read", "library.read_result", "library.reference", "library.references",
         "library.upload", "library.uploads", "library.check_upload", "library.tenant", "library.import", "library.mkdir", "library.folder",
         "library.rename", "library.trash", "library.trash_list", "library.restore", "library.locate",
+        "library.create_file", "library.paste", "library.edit_open", "library.edit_save", "library.create_manual",
         "enterprise.status", "enterprise.bind", "enterprise.providers", "enterprise.login", "enterprise.refresh", "enterprise.logout",
         "team.list", "team.detail", "team.collection", "team.object", "team.execute", "team.upload", "team.download", "team.conversation"})
 
@@ -41,6 +42,14 @@ class Connections:
                     return {"path": str(path)}
                 if action == "mkdir":
                     return self.local.mkdir(p)
+                if action == "create_file":
+                    return self.local.create_file(p)
+                if action == "paste":
+                    return self.s.jobs.submit("粘贴公共资料", lambda cancelled, progress: self.local.paste(p, cancelled, progress))
+                if action == "edit_open":
+                    return self.local.edit_open(p)
+                if action == "edit_save":
+                    return self.local.edit_save(p)
                 if action == "rename" and p.get("collection") == "public":
                     return self.local.rename(p)
                 if action == "trash" and p.get("collection") == "public":
@@ -136,6 +145,13 @@ class Connections:
                     if not content:
                         raise ValueError("平台尚未返回可显示的正文，请在原平台核对文件内容或解析状态。")
                     return {"text": content, "format": "markdown", "url": value.get("url", "")}
+                if source == "weknora" and action == "edit_open":
+                    item = provider.manual_document(scope, p["collection"], p["item"], cancelled.is_set)
+                    return {"id": item["id"], "name": item["title"], "path": item["id"],
+                            "fingerprint": str(item["metadata"].get("version")),
+                            "payload": {"kind": "text", "content": item["metadata"]["content"]}}
+                if source == "weknora" and action in {"create_manual", "edit_save"}:
+                    return provider.save_manual_document(scope, p, cancelled.is_set)
                 if action == "upload":
                     return provider.upload(scope, p["path"], p["collection"], p.get("parent", ""))
                 if action == "check_upload":
@@ -144,7 +160,8 @@ class Connections:
                         raise ValueError("上传任务不属于当前资料来源。")
                     return provider.check_upload(task)
                 raise ValueError("不支持的资料操作。")
-            return self.s.jobs.submit("读取资料" if action != "upload" else "上传资料", operation)
+            label = "上传资料" if action == "upload" else "保存资料" if action in {"create_manual", "edit_save"} else "读取资料"
+            return self.s.jobs.submit(label, operation)
         if method.startswith("enterprise."):
             if action == "status":
                 return self.enterprise.store.read()

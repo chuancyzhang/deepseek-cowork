@@ -62,6 +62,14 @@ app.whenReady().then(async()=>{
   await until("!!document.querySelector('textarea[aria-label=\"消息输入\"]')&&document.body.innerText.includes('图片验收')");
   const paste=()=>read(`(()=>{const canvas=document.createElement('canvas');canvas.width=320;canvas.height=200;const c=canvas.getContext('2d');c.fillStyle='#f5f5f5';c.fillRect(0,0,320,200);c.fillStyle='#404040';c.font='22px sans-serif';c.fillText('图片预览验收',40,65);c.fillRect(40,100,65,55);c.fillRect(125,120,65,35);c.fillRect(210,85,65,70);const bytes=Uint8Array.from(atob(canvas.toDataURL('image/png').split(',')[1]),x=>x.charCodeAt(0));const transfer=new DataTransfer();transfer.items.add(new File([bytes],'粘贴图片.png',{type:'image/png'}));const input=document.querySelector('textarea[aria-label="消息输入"]');input.focus();input.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:transfer}));})()`);
   for(let count=1;count<=3;count++){await paste();await until(`document.querySelectorAll('.composer .image-attachment img').length===${count}`);}
+  await read("document.querySelector('.composer .image-attachment-open').click()");
+  await until("document.querySelector('.chat-image-preview[open] img')?.naturalWidth===320");
+  assert.equal(await read("document.querySelector('.chat-image-count').textContent"),'1 / 3');
+  await read("document.querySelector('.chat-image-preview [aria-label=下一张]').click()");
+  await until("document.querySelector('.chat-image-count')?.textContent==='2 / 3'");
+  await read("document.querySelector('.chat-image-preview [aria-label=关闭预览]').click()");
+  await until("!document.querySelector('.chat-image-preview')");
+  assert.equal(await read("document.querySelectorAll('.composer .image-attachment').length"),3);
   await copyImage('.composer .image-attachment img',true);
   const cid=(await read("window.cowork.call('conversation.list')")).conversations?.[0]?.id;
   // Input recovery is local; reopening the renderer must preserve attachments.
@@ -92,10 +100,18 @@ app.whenReady().then(async()=>{
   assert.ok(sendWaiting,'the real submit is held to represent a slow machine');
   assert.equal(await read('document.body.textContent.includes("上一条消息的接收结果待确认")'),false,'normal pending sends do not show recovery');
   await until("document.querySelectorAll('.message.user .image-attachment img').length===3&&document.body.textContent.includes('已查看图片，图表内容已保留')");
+  assert.equal(await read("document.querySelectorAll('.message.user .message-body>.markdown+.image-attachments img').length"),3);
   await until(`window.cowork.call('conversation.get',{conversation_id:${JSON.stringify(id)}}).then(value=>value.run?.status==='completed')`);
   await delay(400);
   const positions=await read("[...document.querySelectorAll('.message.user .image-attachment')].map(e=>Math.round(e.getBoundingClientRect().top))");
   assert.equal(new Set(positions).size,1,'three attachments share a row');
+  await read("document.querySelector('.message.user .image-attachment-open').click()");
+  await until("Boolean(document.querySelector('.chat-image-preview[open] [aria-label=放大]:enabled'))");
+  if(process.env.COWORK_ATTACHMENT_SCREENSHOTS)await fs.writeFile(path.join(process.env.COWORK_ATTACHMENT_SCREENSHOTS,'chat-image-preview-light.png'),(await window.webContents.capturePage()).toPNG());
+  await read("document.querySelector('.chat-image-preview [aria-label=放大]').click()");
+  await until("parseInt(document.querySelector('.chat-image-scale')?.textContent,10)>100");
+  await read("document.querySelector('.chat-image-preview').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))");
+  await until("document.activeElement===document.querySelector('.message.user .image-attachment-open')");
   await copyImage('.message.user .image-attachment img');
   assert.ok(requests.some(payload=>payload.messages.some(message=>Array.isArray(message.content)&&message.content.filter(part=>part.type==='image_url').length===3)),'real vision request contains all three images');
   await read("(()=>{const b=document.querySelector('.process-summary');if(b?.getAttribute('aria-expanded')!=='true')b?.click()})()");
@@ -120,6 +136,8 @@ app.whenReady().then(async()=>{
   if(process.env.COWORK_ATTACHMENT_SCREENSHOTS)await fs.writeFile(path.join(process.env.COWORK_ATTACHMENT_SCREENSHOTS,'conversation-images-dark.png'),(await window.webContents.capturePage()).toPNG());
   await copyImage('.viewed-images img');
   await read("document.querySelector('.viewed-images .image-attachment-open').click()");
-  await until("!!document.querySelector('.workspace img')");
+  await until("document.querySelector('.chat-image-preview[open] img')?.naturalWidth===320");
+  assert.equal(await read("Boolean(document.querySelector('.workspace img'))"),false);
+  if(process.env.COWORK_ATTACHMENT_SCREENSHOTS)await fs.writeFile(path.join(process.env.COWORK_ATTACHMENT_SCREENSHOTS,'chat-image-preview.png'),(await window.webContents.capturePage()).toPNG());
   console.log('ATTACHMENTS_FIXTURE_OK',JSON.stringify({platform:process.platform,scale:require('electron').screen.getPrimaryDisplay().scaleFactor,zoom:window.webContents.getZoomFactor(),size:window.getSize()}));
 }).then(async()=>{clearTimeout(deadline);server.close();await window.webContents.executeJavaScript("window.cowork.call('app.quit').catch(()=>{});null");}).catch(async error=>{console.error(error);if(process.env.COWORK_ATTACHMENT_SCREENSHOTS&&window){await fs.mkdir(process.env.COWORK_ATTACHMENT_SCREENSHOTS,{recursive:true});await fs.writeFile(path.join(process.env.COWORK_ATTACHMENT_SCREENSHOTS,'failure.png'),(await window.webContents.capturePage()).toPNG());console.error(await window.webContents.executeJavaScript('JSON.stringify({hidden:document.hidden,images:[...document.querySelectorAll(".image-attachment img")].map(el=>({complete:el.complete,width:el.naturalWidth,rect:el.getBoundingClientRect()}))})'));}clearTimeout(deadline);server?.close();process.exitCode=1;try{await window?.webContents.executeJavaScript("window.cowork.call('app.quit')");}catch{}app.exit(1);});

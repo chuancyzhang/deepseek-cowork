@@ -1,5 +1,5 @@
 import { createContext, useContext, memo, useRef, useState, useEffect } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, {type Components} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Copy, ExternalLink, FileText, GitBranch, Image as ImageIcon, Link, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Puzzle, RefreshCw, Sparkles, Trash2, Wrench } from 'lucide-react';
 import type { FileReference, MediaTask, Message } from './types';
@@ -10,7 +10,7 @@ import { markdownFilePath, markdownUrl, remarkFileReferences } from './attachmen
 import Interaction from './Interaction';
 import MermaidDiagram from './MermaidDiagram';
 import SnippetPreview from './SnippetPreview';
-import ImageAttachment, {isImageAttachment} from './ImageAttachment';
+import ImageAttachments, {ImagePreviewLink, isImageAttachment} from './ImageAttachment';
 import {reviewTitle, type ReviewSummary} from './reviews';
 
 export function MediaResult({file,cid,onFile,onPlayable}:{file:FileReference;cid:string;onFile:(path:string)=>void;onPlayable?:(playable:boolean)=>void}) {
@@ -30,7 +30,7 @@ function CodeBlock({ children }: { children?: React.ReactNode }) {
   }}>{copied ? <Check size={14}/> : <Copy size={14}/>}</button><pre ref={source}>{children}</pre>{failure && <p className="error-text" role="alert">{failure}</p>}</div>;
 }
 
-const PreviewScope = createContext('');
+const MarkdownContext = createContext<{previewScope: string; cid?: string; files?: FileReference[]; onFile?: (path: string) => void}>({previewScope:''});
 function remarkDiagramState({streaming}: {streaming: boolean}) {
   return (tree: any, file: any) => {
     const visit = (node: any) => {
@@ -48,7 +48,7 @@ function remarkDiagramState({streaming}: {streaming: boolean}) {
 
 // Keep the component identity stable when later tokens arrive in the same answer.
 function MarkdownPre({children, node}: any) {
-      const scope = useContext(PreviewScope);
+      const {previewScope: scope} = useContext(MarkdownContext);
       const code = node?.children[0];
       if (code?.type === 'element' && code.tagName === 'code') {
         const source = code.children.map((child: any) => child.type === 'text' ? child.value : '').join('');
@@ -65,16 +65,30 @@ function MarkdownPre({children, node}: any) {
       return <CodeBlock>{children}</CodeBlock>;
 }
 
-export function Markdown({ text, onFile, files = [], streaming = false, previewScope = '' }: { text: string; onFile?: (path: string) => void; files?: FileReference[]; streaming?: boolean; previewScope?: string }) {
-  return <PreviewScope.Provider value={previewScope}><ReactMarkdown urlTransform={markdownUrl} remarkPlugins={[remarkGfm, [remarkFileReferences, files], [remarkDiagramState, {streaming}]]} components={{
-    pre: MarkdownPre,
-    a: ({ href, children }) => <button className="text-link" onClick={() => {
+const markdownComponents: Components = {
+  pre: MarkdownPre,
+  a: function MarkdownLink({href, children}) {
+    const {cid, files, onFile} = useContext(MarkdownContext);
+    const external = /^https?:/i.test(href || '');
+    const image = cid && files?.find(file => file.kind === 'image' && file.url === href);
+    if (image && cid) return <ImagePreviewLink cid={cid} file={image} onOpen={onFile}>{children}</ImagePreviewLink>;
+    return <button className="text-link" onClick={() => {
       if (!href) return;
-      if (/^https?:/i.test(href)) void window.cowork.call('external.open', { url: href });
-      else if (onFile) onFile(markdownFilePath(href));
-    }}>{children}{/^https?:/i.test(href || '') && <ExternalLink size={12}/>}</button>,
-    img: ({ src, alt }) => <button className="inline-file" onClick={() => src && onFile?.(src)}><FileText size={16}/>{alt || '查看图片'}</button>
-  }}>{text}</ReactMarkdown></PreviewScope.Provider>;
+      if (external) void window.cowork.call('external.open', {url:href});
+      else onFile?.(markdownFilePath(href));
+    }}>{children}{external && <ExternalLink size={12}/>}</button>;
+  },
+  img: function MarkdownImage({src, alt}) {
+    const {cid, onFile} = useContext(MarkdownContext);
+    const path = typeof src === 'string' && !/^https?:/i.test(src) ? markdownFilePath(src) : '';
+    if (cid && path) return <ImagePreviewLink cid={cid} file={{path,name:path.split(/[\\/]/).pop() || path}} onOpen={onFile}>{alt || '查看图片'}</ImagePreviewLink>;
+    return <button className="inline-file" onClick={() => typeof src === 'string' && onFile?.(src)}><ImageIcon size={16}/>{alt || '查看图片'}</button>;
+  }
+};
+
+export function Markdown({ text, onFile, files = [], streaming = false, previewScope = '', cid }: { text: string; onFile?: (path: string) => void; files?: FileReference[]; streaming?: boolean; previewScope?: string; cid?: string }) {
+  return <MarkdownContext.Provider value={{previewScope, cid, files, onFile}}><ReactMarkdown urlTransform={markdownUrl}
+    remarkPlugins={[remarkGfm, [remarkFileReferences, files], [remarkDiagramState, {streaming}]]} components={markdownComponents}>{text}</ReactMarkdown></MarkdownContext.Provider>;
 }
 
 function Disclosure({ title, children, stateKey, kind = 'tool-entry' }: { title: React.ReactNode; children: React.ReactNode; stateKey: string; kind?: string }) {
@@ -92,7 +106,7 @@ function ViewedImages({cid, callId, images, onFile, onDetails}: {cid: string; ca
   const [open, setOpen] = useHostField('viewed-images:' + cid + ':' + callId, false);
   return <div className="process-step tool-step viewed-images"><ImageIcon className="timeline-node" size={14}/>
     <div className="viewed-images-heading"><button className="process-tool" aria-expanded={open} onClick={() => setOpen(!open)}><span>已查看 {images.length} 张图片</span>{open ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}</button><button className="text-link" onClick={onDetails}>详情</button></div>
-    {open && <div className="image-attachments">{images.map(file => <ImageAttachment key={cid + ':' + file.path} cid={cid} file={file} onOpen={onFile}/>)}</div>}
+    {open && <ImageAttachments cid={cid} files={images} onOpen={onFile}/>}
   </div>;
 }
 
@@ -128,18 +142,19 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
   const otherFiles = files.filter((file: any) => !isImageAttachment(file));
   if (message.role === 'tool') return <button className="message-tool-link" onClick={() => onAction('tool', message)}><Wrench size={14}/><span>{message.meta?.tool_name || '工具结果'}</span><ChevronDown size={13}/></button>;
   return <article id={'message-' + message.id} className={`message ${message.role}`}>
-    {imageFiles.length > 0 && <div className="image-attachments">{imageFiles.map((file: any) => <ImageAttachment key={cid + ':' + file.path} cid={cid} file={file} onOpen={onFile}/>)}</div>}
-    <div className="message-body" hidden={!text && !otherFiles.length && !references.length && !context.skills?.length && !context.knowledge?.length && message.role === 'user'}>
+    {message.role !== 'user' && imageFiles.length > 0 && <ImageAttachments cid={cid} files={imageFiles} onOpen={onFile}/>}
+    <div className="message-body" hidden={!text && !imageFiles.length && !otherFiles.length && !references.length && !context.skills?.length && !context.knowledge?.length && message.role === 'user'}>
     {media.length > 0 && <div className="message-media">{media.map(file => file.kind === 'video' ? <MessageVideo key={file.path} file={file} cid={cid} onFile={onFile}/> : <MediaResult key={file.path} file={file} cid={cid} onFile={onFile}/>)}</div>}
     {(references.length > 0 || context.skills?.length > 0 || context.knowledge?.length > 0) && <div className="message-contexts" aria-label="发送时选中的上下文">
       {references.map((ref: any) => <span className="context-chip conversation-chip" key={ref.id || ref.session_id} title={'对话快照：' + ref.title}><MessageSquare size={13}/><span>对话 {ref.title}</span></span>)}
       {context.skills?.map((name: string) => <span className="context-chip skill-chip" key={name} title={name}>{name.startsWith('mcp-server-') ? <Link size={13}/> : <Puzzle size={13}/>}<span>{name.startsWith('mcp-server-') ? '连接器' : '技能'} {name}</span></span>)}
       {context.knowledge?.map((ref: any, index: number) => <span className="context-chip knowledge-chip" key={index} title={ref.title}><BookOpen size={13}/><span>资料 {ref.title}</span></span>)}
     </div>}
-    {!answerOnly && !!message.reasoning_content && <Disclosure stateKey={cid + ':' + message.id} kind="thinking" title={<><Sparkles size={13}/>深度思考</>}><div className="markdown"><Markdown text={message.reasoning_content} streaming={message.live} onFile={onFile}/></div></Disclosure>}
+    {!answerOnly && !!message.reasoning_content && <Disclosure stateKey={cid + ':' + message.id} kind="thinking" title={<><Sparkles size={13}/>深度思考</>}><div className="markdown"><Markdown text={message.reasoning_content} streaming={message.live} onFile={onFile} cid={cid}/></div></Disclosure>}
     {!answerOnly && !!message.tool_calls?.length && <div className="message-tool-calls">{message.tool_calls.map((tool, index) => <button className="message-tool-link" key={tool.id || index} onClick={() => onAction('tool', {...message, tool_call_id: tool.id})}><Wrench size={14}/><span>{tool.function?.name || tool.name || '工具调用'}</span><ChevronDown size={13}/></button>)}</div>}
     {!!otherFiles.length && <div className="message-files">{otherFiles.map((file: any) => <button key={file.path} title={file.path} onClick={() => onFile(file.path)}><FileText size={14}/>{file.name}</button>)}</div>}
-    {text && <div className="markdown">{message.role === 'user' ? <div className="user-text">{text}</div> : text.split(/^::cowork-inline-vis\{file="([a-z0-9][a-z0-9.-]*\.html)"\}\s*$/m).map((part, index) => index % 2 ? <InlineVisualization key={part} cid={cid} file={part}/> : <Markdown key={index} text={part} streaming={message.live} onFile={onFile} files={referencedFiles} previewScope={cid+':'+message.id+':'+index}/>)}</div>}
+    {text && <div className="markdown">{message.role === 'user' ? <div className="user-text">{text}</div> : text.split(/^::cowork-inline-vis\{file="([a-z0-9][a-z0-9.-]*\.html)"\}\s*$/m).map((part, index) => index % 2 ? <InlineVisualization key={part} cid={cid} file={part}/> : <Markdown key={index} text={part} streaming={message.live} onFile={onFile} files={referencedFiles} previewScope={cid+':'+message.id+':'+index} cid={cid}/>)}</div>}
+    {message.role === 'user' && imageFiles.length > 0 && <ImageAttachments cid={cid} files={imageFiles} onOpen={onFile}/>}
     {documents.length > 0 && <section className="message-file-table" aria-label="回复中的文件"><strong>共 {documents.length} 个文件</strong>{(filesExpanded ? documents : documents.slice(0,3)).map(file => <button key={file.path} title={file.path} aria-label={'打开文件 ' + file.name} onClick={() => onFile(file.path)}><FileText size={16}/><span>{file.name}</span><small>{file.label}</small></button>)}{documents.length > 3 && <button className="message-files-toggle" onClick={() => setFilesExpanded(!filesExpanded)}>{filesExpanded ? '收起文件列表' : `再显示 ${documents.length - 3} 个文件`}</button>}</section>}
     </div>
     <div className="message-footer">{message.role !== 'assistant' && <MessageTimestamp createdAt={message.created_at}/>}<div className="message-actions">
@@ -252,7 +267,9 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
         <span className="process-tool-detail">详情 <ChevronRight size={13} aria-hidden="true"/></span>
       </button>
       {toolName && title !== toolName && <code className="process-tool-name">{toolName}</code>}
-      {paths.map(path => <button className="text-link process-path" key={path} onClick={() => onFile(path)}>{path}</button>)}
+      {[...new Set(paths)].map(path => isImageAttachment({path})
+        ? <ImagePreviewLink key={path} cid={cid} file={{path, name:path.split(/[\\/]/).pop() || path}} onOpen={onFile}>{path}</ImagePreviewLink>
+        : <button className="text-link process-path" key={path} onClick={() => onFile(path)}>{path}</button>)}
       {failed && <p className="process-tool-error error-text">{processError(resultObject?.error)}</p>}
       {toolQuestions.map(questionRow)}
     </div>;
@@ -266,8 +283,8 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
           {summary}<ChevronRight size={13} className={open ? 'rotated' : ''} aria-hidden="true"/>
         </button>}
       {hasProcess && open && <div className="process-timeline">{messages.map(message => <div key={message.id} id={message !== answer ? 'message-' + message.id : undefined}>
-      {!!message.reasoning_content && <div className="process-step"><Sparkles className="timeline-node" size={14}/><Disclosure stateKey={cid + ':' + message.id} kind="thinking" title={<>深度思考{thoughtDuration(message)}</>}><div className="markdown"><Markdown text={message.reasoning_content} streaming={message.live} onFile={onFile}/><button className="text-link" onClick={() => void window.cowork.call('clipboard.write', {text: message.reasoning_content})}>复制思考原文</button></div></Disclosure></div>}
-      {message !== answer && message.role === 'assistant' && messageText(message.content) && <div className="process-step stage-text"><FileText className="timeline-node" size={14}/><Markdown text={messageText(message.content)} streaming={message.live} onFile={onFile} files={message.file_references} previewScope={cid+':'+message.id}/></div>}
+      {!!message.reasoning_content && <div className="process-step"><Sparkles className="timeline-node" size={14}/><Disclosure stateKey={cid + ':' + message.id} kind="thinking" title={<>深度思考{thoughtDuration(message)}</>}><div className="markdown"><Markdown text={message.reasoning_content} streaming={message.live} onFile={onFile} cid={cid}/><button className="text-link" onClick={() => void window.cowork.call('clipboard.write', {text: message.reasoning_content})}>复制思考原文</button></div></Disclosure></div>}
+      {message !== answer && message.role === 'assistant' && messageText(message.content) && <div className="process-step stage-text"><FileText className="timeline-node" size={14}/><Markdown text={messageText(message.content)} streaming={message.live} onFile={onFile} files={message.file_references} previewScope={cid+':'+message.id} cid={cid}/></div>}
       {message.tool_calls?.map(tool => toolRow(message, tool, results.get(tool.id)))}
       {message.role === 'tool' && !callIds.has(message.tool_call_id) && toolRow(message, {id: message.tool_call_id}, message)}
       {questions.filter(question => !question.callId && question.sourceId === (message.meta?.ui_source_message_id || message.id)).map(questionRow)}

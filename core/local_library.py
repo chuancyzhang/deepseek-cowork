@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -58,6 +60,34 @@ class LocalLibrary:
                 raise ValueError("同名文件或文件夹已存在，请使用其他名称。") from None
             log.info("local_library_folder_created collection=public")
             return self.row(self.public(), target)
+
+    def create_file(self, params):
+        if params.get("collection") != "public":
+            raise ValueError("请在公共资料中新建文件。")
+        name = self.entry_name(params.get("name"))
+        if Path(name).suffix.lower() not in {".md", ".txt"}:
+            raise ValueError("请选择 Markdown 或纯文本格式。")
+        text = params.get("text", "")
+        if not isinstance(text, str) or len(data := text.encode("utf-8")) > 10 * 1024 * 1024:
+            raise ValueError("文件内容须为 10 MiB 以内的文本。")
+        with self.mutations:
+            folder = Path(self.folder(params)["path"])
+            destination = folder / name
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=folder, prefix=".cowork-library-", delete=False) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.link(temporary, destination)
+            except FileExistsError:
+                raise ValueError("同名资料已存在，请换一个文件名。") from None
+            finally:
+                if temporary:
+                    temporary.unlink(missing_ok=True)
+            log.info("local_library_file_created collection=public format=%s", destination.suffix.lower())
+            return self.row(self.public(), destination)
 
     def import_files(self, params, cancelled, progress):
         if params.get("collection") != "public":
@@ -133,6 +163,76 @@ class LocalLibrary:
                     raise ValueError("重命名未完成，请确认资料未被占用后重试。") from None
                 log.info("local_library_renamed directory=%s", destination.is_dir())
             return self.row(project, destination)
+
+    def paste(self, params, cancelled, progress):
+        items = params.get("items")
+        move = params.get("mode") == "move"
+        if (params.get("collection") != "public" or params.get("mode") not in {"copy", "move"}
+                or not isinstance(items, list) or not items or any(not isinstance(item, dict) for item in items)):
+            raise ValueError("请选择公共资料中的文件或文件夹。")
+        with self.mutations:
+            project = self.public()
+            folder = Path(self.folder(params)["path"])
+            sources = list(dict.fromkeys(self._public_entry(item)[1] for item in items))
+            if any(folder == source or folder.is_relative_to(source) for source in sources):
+                raise ValueError("请选择其他目标文件夹。")
+            if any(parent in sources for source in sources for parent in source.parents):
+                raise ValueError("请仅选择文件夹或其中的文件。")
+            added, moved, failed = [], [], []
+            log.info("local_library_paste_start count=%s move=%s", len(sources), move)
+            for index, source in enumerate(sources):
+                if cancelled.is_set():
+                    failed.extend({"name": path.name, "reason": "操作已停止"} for path in sources[index:])
+                    break
+                progress(f"正在粘贴资料（{index + 1}/{len(sources)}）")
+                destination = folder / source.name
+                try:
+                    if move:
+                        if destination != source:
+                            self._move(source, destination)
+                        moved.append(str(source))
+                    else:
+                        suffix = "" if source.is_dir() else source.suffix
+                        stem = source.name.removesuffix(suffix) if suffix else source.name
+                        for duplicate in range(1, 10001):
+                            if not os.path.lexists(destination):
+                                break
+                            number = "" if duplicate == 1 else f" ({duplicate})"
+                            destination = folder / f"{stem} - 副本{number}{suffix}"
+                        self._copy(source, destination, cancelled)
+                    added.append(self.row(project, destination))
+                except (OSError, ValueError, JobCancelled) as exc:
+                    reason = "原位置或目标位置不可用，请刷新后重试。"
+                    if isinstance(exc, FileExistsError):
+                        reason = "目标位置已有同名资料。"
+                    elif isinstance(exc, (ValueError, JobCancelled)):
+                        reason = str(exc)
+                    failed.append({"name": source.name, "reason": reason})
+                    log.warning("local_library_paste_failed index=%s cause=%s", index, type(exc).__name__)
+            log.info("local_library_paste_complete added=%s failed=%s", len(added), len(failed))
+            return {"added": added, "moved": moved, "failed": failed}
+
+    def _copy(self, source, destination, cancelled):
+        def copy_entry(original, target):
+            if cancelled.is_set():
+                raise JobCancelled("操作已停止。")
+            if original.is_symlink() or original.is_junction():
+                raise ValueError("此文件夹包含链接，请单独复制其中的普通文件。")
+            if original.is_dir():
+                target.mkdir()
+                for child in original.iterdir():
+                    copy_entry(child, target / child.name)
+            elif original.is_file():
+                shutil.copy2(original, target, follow_symlinks=False)
+            else:
+                raise ValueError("资料不是普通文件。")
+        with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".cowork-library-") as directory:
+            staged = Path(directory) / "entry"
+            copy_entry(source, staged)
+            if staged.is_dir():
+                self._move(staged, destination)
+            else:
+                os.link(staged, destination)
 
     def _recycle_root(self):
         root = Path(self.s.config.data_dir).resolve() / "library" / "recycle"
@@ -281,7 +381,7 @@ class LocalLibrary:
                 "relative": str(path.relative_to(project["path"])), "size": stat.st_size,
                 "revision": self.revision(stat),
                 "editable": not folder and bool(capability and capability.editable
-                    and capability.office_family not in {"word", "presentation"} and stat.st_size <= capability.max_bytes),
+                    and capability.office_family not in {"word", "powerpoint"} and stat.st_size <= capability.max_bytes),
                 "updated_at": stat.st_mtime, "type": "文件夹" if folder else capability.label if capability else path.suffix[1:].upper()}
 
     def files(self, params, cancelled, progress):
@@ -339,6 +439,37 @@ class LocalLibrary:
         if not path.is_file():
             raise ValueError("请选择一份本地资料文件。")
         return self.row(project, path)
+
+    def _editor(self, params):
+        from core.deliverable_editing import create_edit_session, load_editor_payload
+        from core.file_capabilities import editor_presentation
+        item = self.describe(params)
+        if not item["editable"]:
+            raise ValueError("请在本机应用中编辑这份资料。")
+        session, report = create_edit_session(item["path"])
+        if not report.allowed:
+            raise ValueError(report.message)
+        payload = load_editor_payload(session)
+        payload.update(editor_presentation(item["path"]))
+        return item, session, payload
+
+    def edit_open(self, params):
+        item, session, payload = self._editor(params)
+        log.info("local_library_edit_open collection=%s kind=%s", item["collection_id"], payload["kind"])
+        return {"id": uuid.uuid4().hex, "path": item["path"], "name": item["title"],
+                "fingerprint": session.initial_fingerprint, "payload": payload}
+
+    def edit_save(self, params):
+        from core.deliverable_editing import ExternalModificationError, atomic_save_session, serialize_editor_payload
+        with self.mutations:
+            item, session, _ = self._editor(params)
+            if session.initial_fingerprint != params.get("fingerprint"):
+                raise ExternalModificationError()
+            data = serialize_editor_payload(session, params["payload"])
+            result = atomic_save_session(session, data, backup_root=str(Path(self.s.config.data_dir) / "file_backups"))
+            project, path = self.checked(item["collection_id"], item["path"])
+            log.info("local_library_edit_saved collection=%s", item["collection_id"])
+            return {**self.row(project, path), "fingerprint": result.fingerprint}
 
     def read(self, params):
         item = self.describe(params); path = Path(item["path"])

@@ -4,7 +4,7 @@ import type {SidebarGroup} from './types';
 
 export type MenuAnchor = {x: number; below: number; above: number; trigger: HTMLButtonElement | null};
 
-export default function SidebarMenu({anchor, first, last, groups, currentGroup, onMove, onNew, onClose, label = '条目操作', className = ''}: {
+export default function SidebarMenu({anchor, first, last, groups, currentGroup, onMove, onNew, onClose, label = '条目操作', className = '', matchTriggerWidth = false}: {
   anchor: MenuAnchor;
   first: ReactNode;
   last?: ReactNode;
@@ -15,6 +15,7 @@ export default function SidebarMenu({anchor, first, last, groups, currentGroup, 
   onClose: () => void;
   label?: string;
   className?: string;
+  matchTriggerWidth?: boolean;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const main = useRef<HTMLDivElement>(null);
@@ -26,13 +27,14 @@ export default function SidebarMenu({anchor, first, last, groups, currentGroup, 
   useLayoutEffect(() => {
     const primary = main.current;
     if (!primary) return;
+    if (matchTriggerWidth && anchor.trigger) primary.style.width = anchor.trigger.getBoundingClientRect().width + 'px';
     const left = Math.max(6, Math.min(anchor.x, innerWidth - primary.offsetWidth - 6));
     const belowFits = anchor.below + primary.offsetHeight < innerHeight - 8;
     const above = anchor.above - primary.offsetHeight;
     primary.style.left = left + 'px';
     primary.style.top = Math.max(6, belowFits ? anchor.below : above >= 6 ? above : innerHeight - primary.offsetHeight - 6) + 'px';
-    primary.querySelector<HTMLButtonElement>('button')?.focus({preventScroll: true});
-  }, [anchor]);
+    (primary.querySelector<HTMLButtonElement>('[aria-checked="true"]') || primary.querySelector<HTMLButtonElement>('button'))?.focus({preventScroll: true});
+  }, [anchor, matchTriggerWidth]);
 
   useLayoutEffect(() => {
     const nested = submenu.current, trigger = moveButton.current, primary = main.current;

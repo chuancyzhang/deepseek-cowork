@@ -537,9 +537,60 @@ class KnowledgeService:
                     raise KnowledgeError("invalid_response", "资料服务返回了重复页，请检查服务分页配置。")
                 more = bool(following)
         folders = self.folders(scope, kb_id).get("folders", []) if page == 1 else []
+        if folders and parent:
+            pending = list(folders)
+            folders = []
+            while pending:
+                folder = pending.pop()
+                if folder.get("path") == parent:
+                    folders = folder.get("children") or []
+                    break
+                pending.extend(folder.get("children") or [])
         items = [{**item, "is_folder": True} for item in folders] + files
         log.info("knowledge_children kb=%s page=%s count=%s has_more=%s", kb_id, page, len(files), more)
         return {"items": items, "has_more": more, "total": total}
+
+    def manual_document(self, scope, collection, item, cancelled=None):
+        document = response_data(self.request(scope, "GET", f"/api/v1/knowledge/{segment(item)}", cancelled=cancelled))
+        if (str(document.get("knowledge_base_id")) != str(collection) or document.get("type") != "manual"
+                or not isinstance((document.get("metadata") or {}).get("content"), str)):
+            raise KnowledgeError("manual_document_unavailable", "请选择当前知识库中的手工文档。")
+        return document
+
+    def save_manual_document(self, scope, params, cancelled=None):
+        collection, item = str(params["collection"]), str(params.get("item") or "")
+        title = str(params.get("name") or "").strip()
+        text = params.get("text")
+        parent = str(params.get("parent") or "").replace("\\", "/").strip("/")
+        if not title or not isinstance(text, str) or not text.strip() or len(text) > 200000:
+            raise KnowledgeError("manual_document_invalid", "请输入标题和不超过 20 万字符的正文。")
+        if parent and any(part in {"", ".", ".."} for part in parent.split("/")):
+            raise KnowledgeError("invalid_folder", "文件夹路径不可用，请重新进入目录。")
+        payload = {"title": title, "content": text, "status": "publish"}
+        if item:
+            current = self.manual_document(scope, collection, item, cancelled)
+            metadata = current["metadata"]
+            if str(metadata.get("version")) != params.get("fingerprint"):
+                raise KnowledgeError("manual_document_changed", "原文已更新，请保留当前编辑并重新打开文档。")
+            payload["status"] = metadata.get("status") or "publish"
+            document = response_data(self.request(scope, "PUT", f"/api/v1/knowledge/manual/{segment(item)}",
+                                                  json=payload, cancelled=cancelled))
+        else:
+            document = response_data(self.request(scope, "POST", f"/api/v1/knowledge-bases/{segment(collection)}/knowledge/manual",
+                                                  json=payload, cancelled=cancelled))
+            if not document.get("id"):
+                raise KnowledgeError("manual_document_unknown", "创建结果待确认，请刷新知识库核对后再试。")
+            if parent:
+                try:
+                    self.request(scope, "POST", "/api/v1/knowledge/folder", json={
+                        "kb_id": collection, "knowledge_ids": [document["id"]], "folder_path": parent,
+                    })
+                except KnowledgeError as error:
+                    log.warning("knowledge_manual_folder_failed code=%s", error.code)
+                    document.update(at_root=True, notice="文档已保存，请在知识库根目录核对存放位置。")
+        log.info("knowledge_manual_saved edit=%s", bool(item))
+        return {**{key: document[key] for key in ("id", "title", "type", "updated_at", "at_root", "notice") if key in document},
+                "knowledge_base_id": collection}
 
     def allowed_targets(self, scope, cancelled=None):
         self._identity(scope, self.store.connection())

@@ -61,17 +61,18 @@ function Models(props: Props) {
   if (accountSetup) return <GatewaySetup back={() => {setAccountSetup(false); void reload();}} saved={updateSettings} confirm={confirm}/>;
   if (edit) return <ModelForm {...props} item={edit} back={() => { setEdit(null); void reload(); }}/>;
   const byId = new Map(settings?.models.map(model => [model.id, model]));
-  return <><PageHead compact title="模型与服务"><button className="secondary" disabled={Boolean(checking)} onClick={() => setAccountSetup(true)}>账号登录</button><button className="primary" disabled={Boolean(checking)} onClick={() => setEdit({ models: [] })}><Plus size={16}/>填写 API Key</button></PageHead>
+  return <div className="model-services-page"><PageHead title="模型与服务"><button className="secondary" disabled={Boolean(checking)} onClick={() => setAccountSetup(true)}>账号登录</button><button className="primary" disabled={Boolean(checking)} onClick={() => setEdit({ models: [] })}><Plus size={16}/>填写 API Key</button></PageHead>
     {failure && <ErrorState message={failure} retry={() => void reload()}/>}
     {loading && !channels.length && <p className="muted" role="status">正在读取服务…</p>}
     {!loading && !failure && !channels.length && !settings?.models.length && <Empty title="连接第一个模型" detail="填写服务地址和 API Key 后，即可开始对话。"/>}
-    {channels.map(channel => {
+    <div className="model-services">{channels.map(channel => {
       const open = menu === channel.channel_id;
-      return <section className="settings-section model-service" key={channel.channel_id}>
+      return <section className="model-service" key={channel.channel_id}>
         <div className="section-heading"><div className="model-service-title"><h3>{channel.display_name}</h3>
           {!channel.configured && <small className="muted">需要 API Key</small>}
         </div><div className="button-row">
-          <button className="secondary" disabled={Boolean(checking)} onClick={() => {setMenu('');setEdit(channel);}}><Pencil size={15}/>编辑服务</button>
+          <button className="icon-button" title="编辑服务" aria-label={'编辑服务 ' + channel.display_name}
+            disabled={Boolean(checking)} onClick={() => {setMenu('');setEdit(channel);}}><Pencil size={17}/></button>
           <div className="model-service-menu" ref={open ? menuRef : undefined} onBlur={event => {if (!event.currentTarget.contains(event.relatedTarget)) setMenu('');}}
             onKeyDown={event => {if (open && event.key === 'Escape') {event.stopPropagation();setMenu('');event.currentTarget.querySelector('button')?.focus();}}}>
             <button className="icon-button" title="服务操作" aria-label={channel.display_name + ' 服务操作'} aria-expanded={open}
@@ -82,27 +83,28 @@ function Models(props: Props) {
           </div>
         </div></div>
         {!channel.models.length && <p className="muted">还没有模型</p>}
-        {channel.models.map((model: any) => {
+        <div className="model-service-models">{channel.models.map((model: any) => {
           const status = byId.get(model.id), name = model.display_name || model.model_name;
-          return <div className="model-row" key={model.id}><div><strong>{name}</strong>
+          const current = settings?.selected_model_id === model.id;
+          return <div className="model-row" key={model.id} aria-current={current || undefined}><div><strong>{name}</strong>
             {name !== model.model_name && <small>{model.model_name}</small>}
             {status?.connection_test?.success === false && <small className="error-text">{status.connection_test.message}</small>}
           </div>
-            {settings?.selected_model_id === model.id ? <span className="subtle-badge"><Check size={12}/>当前使用</span>
+            {current ? <span className="model-use" title="当前使用"><Check size={16} aria-hidden="true"/><span className="sr-only">当前使用</span></span>
               : status?.chat_supported === false ? <small>{status.purpose_label}</small>
-              : channel.configured ? <button className="secondary" onClick={async () => {try {updateSettings(await rpc('settings.select_model', {model_id:model.id}));} catch (error) {onError((error as Error).message);}}}>使用</button> : <span/>}
+              : channel.configured ? <button className="model-use" onClick={async () => {try {updateSettings(await rpc('settings.select_model', {model_id:model.id}));} catch (error) {onError((error as Error).message);}}}>使用</button> : <span/>}
             <button className="icon-button" title="删除模型" aria-label={`删除模型 ${name}`} onClick={async () => {
               if (await confirm('删除这个模型？', '已有对话仍然保留，可以选择其他模型继续。', ['取消', '删除']) !== 1) return;
               try {updateSettings(await rpc('settings.delete_model', {id:model.id}));await reload();} catch (error) {onError((error as Error).message);}
             }}><Trash2 size={16}/></button>
           </div>;
-        })}
+        })}</div>
       </section>;
-    })}
+    })}</div>
     {settings?.models.filter(model => model.id.startsWith('enterprise:')).map(model => <div className="model-row" key={model.id}><div><strong>{model.display_name}</strong><small>{model.channel_display_name}</small></div><button className="secondary" onClick={async () => updateSettings(await rpc('settings.select_model', { model_id: model.id }))}>使用</button></div>)}
     <button className="secondary" onClick={async () => { try { const value = await rpc('dialog.import_settings'); if (value) { updateSettings(value); await reload(); } } catch (error) { onError((error as Error).message); } }}><Download size={15}/>导入模型设置</button>
     {deletion && <DeleteChannel preview={deletion} close={closeDeletion} saved={async (settings) => {updateSettings(settings);setDeletion(null);await reload();}}/>}
-  </>;
+  </div>;
 }
 
 type ChannelDeletion = {

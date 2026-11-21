@@ -1,16 +1,20 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { ArchiveRestore, ArrowLeft, BookOpen, Check, ChevronRight, Ellipsis, ExternalLink, FileText, Folder, FolderOpen, FolderPlus, HardDrive, Link2, LogOut, Pencil, Plus, RefreshCw, Search, Trash2, Upload, X } from 'lucide-react';
+import { ArchiveRestore, ArrowLeft, BookOpen, Check, ChevronDown, ChevronRight, ClipboardPaste, Clock3, Copy, Ellipsis, ExternalLink, FileText, Folder, FolderOpen, FolderPlus, HardDrive, Link2, LogOut, MapPin, Pencil, Plus, RefreshCw, Scissors, Search, Trash2, Upload, Users, X } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Empty, ErrorState, Field, JobProgress } from '../Management';
 import SidebarMenu, { type MenuAnchor } from '../SidebarMenu';
+import OfficeEditor from '../OfficeEditor';
+import type { FileSession } from '../types';
 import { operation, rpc } from '../managementApi';
 import { useHostField } from '../host/context';
 import { useWorkbench } from '../host/Host';
-import { appendLibraryRows, libraryCollections, libraryItemId, libraryItemKey, librarySpaces, type LibrarySelection } from './libraryCatalog';
+import { appendLibraryRows, libraryCollections, libraryIdentity, libraryItemId, libraryItemKey, librarySpaces,
+  libraryVisitKey, loadLibraryVisits, saveLibraryVisits, type LibrarySelection, type LibraryVisit } from './libraryCatalog';
 
 const sources = [['local', '本地资料库'], ['weknora', 'WeKnora'], ['tencent-docs', '腾讯文档'], ['lexiang', '腾讯乐享']];
+const sourceIcon = (source: string) => source === 'local' ? HardDrive : source === 'tencent-docs' ? FileText : BookOpen;
 const sourceLabels: Record<string, {all: string; mine?: string; groups: string; collection: string; search: string}> = {
   weknora: {all:'全部知识库', mine:'我的知识库', groups:'共享空间', collection:'引用整个知识库', search:'搜索知识库'},
   'tencent-docs': {all:'协作空间', groups:'协作空间', collection:'引用整个空间', search:'搜索腾讯文档'},
@@ -22,12 +26,14 @@ type Props = {
   onError: (message: string) => void;
   onReference: (source: string, items: LibrarySelection[]) => Promise<void>;
   confirm: (title: string, detail: string, choices: string[]) => Promise<number>;
-  onDirty: (dirty: boolean) => void;
+  registerLeave?: (callback?: () => Promise<boolean>) => void;
 };
 type Naming = {item?: any; initial: string; value: string; error?: string};
 type RecycleBatch = {id: string; time: number; items: {name: string; relative: string; is_folder: boolean}[]};
-type Menu = {anchor: MenuAnchor; items: any[]; row?: any};
+type Menu = {anchor: MenuAnchor; items: any[]; row?: any; kind?: 'source' | 'create' | 'recent'};
 type Notice = {text: string; undo?: string};
+type DocumentDraft = {name: string; text: string; original: string; extension?: 'md' | 'txt'; item?: any; file?: FileSession; manual?: boolean};
+type Clipboard = {mode: 'copy' | 'move'; items: {item: string; revision: string}[]};
 const title = (item: any) => String(item?.title || item?.name || item?.file_name || '未命名资料');
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const publicRevisionKey = 'library:public-revision';
@@ -56,12 +62,16 @@ export default function Library(props: Props) {
   return <LibrarySource key={source} {...props} source={source} setSource={setSource}/>;
 }
 
-function LibrarySource({source, setSource, onError, onReference, onDirty, confirm, projectsKey, scope = 'library'}: Props & {source: string; setSource: (source: string) => void}) {
-  const {addProject, ensureConversation, goRoute, host, openFile, selectedId} = useWorkbench();
+function LibrarySource({source, setSource, onError, onReference, registerLeave, confirm, projectsKey, scope = 'library'}: Props & {source: string; setSource: (source: string) => void}) {
+  const {addProject, host} = useWorkbench();
   const local = source === 'local';
   const sourceName = sources.find(item => item[0] === source)?.[1] || '';
   const labels = sourceLabels[source];
   const [status, setStatus] = useState<any>(null);
+  const [recent, setRecent] = useHostField(scope + ':recent', false);
+  const [visits, setVisits] = useHostField<LibraryVisit[]>('library:visits', loadLibraryVisits);
+  const [recentTarget, setRecentTarget] = useHostField<{visit: LibraryVisit; location: boolean} | null>(scope + ':visit-target', null);
+  const [clipboard, setClipboard] = useHostField<Clipboard | null>('library:clipboard', null);
   const [view, setView] = useHostField<any>(scope + ':view:' + source, emptyView);
   const {catalog, collection, parents, rows, page, more, query, searching} = view;
   const searchTerm = searching ? (view.searchTerm ?? query.trim()) : '';
@@ -76,23 +86,29 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
   const [busy, setBusy] = useState(false), [failure, setFailure] = useState(''), [job, setJob] = useState<any>(null);
   const [form, setForm] = useState({url:'', email:'', password:'', company:'', token:''}), [authUrl, setAuthUrl] = useState('');
   const [preview, setPreview] = useState<any>(null), [notice, setNotice] = useState<Notice | null>(null);
+  const [editor, setEditor] = useHostField<DocumentDraft | null>(scope + ':editor:' + source, null);
+  const editorFlush = useRef<(() => Promise<string>) | undefined>(undefined);
   const [reading, setReading] = useState(false), [readJob, setReadJob] = useState<any>(null);
   const readRequest = useRef<AbortController | null>(null);
   const generation = useRef(0), alive = useRef(true), pending = useRef(false);
   const anchor = useRef(''), scroller = useRef<HTMLDivElement>(null), searchInput = useRef<HTMLInputElement>(null);
   const nameInput = useRef<HTMLInputElement>(null), allInput = useRef<HTMLInputElement>(null);
+  const rangePick = useRef(false);
   const newFolderButton = useRef<HTMLButtonElement>(null);
   const update = (patch: any) => setView((previous: any) => ({...previous, ...patch}));
   const dismissMenu = useCallback(() => setMenu(null), []);
   const connected = local || Boolean(status?.sources[source] && !status.sources[source].unavailable);
   const spaces = librarySpaces(catalog);
+  const spaceList = directory && category === 'spaces';
+  const catalogSearch = directory && (local || source === 'weknora' || spaceList);
   const personal = source === 'tencent-docs' ? catalog?.mine?.[0] : undefined;
   const collections = libraryCollections(catalog, local ? 'all' : category).filter(item => item.id !== personal?.id);
-  const visible = (directory ? (local && query.trim()
-    ? collections.filter(item => [title(item), item.path].join(' ').toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
-    : collections) : rows) as any[];
+  const directoryRows = spaceList ? spaces : collections;
+  const visible = (directory ? (catalogSearch && query.trim()
+    ? directoryRows.filter(item => [title(item), item.path].join(' ').toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+    : directoryRows) : rows) as any[];
   const categoryTitle = local ? '项目资料' : category === 'mine' ? labels.mine
-    : category === 'shared' ? '共享知识库' : category.startsWith('org:')
+    : category === 'spaces' ? labels.groups : category === 'shared' ? '共享知识库' : category.startsWith('org:')
       ? spaces.find(item => 'org:' + item.id === category)?.name || labels.groups : labels.all;
   const location = parents.at(-1) || collection;
   const heading = title(location || {title: categoryTitle});
@@ -103,16 +119,43 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
   const canPick = (item: any) => !directory && (publicFiles || referenceable(item));
   const pickable = visible.filter(canPick), chosen = visible.filter(item => selection.has(libraryItemKey(item)));
   const selectedCount = pickable.filter(item => selection.has(libraryItemKey(item))).length;
-  const batch = chosen.length > 1;
+  const batch = chosen.length > 0;
   const namingKey = naming ? (naming.item ? libraryItemKey(naming.item) : 'new') : '';
-  const remoteUpload = !local && collection && !searching && !parents.some((item: any) => item.writeable === false)
+  const weknoraWrite = collection?.group === 'mine' || !collection?.source_from_agent && ['editor', 'admin'].includes(collection?.permission);
+  const remoteUpload = !local && collection && !searching && (source !== 'weknora' || weknoraWrite) &&
+    !parents.some((item: any) => item.writeable === false)
     && collection.writeable !== false && (!parents.length || collection.nested_writeable !== false)
     && !['read', 'reader', 'viewer', 'read_only'].includes(collection.permission);
-  const showSpace = directory && !local && source !== 'tencent-docs';
+  const manualWrite = source === 'weknora' && remoteUpload && (!collection.type || collection.type === 'document');
+  const showSpace = directory && !local && source !== 'tencent-docs' && category === 'all';
   const showPath = local && (directory || searching);
   const showType = !directory && (source === 'tencent-docs' || source === 'lexiang');
   const showOrigin = searching && !local && source !== 'tencent-docs';
   const detailColumn = showSpace || showPath || showType || showOrigin;
+  const recentVisits = visits.filter(visit => visit.source === 'local' || Boolean(visit.identity &&
+    visit.identity === libraryIdentity(status?.sources?.[visit.source])));
+
+  function updateVisits(change: (current: LibraryVisit[]) => LibraryVisit[]) {
+    const next = change(host.get('library:visits', visits));
+    setVisits(next);
+    try {saveLibraryVisits(next);}
+    catch {setNotice({text:'最近使用记录暂未写入本机'});}
+  }
+
+  function remember(item: any, target = collection, trail = parents, route = category) {
+    if (!target?.id || !libraryItemId(item)) return;
+    const identity = libraryIdentity(status?.sources?.[source]);
+    if (!local && !identity) return;
+    const node = (value: any) => ({id:libraryItemId(value), title:title(value), is_folder:Boolean(value.is_folder),
+      ...(value.folder_path !== undefined ? {folder_path:value.folder_path} : {})});
+    const visit: LibraryVisit = {
+      source, identity, category:route, collection:String(target.id), collectionName:title(target),
+      item:{...node(item), relative:item.relative, readable:item.readable},
+      parents:trail.map(node), time:Date.now(),
+    };
+    const key = libraryVisitKey(visit);
+    updateVisits(previous => [visit, ...previous.filter(entry => libraryVisitKey(entry) !== key)].slice(0,100));
+  }
 
   async function loadStatus() {
     try {
@@ -121,8 +164,9 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
       const account = value.sources[source];
       const identity = account && !account.unavailable
         ? JSON.stringify([account.connection_id, account.user_id, account.tenant_id, account.generation]) : '';
-      if (view.identity !== identity) {
+      if (!local && view.identity !== identity) {
         clearSelection(); leavePreview(); setNotice(null);
+        setEditor(null);
         setView({...emptyView, identity});
       }
       setStatus(value);
@@ -130,7 +174,7 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
   }
   useEffect(() => {
     alive.current = true;
-    if (!local) void loadStatus();
+    void loadStatus();
     return () => { alive.current = false; pending.current = false; ++generation.current; readRequest.current?.abort(); };
   }, []);
   useEffect(() => {
@@ -139,10 +183,21 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
     return () => clearTimeout(timer);
   }, [notice]);
   const nameChanged = Boolean(naming && naming.value !== naming.initial);
-  useEffect(() => {
-    onDirty(nameChanged);
-    return () => onDirty(false);
-  }, [nameChanged, onDirty]);
+  function defaultName(extension?: 'md' | 'txt') {return extension ? '未命名.' + extension : '未命名文档';}
+  function changedDocument(draft: DocumentDraft, text: string) {
+    return text !== draft.original || !draft.item && draft.name !== defaultName(draft.extension);
+  }
+  useLayoutEffect(() => {
+    if (!registerLeave) return;
+    registerLeave(async () => {
+      if (pending.current) return !(editor || naming);
+      const text = editor ? await documentText(editor) : '';
+      if (text === undefined) return false;
+      return !(nameChanged || editor && changedDocument(editor, text)) ||
+        await confirm('保留资料草稿？', '返回资料库后可继续编辑。', ['继续编辑', '保留并离开']) === 1;
+    });
+    return () => registerLeave();
+  }, [editor, naming, nameChanged, registerLeave, confirm]);
   useLayoutEffect(() => {
     const field = nameInput.current;
     if (!field || !namingKey) return;
@@ -263,18 +318,21 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
 
   async function discardName() {
     if (pending.current) return false;
+    if (editor && !await discardDocument()) return false;
     if (nameChanged && await confirm('放弃当前命名？', '名称尚未保存。', ['继续编辑', '放弃修改']) !== 1) return false;
     setNaming(null);
     return true;
   }
   async function selectCollection(item: any) {
     if (!await discardName()) return;
+    setRecent(false);
     setRecycle(null);
     update({query:''});
     await children(item, []);
   }
   async function all(nextCategory = category) {
     if (!await discardName()) return;
+    setRecent(false);
     clearSelection(); leavePreview(); setRecycle(null);
     update({category:nextCategory, query:'', searchTerm:'', collection:null, parents:[], rows:[], page:1, more:false, searching:false, scroll:0, unavailable:[], loaded:true});
   }
@@ -286,9 +344,13 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
   }
   async function browse(item: any) {
     if (pending.current || naming) return;
+    if (spaceList) { await all('org:' + item.id); return; }
     if (directory) { await selectCollection(item); return; }
     if (!item.is_folder) {
-      if (item.readable !== false) await read(item);
+      if (item.readable !== false) {
+        const target = collection || libraryCollections(catalog).find(entry => String(entry.id) === itemCollection(item));
+        await read(item, target);
+      }
       else if (platformUrl(item)) await external(item);
       else setFailure('这份资料需要在原平台打开。');
       return;
@@ -301,10 +363,24 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
     if (!target) {
       if (!local && platformUrl(item)) await external(item);
       else setFailure('无法确认所属目录，请从资料来源中打开。');
-      return;
+      return false;
     }
+    const trail = itemTrail(item, target);
     update({query:''});
-    await children(target, [...(searching ? [] : parents), item]);
+    if (!await children(target, [...trail, item])) return false;
+    remember(item, target, trail);
+    return true;
+  }
+  function itemTrail(item: any, target: any) {
+    if (!searching) return parents;
+    const path = local ? String(item.relative || '').replace(/\\/g,'/').split('/').slice(0,-1).join('/')
+      : source === 'weknora' ? item.folder_path : '';
+    if (!path) return [];
+    const parts = path.split('/').filter(Boolean);
+    return parts.map((part: string, index: number) => {
+      const id = parts.slice(0,index+1).join('/');
+      return {id, title:part, is_folder:true, collection_id:target?.id, folder_path:id};
+    });
   }
   const selectionFor = (item: any): LibrarySelection => ({collection:itemCollection(item), item:libraryItemId(item), title:title(item)});
   async function reference(entries: any[], whole = false) {
@@ -313,7 +389,7 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
     const result = await perform(async () => { await onReference(source, items); return true; });
     if (result) setNotice({text:entries.length === 1 ? '已添加到当前对话：' + title(entries[0]) : '已添加 ' + entries.length + ' 份资料到当前对话'});
   }
-  async function read(item: any) {
+  async function read(item: any, target = collection, trail = itemTrail(item, target), route = category) {
     leavePreview(); dismissMenu();
     const request = new AbortController();
     readRequest.current = request;
@@ -322,27 +398,128 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
       const data = await operation('library.read', {source, ...selectionFor(item)}, value => {
         if (!request.signal.aborted) setReadJob(value);
       }, request.signal);
-      if (!request.signal.aborted && alive.current) setPreview({...item, data});
+      if (!request.signal.aborted && alive.current) {
+        setPreview({...item, data});
+        remember(item, target, trail, route);
+      }
     } catch (error) {
       if (!request.signal.aborted && alive.current) setFailure(errorText(error));
     } finally {
       if (!request.signal.aborted && alive.current) {setReading(false); setReadJob(null);}
     }
   }
+  async function showRecent() {
+    if (!await discardName()) return;
+    clearSelection(); leavePreview(); setRecycle(null); setRecent(true);
+    void loadStatus();
+  }
+  async function openRecent(visit: LibraryVisit, locationOnly = false) {
+    if (pending.current) return;
+    if (visit.source !== source) {
+      setRecentTarget({visit, location:locationOnly});
+      setSource(visit.source);
+      return;
+    }
+    const entries = libraryCollections(catalog, local ? 'all' : visit.category);
+    const target = [catalog?.public, personal, ...entries].find(entry => String(entry?.id) === visit.collection);
+    if (!target || !local && visit.identity !== libraryIdentity(status?.sources?.[source])) {
+      setFailure('此资料已不可用，请在原位置核对后重试。');
+      return;
+    }
+    const item = {...visit.item, collection_id:visit.collection};
+    const trail = visit.parents;
+    const openFolder = item.is_folder && !locationOnly;
+    const loaded = await children(target, openFolder ? [...trail, item] : trail);
+    if (!loaded) return;
+    update({category:visit.category, query:''});
+    setRecent(false);
+    if (openFolder) remember(item,target,trail,visit.category);
+    else if (!locationOnly) await read(loaded.find(row => libraryItemId(row) === visit.item.id) || item,target,trail,visit.category);
+    else focusRow(item);
+  }
+  useEffect(() => {
+    if (!recentTarget || recentTarget.visit.source !== source || !connected || !catalog || busy) return;
+    setRecentTarget(null);
+    void openRecent(recentTarget.visit, recentTarget.location);
+  }, [recentTarget, connected, catalog, busy]);
   const platformUrl = (item: any) => item.data?.url || item.url;
   async function external(item: any, reveal = false) {
     await perform(() => local ? rpc(reveal ? 'library.reveal' : 'library.external', {source, ...selectionFor(item)})
       : rpc('external.open', {url:platformUrl(item)}));
   }
+  function canEdit(item: any) {
+    return !folder(item) && (local ? item.editable : manualWrite && item.type === 'manual');
+  }
   async function edit(item: any) {
-    const info = await execute('library.reference', selectionFor(item));
-    if (!info) return;
-    try {
-      const id = await ensureConversation();
-      if (id !== selectedId.current) return;
-      if (host.get('navigation:route') !== 'chat') await goRoute('chat');
-      if (id === selectedId.current && host.get('navigation:route') === 'chat') await openFile(info.path, true);
-    } catch (error) { onError(errorText(error)); }
+    if (!canEdit(item) || editor) return;
+    const file = await execute<FileSession>('library.edit_open', selectionFor(item));
+    if (!file) return;
+    const text = file.payload.kind === 'sheet' ? JSON.stringify({kind:'sheet', value:JSON.stringify(file.payload.snapshot)})
+      : file.payload.content || '';
+    setEditor({name:title(item),text,original:text,item,file,manual:!local});
+  }
+  function startDocument(extension?: 'md' | 'txt') {
+    if (pending.current || naming || (extension ? !publicFiles : !manualWrite)) return;
+    clearSelection();
+    setEditor({name:defaultName(extension),text:'',original:'',extension,manual:!extension});
+  }
+  function documentText(draft: DocumentDraft) {
+    return editorFlush.current ? perform(editorFlush.current) : Promise.resolve(draft.text);
+  }
+  async function discardDocument() {
+    if (!editor) return true;
+    if (pending.current) return false;
+    const text = await documentText(editor);
+    if (text === undefined) return false;
+    if (changedDocument(editor, text) &&
+        await confirm('放弃未保存的修改？', '当前修改还没有保存。', ['继续编辑', '放弃修改']) !== 1) return false;
+    setEditor(null);
+    setFailure('');
+    return true;
+  }
+  async function saveDocument() {
+    if (!editor || pending.current) return;
+    const draft = editor;
+    const text = await documentText(draft);
+    if (text === undefined) return;
+    const filename = draft.name.trim();
+    if (!filename || draft.manual && !text.trim()) {setFailure(draft.manual ? '请输入文档标题和正文。' : '请输入文件名。');return;}
+    const name = draft.extension && !filename.toLowerCase().endsWith('.' + draft.extension) ? filename + '.' + draft.extension : filename;
+    const target = draft.item ? itemCollection(draft.item) : collection?.id;
+    const parent = parents.length ? pathId(location) : '';
+    let payload: string | object = text;
+    try {if (draft.file?.payload.kind === 'sheet') payload = JSON.parse(JSON.parse(text).value);}
+    catch (error) {setFailure(errorText(error));return;}
+    const change = {collection:target, parent, name, text, payload, item:draft.item ? libraryItemId(draft.item) : undefined, fingerprint:draft.file?.fingerprint};
+    const method = draft.item ? 'library.edit_save' : draft.manual ? 'library.create_manual' : 'library.create_file';
+    const result = await (local ? mutatePublic(method,change) : execute(method,change));
+    if (!result) return;
+    setEditor(null);
+    setNotice(result.notice ? {text:result.notice} : null);
+    if (collection) {
+      update({query:''});
+      await children(collection, result.at_root ? [] : parents);
+    }
+    await read(result,collection,result.at_root ? [] : parents);
+  }
+  function capture(entries: any[], mode: Clipboard['mode']) {
+    setClipboard({mode,items:entries.map(item => ({item:libraryItemId(item),revision:item.revision}))});
+    setNotice({text:(mode === 'move' ? '已剪切 ' : '已复制 ') + entries.length + ' 项'});
+  }
+  async function paste(target = location) {
+    if (!publicFiles || !clipboard || pending.current) return;
+    const result = await mutatePublic('library.paste', {collection:'public', parent:target?.id === 'public' ? '' : pathId(target), ...clipboard});
+    if (!result) return;
+    if (clipboard.mode === 'move') {
+      const moved = new Set(result.moved);
+      const items = clipboard.items.filter(item => !moved.has(item.item));
+      setClipboard(items.length ? {...clipboard,items} : null);
+      if (moved.size) updateVisits(previous => previous.filter(visit => visit.source !== 'local' ||
+        !moved.has(visit.item.id) && !visit.parents.some(parent => moved.has(parent.id))));
+    }
+    await children(collection,parents,1,searchTerm,true);
+    if (result.added.length) setNotice({text:(clipboard.mode === 'move' ? '已移动 ' : '已复制 ') + result.added.length + ' 项'});
+    reportFailures(result.failed);
   }
   async function importFiles(paths: string[]) {
     if (!paths.length || !publicFiles || naming) return;
@@ -385,7 +562,7 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
   }
   function cancelName() {
     if (!naming || pending.current) return;
-    if (naming.item) {choose(naming.item); focusRow(naming.item);}
+    if (naming.item) focusRow(naming.item);
     else requestAnimationFrame(() => newFolderButton.current?.focus());
     setNaming(null);
   }
@@ -400,9 +577,12 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
     setNaming(null);
     const nextRows = draft.item ? rows.map((row: any) => libraryItemKey(row) === libraryItemKey(draft.item) ? target : row) : [target, ...rows];
     update({rows:nextRows});
-    if (await children(collection, parents, 1, searchTerm, true)) {
-      setSelection(new Set([libraryItemKey(target)])); anchor.current = libraryItemKey(target); focusRow(target);
+    if (draft.item && libraryItemId(draft.item) !== libraryItemId(target)) {
+      const id = libraryItemId(draft.item);
+      updateVisits(previous => previous.filter(visit => visit.source !== 'local' || visit.item.id !== id && !visit.parents.some(parent => parent.id === id)));
     }
+    if (await children(collection, parents, 1, searchTerm, true)) focusRow(target);
+    remember(target);
   }
   function reportFailures(items: {name: string; reason: string}[]) {
     if (items.length) setFailure(items.map(item => item.name + '：' + item.reason).join('。'));
@@ -422,9 +602,11 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
     const remaining = rows.filter((item: any) => !moved.has(libraryItemId(item)));
     update({rows:remaining});
     const failed = entries.filter(item => !moved.has(libraryItemId(item)));
-    setSelection(new Set(failed.map(libraryItemKey)));
-    anchor.current = failed[0] ? libraryItemKey(failed[0]) : '';
+    setSelection(previous => new Set([...previous].filter(key => failed.some(item => libraryItemKey(item) === key))));
+    anchor.current = '';
     if (result.moved.length) {
+      updateVisits(previous => previous.filter(visit => visit.source !== 'local' ||
+        !moved.has(visit.item.id) && !visit.parents.some(parent => moved.has(parent.id))));
       await children(collection, parents, 1, searchTerm, true);
       setNotice({text:'已将 ' + result.moved.length + ' 项移到回收站', undo:result.id});
     }
@@ -447,9 +629,8 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
       const updated = await children(collection, parents, 1, searchTerm, true);
       const restored = new Set(result.restored);
       if (updated) {
-        const selected = updated.filter(item => restored.has(libraryItemId(item)));
-        setSelection(new Set(selected.map(libraryItemKey)));
-        if (selected.length) {anchor.current = libraryItemKey(selected[0]); focusRow(selected[0]);}
+        const first = updated.find(item => restored.has(libraryItemId(item)));
+        if (first) focusRow(first);
       }
     }
     if (result.restored.length) setNotice({text:'已还原 ' + result.restored.length + ' 项'});
@@ -459,17 +640,29 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
   function showMenu(item: any | undefined, trigger: HTMLButtonElement | null, point?: {x: number; y: number}) {
     if (busy || naming || !item && !publicFiles) return;
     const items = item && selection.has(libraryItemKey(item)) ? chosen : item ? [item] : [];
-    if (item && !selection.has(libraryItemKey(item))) choose(item);
     const rect = trigger?.getBoundingClientRect();
     setMenu({row:item, items, anchor:{x:point?.x ?? rect?.left ?? 0, below:point?.y ?? rect?.bottom ?? 0, above:point?.y ?? rect?.top ?? 0, trigger}});
   }
-  function rowClick(event: MouseEvent, item: any) {
-    if (directory) { void browse(item); return; }
-    choose(item, event.ctrlKey || event.metaKey, event.shiftKey);
+  function openMenu(kind: Exclude<Menu['kind'], 'recent' | undefined>, trigger: HTMLButtonElement) {
+    const rect = trigger.getBoundingClientRect();
+    setMenu(menu?.kind === kind ? null : {kind,items:[],anchor:{x:rect.left, below:rect.bottom, above:rect.top, trigger}});
+  }
+  async function switchSource(next: string) {
+    if (!await discardName()) return;
+    setRecent(false); setRecentTarget(null); setSource(next);
+  }
+  async function goUp() {
+    if (!await discardName()) return;
+    if (parents.length) {
+      update({query:''});
+      if (await children(collection,parents.slice(0,-1))) focusRow(parents.at(-1));
+    } else await all(!collection && category.startsWith('org:') ? 'spaces' : category);
   }
   function keys(event: KeyboardEvent<HTMLElement>) {
     const target = event.target as HTMLElement;
-    if (target.closest('input:not([type="checkbox"]), textarea, select, [contenteditable="true"]') || busy || naming || recycle || preview) return;
+    if (editor && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {event.preventDefault();void saveDocument();return;}
+    if (editor && event.key === 'Escape') {event.preventDefault();void discardDocument();return;}
+    if (target.closest('input:not([type="checkbox"]), textarea, select, [contenteditable="true"]') || busy || naming || recycle || preview || editor || recent) return;
     const command = event.ctrlKey || event.metaKey, key = event.key.toLowerCase();
     const index = visible.findIndex(item => libraryItemKey(item) === target.closest<HTMLElement>('[data-library-row]')?.dataset.libraryRow);
     const item = visible[index] || chosen[0];
@@ -477,24 +670,28 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
       event.preventDefault(); clearSelection();
     } else if (command && key === 'a' && pickable.length) {
       event.preventDefault(); dismissMenu(); setSelection(new Set(pickable.map(libraryItemKey)));
+    } else if (command && ['c','x'].includes(key) && publicFiles && (chosen.length || item) && !window.getSelection()?.toString()) {
+      event.preventDefault(); capture(chosen.length ? chosen : [item],key === 'x' ? 'move' : 'copy');
+    } else if (command && key === 'v' && publicFiles && clipboard) {
+      event.preventDefault(); void paste();
     } else if (command && event.shiftKey && key === 'n' && publicFiles) {
       event.preventDefault(); void startName();
     } else if (command && key === 'z' && publicFiles && notice?.undo) {
       event.preventDefault(); void restore(notice.undo);
-    } else if (key === 'f2' && publicFiles && chosen.length === 1) {
-      event.preventDefault(); void startName(chosen[0]);
-    } else if (key === 'delete' && publicFiles && chosen.length && !event.shiftKey) {
-      event.preventDefault(); void trash(chosen);
+    } else if (key === 'f2' && publicFiles && item && chosen.length <= 1) {
+      event.preventDefault(); void startName(chosen[0] || item);
+    } else if (key === 'delete' && publicFiles && (chosen.length || item) && !event.shiftKey) {
+      event.preventDefault(); void trash(chosen.length ? chosen : [item]);
     } else if ((event.shiftKey && key === 'f10') || key === 'contextmenu') {
       if (!item && !publicFiles) return;
       event.preventDefault(); showMenu(item, target.closest('button'));
     } else if (key === 'enter' && index >= 0 && target.matches('.library-item-name')) {
       event.preventDefault();
-      if (!batch) void browse(visible[index]);
+      void browse(visible[index]);
     } else if (command && key === ' ' && item && canPick(item)) {
       event.preventDefault(); choose(item, true);
-    } else if (event.altKey && ['arrowleft', 'arrowup'].includes(key) && parents.length) {
-      event.preventDefault(); update({query:''}); void children(collection, parents.slice(0, -1));
+    } else if (event.altKey && ['arrowleft', 'arrowup'].includes(key) && (parents.length || collection && !publicFiles || category.startsWith('org:'))) {
+      event.preventDefault(); void goUp();
     } else if (key === 'f5') {
       event.preventDefault(); void refresh();
     } else if (key === 'f3') {
@@ -502,7 +699,6 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
     } else if (index >= 0 && ['arrowup', 'arrowdown'].includes(key)) {
       const next = visible[Math.max(0, Math.min(index + (key === 'arrowup' ? -1 : 1), visible.length - 1))];
       event.preventDefault();
-      if (!directory && (!command || event.shiftKey)) choose(next, false, event.shiftKey);
       focusRow(next);
     }
   }
@@ -512,30 +708,63 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
       dismissMenu(); action();
     }}><Icon size={15}/><span>{label}</span>{shortcut && <kbd>{shortcut}</kbd>}</button>;
   }
+  const clipboardControls = (items: any[]) => publicFiles && items.length > 0 && <>
+    {menuEntry(Scissors, '剪切', () => capture(items,'move'), 'Ctrl+X')}
+    {menuEntry(Copy, '复制', () => capture(items,'copy'), 'Ctrl+C')}
+  </>;
+  const recentMenu = menu?.kind === 'recent' ? menu.row as LibraryVisit : null;
   const renderedMenu = menu && createPortal(<SidebarMenu anchor={menu.anchor} onClose={dismissMenu}
-    className="library-menu" label={menu.items.length > 1 ? '所选资料操作' : '资料操作'} first={<>
+    className={menu.kind === 'source' ? 'library-source-menu' : 'library-menu'}
+    matchTriggerWidth={menu.kind === 'source'}
+    label={menu.kind === 'source' ? '选择资料空间' : menu.kind === 'create' ? '新建' : menu.items.length > 1 ? '所选资料操作' : '资料操作'}
+    first={menu.kind === 'source' ? sources.map(([id,name]) => {
+      const Icon = sourceIcon(id);
+      return <button key={id} role="menuitemradio" aria-checked={source === id} onClick={() => {dismissMenu();void switchSource(id);}}>
+        <Icon size={16}/><span>{name}</span>{source === id && <Check size={15}/>}
+      </button>;
+    }) : menu.kind === 'create' ? <>
+      {menuEntry(FileText, 'Markdown 文档', () => startDocument('md'), '.md')}
+      {menuEntry(FileText, '纯文本', () => startDocument('txt'), '.txt')}
+      <div className="sidebar-menu-separator" role="separator"/>
+      {menuEntry(FolderPlus, '文件夹', () => void startName(), 'Ctrl+Shift+N')}
+    </> : recentMenu ? <>
+      {menuEntry(FolderOpen, '打开', () => void openRecent(recentMenu), 'Enter')}
+      {menuEntry(MapPin, '打开所在位置', () => void openRecent(recentMenu,true))}
+      {menuEntry(X, '从最近移除', () => updateVisits(entries => entries.filter(item => libraryVisitKey(item) !== libraryVisitKey(recentMenu))))}
+    </> : <>
       {menu.row && menu.items.length === 1 && <>
-        {menuEntry(FolderOpen, '打开', () => void browse(menu.row), 'Enter')}
+        {menuEntry(menu.row.is_folder ? FolderOpen : FileText, '打开', () => void browse(menu.row), 'Enter')}
+        {publicFiles && menu.row.is_folder && menuEntry(FolderPlus, '在此新建', () => void browseChildren(menu.row).then(opened => {
+          if (opened && newFolderButton.current) openMenu('create', newFolderButton.current);
+        }))}
         {source === 'lexiang' && !menu.row.is_folder && menu.row.has_children && menuEntry(Folder, '浏览子页面', () => void browseChildren(menu.row))}
-        {publicFiles && menu.row.editable && menuEntry(Pencil, '编辑', () => void edit(menu.row))}
-        {publicFiles && menuEntry(Pencil, '重命名', () => void startName(menu.row), 'F2')}
-        {local && !menu.row.is_folder && menuEntry(ExternalLink, '在本机打开', () => void external(menu.row))}
-        {local && !directory && menuEntry(ExternalLink, '在资源管理器中显示', () => void external(menu.row, true))}
-        {!local && platformUrl(menu.row) && menuEntry(ExternalLink, source === 'weknora' ? '在 WeKnora 打开知识库' : '在原平台打开', () => void external(menu.row))}
+        {canEdit(menu.row) && menuEntry(Pencil, '编辑', () => void edit(menu.row))}
       </>}
       {menu.items.length > 0 && menu.items.every(referenceable) && menuEntry(Plus, '添加到当前对话', () => void reference(menu.items))}
+      {clipboardControls(menu.items)}
+      {menu.row && menu.items.length === 1 && <>
+        {publicFiles && menu.row.is_folder && clipboard && menuEntry(ClipboardPaste, '粘贴到此文件夹', () => void paste(menu.row))}
+        {publicFiles && menuEntry(Pencil, '重命名', () => void startName(menu.row), 'F2')}
+        {local && (menu.row.is_folder
+          ? menuEntry(ExternalLink, '在资源管理器中打开', () => void execute('library.open_folder', {collection:itemCollection(menu.row),parent:pathId(menu.row)}))
+          : menuEntry(ExternalLink, '在本机打开', () => void external(menu.row)))}
+        {local && menuEntry(MapPin, '在资源管理器中显示', () => void external(menu.row, true))}
+        {!local && platformUrl(menu.row) && menuEntry(ExternalLink, source === 'weknora' ? '在 WeKnora 打开知识库' : '在原平台打开', () => void external(menu.row))}
+      </>}
       {!menu.row && <>
+        {clipboard && menuEntry(ClipboardPaste, '粘贴', () => void paste(), 'Ctrl+V')}
         {menuEntry(FolderPlus, '新建文件夹', () => void startName(), 'Ctrl+Shift+N')}
         {menuEntry(RefreshCw, '刷新', () => void refresh(), 'F5')}
       </>}
-    </>} last={publicFiles && menu.items.length > 0 && menuEntry(Trash2, '移到回收站', () => void trash(menu.items), 'Del', true)}/>, document.body);
+    </>} last={!menu.kind && publicFiles && menu.items.length > 0 && menuEntry(Trash2, '移到回收站', () => void trash(menu.items), 'Del', true)}/>, document.body);
 
-  const searchBox = !preview && !recycle && <form className="page-search library-search" role="search" onSubmit={event => {
+  const searchBox = !preview && !recycle && !editor && !recent && <form className="page-search library-search" role="search" onSubmit={event => {
     event.preventDefault();
-    if (local && directory || !collection && !query.trim()) return;
+    if (catalogSearch || !collection && !query.trim()) return;
     void children(collection, parents, 1, query.trim());
   }}>
-    <input ref={searchInput} type="search" aria-label="搜索资料" placeholder={local ? (directory ? '搜索项目' : '搜索文件名') : labels.search}
+    <input ref={searchInput} type="search" aria-label="搜索资料" placeholder={spaceList ? '搜索' + labels.groups
+      : local ? (directory ? '搜索项目' : '搜索文件名') : source === 'weknora' && collection ? '搜索库内资料' : labels.search}
       value={query} disabled={Boolean(naming)} onChange={event => {
         const value = event.target.value;
         update({query:value});
@@ -560,49 +789,55 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
   </form>;
   const folderInsert = visible.findIndex(item => !item.is_folder);
 
+  const SourceIcon = sourceIcon(source);
+  const breadcrumb = !preview && !recycle && !editor && !recent && (parents.length > 0 || collection && !publicFiles || category.startsWith('org:'));
   return <div className="library-space">
     <nav className="library-spaces" aria-label="资料空间">
-      <label className="library-source-select">
-        {local ? <HardDrive size={17}/> : <BookOpen size={17}/>}
-        <select aria-label="选择资料空间" value={source} onChange={event => {
-          const next = event.target.value;
-          if (!naming) setSource(next);
-          else {
-            event.currentTarget.value = source;
-            void discardName().then(allowed => { if (allowed) setSource(next); });
-          }
-        }}>{sources.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select>
-      </label>
+      <button className={'library-recent' + (recent ? ' selected' : '')} aria-current={recent ? 'page' : undefined}
+        onClick={() => void showRecent()} disabled={busy}><Clock3 size={16}/>最近</button>
+      <div className="library-source">
+        <button type="button" className="library-source-select" aria-label={'选择资料空间 · ' + sourceName} aria-haspopup="menu"
+          aria-expanded={menu?.kind === 'source'} disabled={busy}
+          onKeyDown={event => {if (event.key === 'ArrowDown') {event.preventDefault();openMenu('source',event.currentTarget);}}}
+          onClick={event => openMenu('source',event.currentTarget)}>
+          <SourceIcon size={16}/><span>{sourceName}</span><ChevronDown size={15}/>
+        </button>
+      </div>
       {connected && <div className="library-collections">
         {local ? <>
-          <button className={publicFiles ? 'selected' : ''} aria-current={publicFiles ? 'page' : undefined} disabled={busy || !catalog?.public}
+          <button className={publicFiles && !recent ? 'selected' : ''} aria-current={publicFiles && !recent ? 'page' : undefined} disabled={busy || !catalog?.public}
             onClick={() => catalog?.public && void selectCollection(catalog.public)}><Folder size={16}/>公共资料</button>
-          <button className={!publicFiles ? 'selected' : ''} aria-current={!publicFiles ? 'page' : undefined} disabled={busy} onClick={() => void all()}><BookOpen size={16}/>项目资料</button>
+          <button className={!publicFiles && !recent ? 'selected' : ''} aria-current={!publicFiles && !recent ? 'page' : undefined} disabled={busy} onClick={() => void all()}><BookOpen size={16}/>项目资料</button>
         </> : <>
-          {personal && <button className={collection?.id === personal.id ? 'selected' : ''} disabled={busy} onClick={() => void selectCollection(personal)}><Folder size={16}/>{title(personal)}</button>}
-          <button className={directory && category === 'all' ? 'selected' : ''} disabled={busy} onClick={() => void all('all')}><BookOpen size={16}/>{labels.all}</button>
-          {labels.mine && <button className={directory && category === 'mine' ? 'selected' : ''} disabled={busy} onClick={() => void all('mine')}>{labels.mine}</button>}
-          {source !== 'tencent-docs' && Boolean(spaces.length || catalog?.shared?.length) && <div className="library-collection-group">
-            {spaces.map(item => <button key={item.id} className={category === 'org:' + item.id ? 'selected' : ''} disabled={busy} onClick={() => void all('org:' + item.id)}><Folder size={16}/><span>{item.name}</span></button>)}
-            {!spaces.length && <button className={category === 'shared' ? 'selected' : ''} disabled={busy} onClick={() => void all('shared')}>共享知识库</button>}
-          </div>}
+          {personal && <button className={!recent && collection?.id === personal.id ? 'selected' : ''} disabled={busy} onClick={() => void selectCollection(personal)}><Folder size={16}/>{title(personal)}</button>}
+          <button className={!recent && category === 'all' && (!collection || collection.id !== personal?.id) ? 'selected' : ''} disabled={busy} onClick={() => void all('all')}><BookOpen size={16}/>{labels.all}</button>
+          {labels.mine && <button className={!recent && category === 'mine' ? 'selected' : ''} disabled={busy} onClick={() => void all('mine')}><Folder size={16}/>{labels.mine}</button>}
+          {source !== 'tencent-docs' && <button className={!recent && (category === 'spaces' || category.startsWith('org:')) ? 'selected' : ''}
+            disabled={busy} onClick={() => void all('spaces')}><Users size={16}/>{labels.groups}</button>}
         </>}
       </div>}
     </nav>
     <section className="library-main" aria-label={sourceName} onKeyDown={keys}>
-      {connected && <header className="library-heading">
+      {(connected || recent) && <header className="library-heading">
         <div className="library-location">
-          {(preview || recycle) && <button className="icon-button" aria-label="返回列表" title="返回列表" disabled={busy} onClick={() => recycle ? void closeRecycle() : leavePreview()}><ArrowLeft size={17}/></button>}
-          {!preview && !recycle && collection && (!publicFiles || parents.length > 0) && <nav aria-label="当前位置" className="library-breadcrumb">
-            {!publicFiles && collection.id !== personal?.id && <><button onClick={() => void all()}>{categoryTitle}</button><ChevronRight size={14}/></>}
-            {parents.length > 0 && <><button disabled={busy || Boolean(naming)} onClick={() => {update({query:''}); void children(collection, []);}}>{title(collection)}</button><ChevronRight size={14}/></>}
+          {breadcrumb && <button className="icon-button" aria-label="返回上一级" title="返回上一级 · Alt+↑" disabled={busy} onClick={() => void goUp()}><ArrowLeft size={17}/></button>}
+          {(preview || recycle || editor) && <button className="icon-button" aria-label="返回列表" title="返回列表" disabled={busy}
+            onClick={() => editor ? void discardDocument() : recycle ? void closeRecycle() : leavePreview()}><ArrowLeft size={17}/></button>}
+          {breadcrumb && <nav aria-label="当前位置" className="library-breadcrumb">
+            {category.startsWith('org:') && <span><button disabled={busy} onClick={() => void all('spaces')}>{labels.groups}</button><ChevronRight size={13}/></span>}
+            {collection && !publicFiles && collection.id !== personal?.id && <span><button disabled={busy} onClick={() => void all()}>{categoryTitle}</button><ChevronRight size={13}/></span>}
+            {parents.length > 0 && <span><button disabled={busy} onClick={async () => {if (await discardName()) {update({query:''});void children(collection, []);}}}>{title(collection)}</button><ChevronRight size={13}/></span>}
             {parents.slice(0, -1).map((item: any, index: number) => <span key={pathId(item)}>
-              <button disabled={busy || Boolean(naming)} onClick={() => {update({query:''}); void children(collection, parents.slice(0, index + 1));}}>{title(item)}</button><ChevronRight size={14}/>
+              <button disabled={busy} onClick={async () => {if (await discardName()) {update({query:''});void children(collection, parents.slice(0, index + 1));}}}>{title(item)}</button><ChevronRight size={13}/>
             </span>)}
+            <h2 aria-current="location">{heading}</h2>
           </nav>}
-          <h2>{preview ? title(preview) : recycle ? '回收站' : searching && !local && source !== 'weknora' ? '搜索结果' : heading}</h2>
+          {editor && !editor.item ? <input className="library-editor-name" aria-label={editor.manual ? '文档标题' : '文件名'} autoFocus value={editor.name} disabled={busy}
+            onChange={event => setEditor({...editor, name:event.target.value})}/>
+            : !breadcrumb && <h2>{editor?.name || (preview ? title(preview) : recent ? '最近' : recycle ? '回收站' : searching && !local && source !== 'weknora' ? '搜索结果' : heading)}</h2>}
         </div>
         {searchBox}
+        {editor && <button type="button" className="primary" disabled={busy} onClick={() => void saveDocument()}><Check size={16}/>保存</button>}
       </header>}
       <JobProgress job={readJob || job}/>
       {failure && <ErrorState message={failure}/>}
@@ -610,7 +845,34 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
         {notice.undo && <button type="button" className="text-link" disabled={busy} onClick={() => void restore(notice.undo!)}>撤销</button>}
         <button type="button" className="icon-button" aria-label="关闭提示" onClick={() => setNotice(null)}><X size={15}/></button>
       </div>}
-      {!connected ? <div className="library-connection">
+      {recent ? <div className="library-list-scroll library-recent-list" data-detail>
+        {recentVisits.length > 0 && <div className="library-columns">
+          <span className="library-name-heading">名称</span><span className="library-item-meta">位置</span><span className="library-date">最近使用</span>
+        </div>}
+        {recentVisits.map(visit => {
+          const name = visit.item.title, where = [visit.source === 'local' ? '' : sources.find(([id]) => id === visit.source)?.[1],
+            visit.collectionName, visit.parents.at(-1)?.title].filter(Boolean).join(' / ');
+          const context = (trigger: HTMLButtonElement, event?: MouseEvent) => {
+            const rect = trigger.getBoundingClientRect();
+            setMenu({kind:'recent', row:visit, items:[], anchor:{x:event?.clientX ?? rect.left, below:event?.clientY ?? rect.bottom,
+              above:event?.clientY ?? rect.top, trigger}});
+          };
+          return <div className="library-row" key={libraryVisitKey(visit)}
+            onContextMenu={event => {
+              const trigger = event.currentTarget.querySelector<HTMLButtonElement>('.library-row-more');
+              if (trigger) {event.preventDefault();context(trigger,event);}
+            }}>
+            <button type="button" className="library-item-name" title={name} disabled={busy} onClick={() => void openRecent(visit)}>
+              {visit.item.is_folder ? <Folder size={17}/> : <FileText size={17}/>}<span className="library-name"><span>{name}</span></span>
+            </button>
+            <span className="library-item-meta" title={where}>{where}</span>
+            <time className="library-date">{new Date(visit.time).toLocaleString('zh-CN', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}</time>
+            <button type="button" className="icon-button library-row-more" aria-label={'操作 ' + name} aria-haspopup="menu"
+              onClick={event => context(event.currentTarget)}><Ellipsis size={17}/></button>
+          </div>;
+        })}
+        {!recentVisits.length && <Empty icon={Clock3} title="暂无最近资料" detail=""/>}
+      </div> : !connected ? <div className="library-connection">
         <Empty icon={BookOpen} title={'连接' + sourceName} detail=""/>
         {source === 'tencent-docs' ? <div className="button-row">
           <button className="primary" disabled={busy} onClick={async () => {
@@ -628,10 +890,17 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
           <button className="primary" disabled={busy}><Link2 size={16}/>连接</button>
         </form>}
       </div> : <>
-        {preview && <div className="library-document">
+        {editor && <div className="library-document library-editor" inert={busy}>
+          {editor.file && ['sheet','html'].includes(editor.file.payload.kind) ? <OfficeEditor file={editor.file} text={editor.text}
+            onChange={text => setEditor(current => current && {...current,text})} error={onError}
+            register={(_, flush) => {editorFlush.current = flush;}}/>
+            : <textarea aria-label="正文" placeholder="输入正文…" value={editor.text} autoFocus={Boolean(editor.item)}
+              onChange={event => setEditor({...editor,text:event.target.value})}/>}
+        </div>}
+        {preview && !editor && <div className="library-document">
           <div className="library-document-tools">
             <div className="button-row">
-              {local && publicFiles && preview.editable && <button className="icon-button" title="编辑" aria-label="编辑" onClick={() => void edit(preview)}><Pencil size={16}/></button>}
+              {canEdit(preview) && <button className="icon-button" title="编辑" aria-label="编辑" disabled={busy} onClick={() => void edit(preview)}><Pencil size={16}/></button>}
               {source === 'lexiang' && preview.has_children && <button className="icon-button" title="浏览子页面" aria-label="浏览子页面" onClick={() => void browseChildren(preview)}><FolderOpen size={16}/></button>}
               {(local || platformUrl(preview)) && <button className="secondary" onClick={() => void external(preview)}><ExternalLink size={15}/>
                 {local ? '在本机打开' : source === 'weknora' ? '在 WeKnora 打开知识库' : '在原平台打开'}</button>}
@@ -651,18 +920,21 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
             <button className="secondary" type="button" disabled={busy} onClick={() => void restore(item.id)}><ArchiveRestore size={16}/>还原</button>
           </div>)}
         </div>}
-        <div className={'library-list-view' + (dragging ? ' library-dragging' : '')} hidden={Boolean(preview || recycle)}
+        <div className={'library-list-view' + (dragging ? ' library-dragging' : '')} hidden={Boolean(preview || recycle || editor)}
           onDragOver={event => {if (publicFiles && !busy && !naming && event.dataTransfer.types.includes('Files')) {event.preventDefault(); setDragging(true);}}}
           onDragLeave={event => {if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false);}}
           onDrop={event => {event.preventDefault(); setDragging(false); if (publicFiles && !busy && !naming) void importFiles(Array.from(event.dataTransfer.files).map(file => window.cowork.pathForFile(file)).filter(Boolean));}}>
           <div className="library-toolbar">
             <div className="button-row library-list-actions">
               {publicFiles && <>
-                <button type="button" ref={newFolderButton} disabled={busy} onClick={() => void startName()}><FolderPlus size={16}/>新建文件夹</button>
-                <button type="button" className="primary" disabled={busy || Boolean(naming)} onClick={() => void chooseFiles()}><Plus size={16}/>添加文件</button>
+                <button type="button" ref={newFolderButton} className="primary" disabled={busy || Boolean(naming)}
+                  aria-haspopup="menu" aria-expanded={menu?.kind === 'create'} onClick={event => openMenu('create',event.currentTarget)}><Plus size={16}/>新建<ChevronDown size={15}/></button>
+                <button type="button" disabled={busy || Boolean(naming)} onClick={() => void chooseFiles()}><Upload size={16}/>添加文件</button>
+                {clipboard && <button type="button" className="icon-button" title="粘贴到当前文件夹" aria-label="粘贴到当前文件夹" disabled={busy} onClick={() => void paste()}><ClipboardPaste size={17}/></button>}
               </>}
               {local && directory && <button className="secondary" onClick={() => addProject(false)}><FolderPlus size={16}/>新建项目</button>}
-              {remoteUpload && <button className="primary" disabled={busy} onClick={() => void chooseFiles()}><Upload size={16}/>上传文件</button>}
+              {manualWrite && <button className="primary" disabled={busy} onClick={() => startDocument()}><Plus size={16}/>新建文档</button>}
+              {remoteUpload && <button className={manualWrite ? undefined : 'primary'} disabled={busy} onClick={() => void chooseFiles()}><Upload size={16}/>上传文件</button>}
               {!local && collection && !parents.length && !searching && <button disabled={busy} onClick={() => void reference([collection], true)}><Link2 size={16}/>
                 {personal?.id === collection.id ? '引用个人文件' : labels.collection}</button>}
             </div>
@@ -692,14 +964,14 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
           </div>
           {dragging && <p className="muted" role="status">松开以复制到公共资料</p>}
           {view.unavailable?.length > 0 && <p className="error-text">目录不可用：{view.unavailable.join('、')}。恢复目录后刷新。</p>}
-          <div ref={scroller} className="library-list-scroll" data-multi={!directory || undefined} data-detail={detailColumn || undefined}
+          <div ref={scroller} className="library-list-scroll" data-multi={!directory || undefined} data-detail={detailColumn || undefined} data-space-list={spaceList || undefined}
             onScroll={event => {dismissMenu(); if (!preview && !recycle) update({scroll:event.currentTarget.scrollTop});}}
             onContextMenu={event => {
               if (!publicFiles || (event.target as HTMLElement).closest('input,button,.library-row')) return;
               event.preventDefault(); showMenu(undefined, null, {x:event.clientX, y:event.clientY});
             }}
             onClick={event => {if (event.target === event.currentTarget) clearSelection();}}>
-            <div className="library-columns">
+            {!spaceList && (visible.length > 0 || naming) && <div className="library-columns">
               {!directory && <label className="library-check" title={selectedCount === pickable.length && pickable.length > 0 ? '取消全选' : '全选已加载资料 · Ctrl+A'}>
                 <input ref={allInput} type="checkbox" aria-label="全选已加载资料" disabled={busy || !pickable.length || Boolean(naming)}
                   checked={pickable.length > 0 && selectedCount === pickable.length}
@@ -712,7 +984,7 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
               <span className="library-name-heading">名称</span>
               {detailColumn && <span className="library-item-meta">{showSpace ? (source === 'lexiang' ? '团队' : '所属空间') : showPath ? '位置' : showOrigin ? '知识库' : '类型'}</span>}
               <span className="library-date">修改时间</span>
-            </div>
+            </div>}
             {visible.map((item, index) => {
               const key = libraryItemKey(item);
               const selected = selection.has(key);
@@ -731,29 +1003,27 @@ function LibrarySource({source, setSource, onError, onReference, onDirty, confir
                   }}
                   onClick={event => {
                     if ((event.target as HTMLElement).closest('button,.library-check')) return;
-                    rowClick(event, item);
-                  }}
-                  onDoubleClick={event => {
-                    if (directory || event.ctrlKey || event.metaKey || event.shiftKey || (event.target as HTMLElement).closest('.library-check,.library-row-more')) return;
                     void browse(item);
                   }}>
                   {!directory && <label className="library-check">{canPick(item) &&
-                    <input type="checkbox" aria-label={'选择 ' + name} disabled={busy || Boolean(naming)} checked={selected} onChange={() => choose(item, true)}/>}</label>}
+                    <input type="checkbox" aria-label={'选择 ' + name} disabled={busy || Boolean(naming)} checked={selected}
+                      onClick={event => {rangePick.current = event.shiftKey;}}
+                      onChange={() => {choose(item,true,rangePick.current);rangePick.current = false;}}/>}</label>}
                   <button type="button" className="library-item-name" disabled={busy || Boolean(naming)}
-                    title={item.relative || name} aria-label={name} aria-pressed={!directory ? selected : undefined} onClick={event => rowClick(event, item)}>
-                    {isFolder ? <Folder size={17}/> : <FileText size={17}/>}
+                    title={item.relative || name} aria-label={name} onClick={() => void browse(item)}>
+                    {spaceList ? <Users size={17}/> : directory && !local ? <BookOpen size={17}/> : isFolder ? <Folder size={17}/> : <FileText size={17}/>}
                     <span className="library-name"><span>{name.slice(0, ext)}</span>{ext < name.length && <span>{name.slice(ext)}</span>}</span>
                   </button>
                   {detailColumn && <span className="library-item-meta" title={meta}>{meta}</span>}
-                  <time className="library-date">{date(item.updated_at || item.update_time || item.modified_time)}</time>
+                  {!spaceList && <time className="library-date">{date(item.updated_at || item.update_time || item.modified_time)}</time>}
                   {directory ? <ChevronRight size={16} className="library-row-more" aria-hidden="true"/> : <button type="button" className="icon-button library-row-more" aria-haspopup="menu"
                     aria-expanded={Boolean(menu?.row && libraryItemKey(menu.row) === key)} aria-label={'操作 ' + name} title="更多操作" disabled={busy || Boolean(naming)} onClick={disclosure}><Ellipsis size={17}/></button>}
                 </div>}
               </Fragment>;
             })}
             {naming && !naming.item && folderInsert < 0 && nameEditor}
-            {!busy && !naming && !visible.length && <Empty title={searching ? '没有找到资料' : publicFiles ? '此文件夹为空' : '这里还没有资料'}
-              detail={searching ? '换一个关键词试试。' : local && directory ? '可新建项目或关联本机目录。' : ''}/>}
+            {!busy && !naming && !visible.length && <Empty title={searching || query.trim() ? '没有找到资料' : publicFiles ? '此文件夹为空' : spaceList ? '暂无' + labels.groups : '这里还没有资料'}
+              detail={local && directory && !query.trim() ? '可新建项目或关联本机目录。' : ''}/>}
             {busy && !job && <p className="muted" role="status">正在处理…</p>}
             {!directory && more && <button className="secondary library-load-more" disabled={busy || Boolean(naming)} onClick={() => void children(collection, parents, page + 1, searchTerm)}>加载更多</button>}
           </div>

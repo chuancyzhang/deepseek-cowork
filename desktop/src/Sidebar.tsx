@@ -341,7 +341,9 @@ export default function Sidebar(props: Props) {
         </section>}
         <section className="sidebar-group-section" aria-label="分组">
           <div className={'sidebar-section' + (model.pinned.length ? ' spaced' : '')}><span>分组</span>
-            <button ref={groupAdd} title="新建分组" aria-expanded={Boolean(draft)} disabled={!props.layout || saving} onClick={() => draft ? cancelGroup() : beginGroup()}><Plus size={15}/></button>
+            <div className="sidebar-section-actions">
+              <button ref={groupAdd} title="新建分组" aria-expanded={Boolean(draft)} disabled={!props.layout || saving} onClick={() => draft ? cancelGroup() : beginGroup()}><Plus size={15}/></button>
+            </div>
           </div>
           {draft && <form className="sidebar-group-form" onSubmit={event => {event.preventDefault(); void saveGroup();}} onKeyDown={event => {
             if (event.key === 'Escape' && !event.nativeEvent.isComposing) {event.preventDefault(); cancelGroup();}
@@ -372,7 +374,7 @@ export default function Sidebar(props: Props) {
           })}
         </section>
         <section aria-label="项目">
-          <div className="sidebar-section spaced"><span>项目</span><div>
+          <div className="sidebar-section spaced"><span>项目</span><div className="sidebar-section-actions">
             <button title="查看归档" aria-pressed={false} onClick={toggleArchive}><Archive size={14}/></button>
             <button title="新建项目" onClick={props.onProject}><Plus size={15}/></button>
           </div></div>

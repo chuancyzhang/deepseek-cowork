@@ -268,6 +268,13 @@ async function checkSidebar() {
   await until('document.querySelectorAll(".brand .navigation-tools button").length===2');
   command('sidebar');await until('document.querySelectorAll(".app-navigation .navigation-tools button").length===2');
   command('sidebar');await until('document.querySelectorAll(".brand .navigation-tools button").length===2');
+  const projectActions='.sidebar [aria-label="项目"] .sidebar-section-actions';
+  await read('document.activeElement?.blur()');
+  const hover=await read('matchMedia("(hover: hover) and (pointer: fine)").matches');
+  if(hover)assert.equal(await read(`getComputedStyle(document.querySelector(${JSON.stringify(projectActions)})).opacity`),'0');
+  await read(`document.querySelector(${JSON.stringify(projectActions)}).querySelector('button').focus()`);
+  assert.equal(await read(`getComputedStyle(document.querySelector(${JSON.stringify(projectActions)})).opacity`),'1');
+  await read('document.activeElement?.blur()');
   command('add-project');await until('document.activeElement===document.querySelector(".project-dialog input")');
   await fill('.project-dialog input','cross-platform-cowork');await snap('new-project');
   await clickText('.project-dialog button','保存');

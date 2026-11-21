@@ -44,6 +44,12 @@
   white-space: nowrap;
 }
 .sidebar-group-members {padding-inline-start: 12px}
+.sidebar-section-actions {display: flex; align-items: center; flex-shrink: 0}
+@media (hover: hover) and (pointer: fine) {
+  .sidebar-section-actions {opacity: 0}
+  .sidebar-section:is(:hover, :focus-within) > .sidebar-section-actions,
+  .sidebar-section-actions:has([aria-expanded="true"]) {opacity: 1}
+}
 .sidebar-group-members > .history-row .history-select {padding-inline-start: 25px}
 .sidebar-group-form {padding: 3px 2px 7px}
 .sidebar-group-form > div {display: flex; align-items: center; gap: 2px}

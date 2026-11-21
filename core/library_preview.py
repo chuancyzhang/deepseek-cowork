@@ -22,6 +22,10 @@ def weknora_preview(provider, scope, item, data_dir, cancelled, progress):
     check_cancelled(cancelled)
     progress("正在读取文件信息…")
     info = response_data(provider.request(scope, "GET", f"/api/v1/knowledge/{segment(item)}", cancelled=cancelled.is_set))
+    if info.get("type") == "manual" and isinstance(info.get("metadata"), dict):
+        text = info["metadata"].get("content")
+        if isinstance(text, str):
+            return {"text": text, "format": "markdown"}
     name = str(info.get("file_name") or info.get("title") or "资料")
     extension = "." + str(info.get("file_type") or "").lower().lstrip(".")
     if not file_capability("preview" + extension):

@@ -33,12 +33,15 @@ export default function Management({ returnToChat, route, settings, updateSettin
   const [selectedTab, setTab] = useHostField('management:tab:' + route, tabs[0][0]);
   const tab = tabs.some(([id]) => id === selectedTab) ? selectedTab : tabs[0][0];
   const [dirty, setDirty] = useState(false), [query, setQuery] = useState('');
+  const libraryLeave = useRef<(() => Promise<boolean>) | undefined>(undefined);
+  const registerLibraryLeave = useCallback((callback?: () => Promise<boolean>) => {libraryLeave.current = callback;}, []);
   useEffect(() => window.cowork.onEvents(events => {
     if (events.some(event => event.event === 'settings_changed')) void rpc('settings.get').then(updateSettings).catch(error => onError(error.message));
   }), [updateSettings, onError]);
-  const leave = useCallback(async () => !dirty || (route === 'library'
-    ? await confirm('保留未完成的命名？', '返回资料库后可继续命名。', ['继续编辑', '保留并离开']) === 1
-    : await confirm('保留未保存的编辑？', '编辑草稿会保留在本机，下次进入可以继续。只有点击保存才会修改配置。', ['继续编辑', '保留草稿并离开']) === 1), [dirty, confirm, route]);
+  const leave = useCallback(async () => {
+    if (route === 'library') return (await libraryLeave.current?.()) ?? true;
+    return !dirty || await confirm('保留未保存的编辑？', '编辑草稿会保留在本机，下次进入可以继续。只有点击保存才会修改配置。', ['继续编辑', '保留草稿并离开']) === 1;
+  }, [dirty, confirm, route]);
   useEffect(() => { registerLeave(leave); return () => registerLeave(async () => true); }, [leave, registerLeave]);
   const common = { onError, confirm, onDirty: setDirty };
   return <div className={'management-layout ' + (route === 'capabilities' ? 'capabilities-layout' : route === 'library' ? 'library-layout' : '')}>
@@ -46,7 +49,7 @@ export default function Management({ returnToChat, route, settings, updateSettin
     <div className="management-content"><Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在打开…</div>}>
       {['skills', 'mcp', 'experts', 'favorites', 'schedule_history'].includes(tab) ? <Capabilities key={tab} kind={tab} {...common} openConversation={openConversation} returnToChat={returnToChat}/>
         : tab === 'plugins' ? <PluginManager/>
-        : tab === 'library' ? <Library {...common} onReference={onReference} projectsKey={JSON.stringify(settings?.projects || [])}/>
+        : tab === 'library' ? <Library onError={onError} confirm={confirm} registerLeave={registerLibraryLeave} onReference={onReference} projectsKey={JSON.stringify(settings?.projects || [])}/>
         : ['enterprise', 'team'].includes(tab) ? <Enterprise kind={tab} {...common} openConversation={openConversation}/>
         : tab === 'update' ? <Updates/>
         : ['preferences','im','security','storage','memory','logs'].includes(tab) ? <SystemSettings key={tab} kind={tab} {...common}/>

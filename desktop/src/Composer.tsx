@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 're
 import { ArrowLeft, ArrowUp, BookOpen, Check, ChevronDown, ChevronRight, FileText, Folder, Link, LoaderCircle, MessageCircleQuestion, MessageSquare, Paperclip, Play, Plus, Puzzle, Search, ShieldCheck, SlidersHorizontal, Square, UserRound, X } from 'lucide-react';
 import type { Attachment, Conversation, Settings, ModePlugin } from './types';
 import { receiveAttachments } from './attachments';
-import ImageAttachment, {isImageAttachment} from './ImageAttachment';
+import ImageAttachments, {isImageAttachment} from './ImageAttachment';
 
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 type Props = {
@@ -163,7 +163,9 @@ export default function Composer(props: Props) {
     section && menu === 'add' ? setSection('') : close();
   }}>
     <div className="composer">
-      {attachments.some(isImageAttachment) && conversation && <div className="image-attachments">{attachments.filter(isImageAttachment).map(file => <ImageAttachment key={conversation.id + ':' + file.path} cid={conversation.id} file={file} onOpen={props.openFile} onRemove={() => setAttachments(attachments.filter(item => item.path !== file.path))}/>)}</div>}
+      {attachments.some(isImageAttachment) && conversation && <ImageAttachments key={conversation.id}
+        cid={conversation.id} files={attachments.filter(isImageAttachment)} onOpen={props.openFile}
+        onRemove={path => setAttachments(attachments.filter(item => item.path !== path))}/>}
       {(skills.length > 0 || refs.length > 0 || knowledge.length > 0 || attachments.some(file => !isImageAttachment(file))) && <div className="composer-contexts">
         {refs.map(ref => <div className="context-chip conversation-chip" key={ref.id}><MessageSquare size={13}/><button title={'查看引用快照：' + ref.title} onClick={() => {open('add', 'conversations');}}><span>对话 {ref.title}</span></button><button aria-label={'移除引用 ' + ref.title} onClick={() => void applyPreference({conversation_refs: refs.filter(item => item.id !== ref.id)})}><X size={12}/></button></div>)}
         {skills.map(name => {const connector = name.startsWith('mcp-server-'), category = connector ? 'connectors' : 'skills', label = connector ? '连接器' : '技能'; return <div className="context-chip skill-chip" key={name}>{connector ? <Link size={13}/> : <Puzzle size={13}/>}<button disabled={busy} title={'选择' + label + '：' + name} aria-label={'选择' + label + ' ' + name} aria-haspopup="dialog" aria-expanded={menu === 'add' && section === category} onClick={() => open('add', category)}><span>{label} {name}</span></button><button disabled={busy} aria-label={'移除能力 ' + name} onClick={() => void applyPreference({selected_skill_names: skills.filter(item => item !== name)})}><X size={12}/></button></div>;})}

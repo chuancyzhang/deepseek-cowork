@@ -1,7 +1,7 @@
 import {useState} from 'react';
 import type {MediaTask} from '../../types';
 import {MediaResult} from '../../MessageBubble';
-import ImageAttachment,{isImageAttachment} from '../../ImageAttachment';
+import ImageAttachments,{isImageAttachment} from '../../ImageAttachment';
 import './multimedia.css';
 
 const labels: Record<string, string> = {image_generate: '图片生成', video_generate: '视频生成', audio_generate: '文字配音', image_understand: '图片理解', video_understand: '视频理解', audio_understand: '音频转写'};
@@ -19,6 +19,7 @@ function TaskCard({cid, task, configured, openFile, configure}: TaskProps & {tas
   const stopping = active && Boolean(task.stop_requested);
   const message = task.status === 'unknown' && !task.can_resume ? '需求已保留，未重复提交。' : task.message;
   const showMessage = !ready && (!active || stopping || Boolean(task.diagnostic));
+  const images = (task.files || []).filter(path => isImageAttachment({path})).map(path => ({path, name:path.split(/[\\/]/).pop() || path}));
   async function action(operation: Operation) {
     setBusy(operation); setFailure('');
     try {await window.cowork.call('media.' + operation, {id: task.id, conversation_id: cid, ...(operation === 'retry' ? {updated_at: task.updated_at} : {})});}
@@ -36,9 +37,9 @@ function TaskCard({cid, task, configured, openFile, configure}: TaskProps & {tas
     {control && <div className="button-row">{control}</div>}
     {failure && <p className="error-text" role="alert">{failure}</p>}
     {!active && task.diagnostic && <details className="media-task-diagnostic"><summary>查看原因</summary><p>{task.diagnostic.message}</p>{task.diagnostic.request_id && <p>请求编号：{task.diagnostic.request_id}</p>}</details>}
-    {task.files?.map(path => {
+    {images.length > 0 && <ImageAttachments cid={cid} files={images} onOpen={openFile}/>}
+    {task.files?.filter(path => !isImageAttachment({path})).map(path => {
       const name = path.split(/[\\/]/).pop() || path;
-      if (isImageAttachment({path})) return <ImageAttachment key={path} cid={cid} file={{path, name}} onOpen={openFile}/>;
       if (/\.(mp4|webm|mov|mp3|wav|m4a|ogg|flac)$/i.test(path)) {
         const player = <MediaResult cid={cid} onFile={openFile} onPlayable={video ? setPlayable : undefined} file={{path, name, kind: /\.(mp4|webm|mov)$/i.test(path) ? 'video' : 'audio', url: '', label: '', references: [path]}}/>;
         return <div className={'message-media' + (video ? ' task-video' : '')} key={path}>{player}</div>;

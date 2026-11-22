@@ -1,10 +1,10 @@
 # DeepSeek Cowork 技术文档
 
-文档适用版本：**5.4.1**
+文档适用版本：**5.4.2**
 
-本文集中维护运行模型、能力开发、构建发布和测试入口。桌面操作见[用户手册](user-guide.md)，企业中心部署见[平台说明](../web/platform/README.md)。
+本文面向开发者与维护者，围绕一次任务如何进入系统、形成模型请求、执行工具、保存事实并呈现成果，说明各层职责和不可破坏的约束。能力开发、构建与测试沿用同一套边界。桌面操作见[用户手册](user-guide.md)，企业中心部署见[平台说明](../web/platform/README.md)。
 
-本版变更摘要见 [5.4.1 版本说明](releases/5.4.1.md)。版本与文档已同步；Windows 成品仍待构建与验收，构建入口和验收范围见下文。
+按需从下列目录进入；版本变化集中在[发布记录](releases/index.md)，本文维护当前实现。构建成功与公开发布分别确认。
 
 ## 目录
 
@@ -67,7 +67,7 @@ flowchart TB
 
 ### 选型依据与不变量
 
-这次改造同时解决界面可替换和任务生命周期独立两个问题。Electron 提供统一的网页宿主与原生桌面入口；React/TypeScript 负责可组合界面和 SDK 契约；Python 保留模型、工具、文档和连接器生态；SQLite 继续承担本机事务与历史查询。选择不以“框架更新”或“插件更多”为目标。
+架构围绕界面可替换与任务生命周期独立组织。Electron 提供统一的网页宿主与原生桌面入口；React/TypeScript 负责可组合界面和 SDK 契约；Python 保留模型、工具、文档和连接器生态；SQLite 继续承担本机事务与历史查询。选择不以“框架更新”或“插件更多”为目标。
 
 职责分为三层：运行事实归 Python 核心，草稿与编辑恢复归稳定宿主，布局与局部交互归界面插件。移除 Qt 后仍使用 Python 原生线程、队列和事件，不同时重写成熟业务为另一套异步框架。新增执行能力继续使用 Tool／Skill／MCP，界面插件不另建运行引擎。
 
@@ -107,7 +107,7 @@ flowchart TB
 
 非 Windows 的提示词差异限于已确认的能力范围：直接使用完整 Agent，停用能力不进入运行目录，历史向量工具不注册；语音转文字相关运行指导与技能已下线。Windows 的既有工具定义、顺序及极简启动选择不改变；不修改模型协议与历史消息格式。
 
-企业服务端、企业专属分发和跨平台企业接入不在当前改造范围内。Mac／统信使用全新用户环境；最低 macOS 版本及统信 V25 补丁、显示服务、输入法、托盘和睡眠恢复需在目标设备验收。
+企业中心及 Windows 专属分发独立维护，Mac／统信的企业接入尚不在交付范围内。Mac／统信使用全新用户环境；最低 macOS 版本及统信 V25 补丁、显示服务、输入法、托盘和睡眠恢复需在目标设备验收。
 
 ## Electron 工作台
 
@@ -128,64 +128,29 @@ flowchart LR
     Event --> SDK
 ```
 
+### 运行与生命周期
+
 同会话命令按序执行，一个会话只有一个顶层活动运行；不同会话和子任务可以并行。核心拥有 `queued / running / stopping / completed / failed / interrupted` 状态，等待用户和重试保留为阶段信息。停止先触发目标运行的取消令牌，绕过正文积压；写入失败会单独报告，不能阻止取消。旧回调按会话与运行身份隔离。模型和网络错误沿用最多五次的可见重试，不因重连重新执行工具。
+
+### 数据目录与输入恢复
 
 正式包启动时自动定位原数据目录；便携版优先使用可执行文件旁的 `user_data`。直接复用原配置、SQLite、附件、凭据及工作区，自定义历史目录也保持原路径；不创建 `desktop-v2`、整目录备份或路径重写。`ChatStorage` 继续负责原会话表，新运行核心仅增加 `desktop_*` / `runtime_*` 状态表及 `runtime_wal`。旧 `runtime_journal_v2` 保留原位，兼容读取层按需校验并读取记录、清单和事件；新写入走共享 WAL，事件序号从旧记录之后继续，冲突或损坏显式报错。原消息和引用直接复用；聊天输入按下述本机恢复规则保留。旧版可读取同一会话库，但不能接管新版运行中任务；新旧程序须先退出再切换，不能同时写同一数据目录。
 
 启动取得数据目录独占权并检查旧版窗口已退出，在耗时初始化前公布已认证控制端点。`starting` 报告真实阶段，完整初始化后才发送 `ready`；实际进度更新延长等待，长时间无进展则报错。重试重连现有启动进程，不新建竞争服务。启动中、失败页、菜单与托盘均可退出；完整退出保存草稿与恢复副本、停止任务并等待本应用后台结束，再清除托盘图标。窗口关闭按钮仅收起到托盘。
 
-未发送的聊天文字和附件由 Electron 宿主按会话保留在本机恢复存储中，不再调用后台草稿同步或比较 revision；界面重建只读取当前输入，旧版数据库草稿仅在缺少本机记录时导入一次。新建聊天转交未发送内容，附件先复制进目标工作目录；切换已有聊天仍隔离输入。消息提交继续使用稳定请求 ID 与持久回执，确认接收后只清空该次发送的内容；历史改写、运行与模型请求构造沿用原协议。
+未发送的聊天文字和附件由 Electron 宿主按会话保留在本机恢复存储中，不参与后台草稿同步或 revision 比较；界面重建只读取当前输入，旧版数据库草稿仅在缺少本机记录时导入一次。新建聊天转交未发送内容，附件先复制进目标工作目录；切换已有聊天仍隔离输入。消息提交继续使用稳定请求 ID 与持久回执，确认接收后只清空该次发送的内容；历史改写、运行与模型请求构造沿用原协议。
 
 开发默认使用隔离目录，可用 `--data-dir` 或 `COWORK_APP_DATA_DIR` 显式选择测试数据。生产包必须使用随包服务，缺失时明确报错。前端与插件不接触数据库、认证凭据或直接模型调用。
 
-稳定系统提示词、工具定义及其顺序、Provider 消息投影沿用现有实现。能力选择与上下文策略通过原有运行参数传递，并在任务接受时冻结；用量页面只读取观测事件。它没有为新界面增加系统提示词或插件源码前缀。
+能力选择与上下文策略通过运行参数传递，在任务接受时冻结。界面布局、插件源码与用量视图不进入模型请求；系统提示、工具顺序及 Provider 投影统一由运行核心构造，具体缓存边界见[上下文与缓存](#上下文与缓存)。
+
+### 原生表面与编辑器边界
 
 工作区中的终端由服务持有，界面切换或重连只重读带游标的缓冲输出，不重新启动 Shell。用户接管与交还更新控制版本，旧输入不能在控制权变化后执行。xterm 的 DA/DSR 协议应答经过独立白名单，不作为用户命令，避免 ConPTY 等待协议应答时阻塞输入。
 
 内置网页由 Electron 的独立 `WebContentsView` 承载，每个对话使用单独浏览会话。Agent 请求只能消费原任务的一次性授权；操作前再次核对取消状态、控制权和页面版本。文本观察失败与截图失败分别反馈，不能把没有截图的结果用于坐标猜测。本地 HTML 通过限定目录的独立协议提供资源，不开放 Node 或任意本机文件读取。
 
 Office 编辑器复用内置 Web 编辑器，改用限定命令的父页面桥接；保存前等待最后一版编辑快照。外部修改冲突保留草稿，“另存副本”保留原文件格式并拒绝覆盖已有文件。传输上限为 64 MiB，覆盖 25 MiB Office 文件经 base64 编码后的体积。
-
-### 开发与 Windows 构建
-
-准备现有 Python 依赖和固定运行时后，安装前端依赖并启动：
-
-```powershell
-npm --prefix desktop ci
-npm --prefix web/editors ci
-node desktop/node_modules/electron/install.js
-.\.venv\Scripts\python.exe scripts/run_desktop.py
-# 已构建界面时可加 --no-build；--data-dir 指定隔离数据目录。
-```
-
-当前 Electron 45 的 npm 包与可执行运行时分开安装。`npm ci` 完成后仍需执行上述 `install.js`；安装器按包内摘要校验下载或缓存的压缩包。下载失败时保留错误并修复网络或提供同版本已校验缓存，不能把 npm 依赖安装成功当作桌面运行环境就绪。
-
-Windows 构建沿用 `deepseek-cowork.spec` 的依赖和资源；只使用独立服务入口，显式排除 Qt 绑定、插件和旧界面，再由 Electron Packager 组装目录。版本读取 `core/app_version.py` 的 `APP_VERSION`。
-
-BrowserSkill 的 CLI 与扩展固定为 0.5.0。升级时须同步 `core/browser_skill_component.py`、`resources/browser_skill/bundle.json`、`scripts/fetch_runtimes.ps1`、`deepseek-cowork.spec` 与 `scripts/package_release.py` 的版本、归档名、下载地址及 SHA-256；构建和发行审计均拒绝不一致或损坏的资源。打包只收集清单与许可证及其中指定的两个 ZIP，本地缓存的旧版本不会进入发行包。`test/test_packaging_runtime.py` 核对上述五处的一致性，`test/test_package_release.py` 使用真实清单生成隔离夹具并验证发行审计。
-
-文档和数据分析依赖统一放在随包 `python_env`。`requirements-data-analysis.txt` 锁定数据分析库及完整传递依赖，由 `requirements.txt` 引入；spec 核验构建环境版本并收集包文件、元数据、原生库与资源。生成 ZIP 前，`scripts/package_release.py` 使用随包 Python 在隔离目录验证导入、科学计算、机器学习、并行 worker、图表与 Office/PDF 文件读写；失败阻止出包。应用不再提供组件管理页、下载源或安装超时配置，也不加载旧工具包目录。通用 Python 工具优先使用随包库，第三方技能保留独立依赖环境与内部默认安装参数。
-
-Electron 启动服务时通过 `COWORK_ELECTRON_EXE` 传递自身可执行文件，通用 JavaScript 工具可复用宿主 Node.js。版本探测和实际执行仅对目标子进程设置 `ELECTRON_RUN_AS_NODE=1`，Python、Bash 与桌面宿主不继承该模式。`run_node_code` 保留原进程取消和输出路径；npm/npx 的交付范围不变。独立运行 Python 服务且没有 Electron 宿主时，仍可显式配置独立 Node.js。
-
-```powershell
-$env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
-npm --prefix desktop run package:win
-```
-
-如果默认输出目录中的程序正在使用，先设置 `$env:COWORK_PACKAGE_OUT_DIR = (Join-Path (Get-Location) 'dist/desktop-release')` 再构建，避免覆盖运行中的安装目录。该目录同时接收完整程序、ZIP 和清单；不要直接覆盖员工正在使用的安装目录。
-
-输出为 `desktop/out/DeepSeek Cowork-win32-x64/deepseek-cowork.exe`，必须保留相邻文件和 `resources/service`；同时生成 `cowork-desktop-v版本号-windows-x64.zip` 和 `latest-desktop-windows-x64.json`。ZIP 内顶层目录为 `Cowork`，成员路径最多 185 个 UTF-16 代码单元，为资源管理器的目标目录留出余量。打包排除用户数据、Python 字节码缓存和 Qt 运行时。应用显示名为 DeepSeek Cowork，可执行文件为 `deepseek-cowork.exe`；更新器按应用结构识别新旧包，也兼容早期 Electron 包的 `Cowork.exe` 入口。Windows 旧运行日志的按需读取在文件 I/O 边界使用扩展路径，不依赖系统开启长路径策略，持久化配置仍保存普通绝对路径。新包必须带 `desktop-release.json`；更新清单使用 `app_layout: electron`，在线地址为 `updates/desktop-windows-x64/latest.json`，与旧版更新源隔离。设置页支持检查、准备本地包和重启更新，沿用校验、保存退出、替换、启动确认与回滚事务。打包不会执行签名或公开发布；Mac 与 Linux 的新宿主安装包仍待目标系统验证。
-
-```powershell
-.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s test -p test_desktop_service.py -v
-npm --prefix desktop test
-npm --prefix desktop run build
-# 在与源码无关的工作目录验证冻结服务：
-$env:COWORK_TEST_DESKTOP_SERVICE = (Resolve-Path "desktop/out/DeepSeek Cowork-win32-x64/resources/service/cowork-service.exe").Path
-.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s test -p test_desktop_service.py -v
-Remove-Item Env:COWORK_TEST_DESKTOP_SERVICE
-```
 
 ### 界面插件与稳定宿主
 
@@ -200,27 +165,13 @@ Remove-Item Env:COWORK_TEST_DESKTOP_SERVICE
 | `toolbar:chat` | 内置对话顶部的宿主用量按钮，可显示生成速度 |
 | `command / menu` | 稳定命令 ID；重复注册拒绝安装 |
 
-会话、运行、草稿、文件编辑及管理表单由 `desktop/src/host/` 按稳定 ID 持有。快照和增量经过统一入口，页面卸载不清空内容。草稿沿用版本回执和发送队列；文件沿用指纹与冲突保存。表单恢复副本使用系统凭据保护，恢复副本不等于正式保存配置。
+会话、运行、草稿、文件编辑及管理表单由 `desktop/src/host/` 按稳定 ID 持有。快照和增量经过统一入口，页面卸载不清空内容。聊天草稿使用本机恢复存储，发送沿用稳定请求 ID 与接收回执；文件沿用指纹与冲突保存。表单恢复副本使用系统凭据保护，恢复副本不等于正式保存配置。
 
 创造会话提交 `interface/` 补丁后，通过已认证的运行请求安排 Electron 试跑。试跑以包指纹绑定隔离渲染、交互检查和截图。工具结果在原轮次回传，已通过的快照按设计会话发布到预览区。用户应用时使用该快照的指纹，复用插件安装事务和宿主保存协调。
 
 插件切换先校验并隔离预览，等待旧实例中的修改完成，保存宿主恢复状态，加载候选并确认所有扩展点就绪，最后提交选择。失败保留现有版本。候选预览只读示例内容；未就绪实例和已失效实例不能提交业务操作。停用、恢复上一版和恢复内置界面都只改变插件代码，保留用户数据。宿主恢复按钮与应用菜单独立于当前插件。
 
 接口、能力声明、包限制和可安装示例见 [UI SDK](../desktop/sdk/README.md)。
-
-### 多媒体技能
-
-多媒体通过 `ai_skills/multimedia/SKILL.md` 与 `skill.json` 注册为可选技能，启停复用 `enabled_skills` / `disabled_skills`，模型绑定保存在 `skill_configs.multimedia.bindings`（沿用通用技能配置的字符串值，以 JSON 编码）。旧 `experimental_multimedia` 一次性迁移，显式技能选择优先；旧图片理解与音频绑定保留但不公开为新任务能力。`core/desktop_media.py` 负责宿主租约、中断恢复与任务记录，`core/multimedia/` 继续承载执行和服务适配。停用阻止新任务，已有任务和恢复操作持有租约，结束后释放实例。
-
-技能配置页按图片／视频分组，支持图片生成、视频生成与视频理解，选择模型或原位新增服务。保存复用宿主配置事务与修订检查，不发起远端请求；凭据留在受保护的模型服务配置中，不进入技能说明、任务记录、工具结果或日志。每轮 Worker 固定模型和服务快照。技能摘要随启用状态进入现有技能发现机制，完整说明按需加载；`media_create` 与 `media_task` 保持固定注册顺序和延迟披露，服务配置及进度不进入稳定前缀。新增技能说明和收敛后的工具 schema 会使对应上下文缓存重新建立。主模型不支持图片时，已配置图片生成能力允许附件作为文件引用交给工具，不假装主模型具备视觉能力。
-
-后台复用 `DesktopJobs`，按会话、逻辑执行 ID 和请求摘要去重。没有对应模型时保存 `needs_configuration` 和原请求；配置后通过 `media.continue` 继续同一任务。提交前先保存状态；只有 Agnes 视频明确返回未接单的 `video_queue_full` 才自动重试（最多 3 次），耗尽后通过 `media.retry` 使用同一任务和原请求。普通 5xx、超时或缺少回执不重发。视频查询临时失败最多连续重试 5 次，单轮等待最多 10 分钟；临时下载错误最多重试 3 次，不回到生成阶段。
-
-远端回执、下载来源和成果沿用宿主 SQLite `media:` 记录及工作目录回执。重启时，有回执的未完成任务继续查询或保存；明确未提交的任务仅在原服务凭据仍匹配时继续提交，在途且无回执则标为未确认。`media.resume` 只使用原任务回执，不接收手填编号；停用仍可查询或下载已有任务，不再提交。主动“停止等待”保留记录，不等于远端取消。聊天任务卡读取最新任务状态，工具详情保留调用时快照，不改写历史或模型请求前缀。
-
-Agnes 图片与视频、火山方舟视频使用独立请求契约。OpenAI 兼容接口支持图片生成／编辑和视频理解；Videos 使用服务的创建／查询／内容接口，不能假定第三方完全实现相同协议。旧图片理解与音频适配保留用于已有任务恢复，但新工具 schema 不披露这些能力。服务要求 URL 的素材不自动上传，也不静默改用组合解析。任务状态、结果和恢复入口统一位于所属聊天。
-
-音视频成果复用宿主授权的 `cowork-local:` 文件协议，聊天与工作区提供播放器。协议保留范围请求头并启用流媒体能力，页面 CSP 仅增加本地媒体来源；解码不支持时保留文件与本机应用入口。
 
 ## Agent Loop 与模型协议
 
@@ -263,19 +214,15 @@ Responses 的原生 Items 保存在 assistant 消息协议元数据中，下一�
 | 动态上下文 | 日期、工作目录、模型、运行模式、显式能力及运行快照 |
 | 消息序列 | 用户输入、模型回答、工具往返、按需披露的资料与能力指导 |
 
+### 能力披露与稳定前缀
+
 工作区约定和运行环境信息在 Worker 创建时读取。工具顺序、能力目录和历史组织通过既有构造路径管理；变更这些部分时，需要评估 prompt prefix 与缓存影响。
 
 Skill 指导使用内容哈希与目录版本管理披露。运行上下文提供按稳定名称排序的内置技能目录，基于实际可用工具、浏览器模式、配置和 Agent 范围生成；部分可用时列出本轮工具。标记 `prompt_disclosure: full_on_match` 的内置技能按任务匹配，在模型请求前通过已有追加式 Skill 状态账本披露说明。同一正文按哈希去重，失去可用范围时追加停用事件，不重写历史。用户选定能力仍在本轮进入上下文，其他启用能力经 `tool_search` 发现；参考正文按需读取。
 
-`task-automation` 用七个有类型工具覆盖查询、读取、保存、计划设置、运行、历史与删除。工具适配器、`favorites.*` 桌面 RPC 与 `DesktopScheduler` 共用宿主 `TaskAutomationService`；技能实现不自行创建 ConfigManager，不返回仅供前端解释的启动指令。旧 favorites 存储键和任务 ID 保留，运行配置中的 `favorites-manager` 标识归一为新技能，历史消息不改写。
+内置目录、路由策略及任务工具 schema 构成首次请求前缀的一部分；后续目录使用确定顺序，按需正文追加到账本，不往稳定系统提示词反复塞入全部技能全文。缓存收益不能优先于当前工具范围与会话隔离。这里描述的是应用运行时前缀，与开发助手读取的仓库 `AGENTS.md` 分开。
 
-任务编辑使用 revision 防止覆盖并发修改；保存与运行的逻辑操作标识用于回执丢失后的去重。定时触发先保存 `task_id + scheduled_at` 对应的持久领取记录，再创建独立会话并调用标准发送流程，接受回执才表示进入运行。重启核对真实运行状态，不自动重放结果不确定的外部操作。手动任务正文与计划专用正文／交付配置分开，纯技能组合只创建待输入会话。运行记录保留任务版本、模型 ID、所选技能说明摘要与会话 ID，当前审批和运行控制仍走普通 Agent。
-
-新计划保存 IANA 时区，旧计划保留 `local` 及已有下次触发时间。绝对时间要求偏移，相对时间由后端计算；夏令时缺失时刻跳过并记录诊断，重复墙钟时刻只执行一次，每月日期超过当月天数时取月末。Windows 发行物包含 `tzdata`，发行检查拒绝残留旧技能目录。
-
-本次内置目录、路由策略及任务工具 schema 会改变首次请求前缀；后续目录使用确定顺序，按需正文追加到账本，不往稳定系统提示词反复塞入全部技能全文。缓存收益不能优先于当前工具范围与会话隔离。这里描述的是应用运行时前缀，与开发助手读取的仓库 `AGENTS.md` 分开。
-
-专门的 PPT 助手已下线，Frontend Slides 不再随包提供。旧会话的 PPT 元数据和内部阶段消息仍按历史兼容规则读取；新任务丢弃旧 PPT 专属运行参数，并停用由旧模式带来的 HTML-first 工作流。界面提前说明后续使用普通对话，不改写已有消息或文件。系统稳定提示词、普通工具定义及顺序保持原样；Huashu Design、Guizang PPT 仍可按普通技能规则选用。重新打包时必须重建冻结服务，发行审计会拒绝包含旧 Frontend Slides 资源的构建目录。
+### 首请求与长上下文
 
 `bootstrap_plugins/session.py` 管理极简首请求。适用的新对话先使用精简提示与工具，需要继续时进入完整能力路径，并沿用原始输入和附件。
 
@@ -329,11 +276,13 @@ sequenceDiagram
 
 接收回执丢失时按原请求查询，连接恢复不自动重发命令；同会话维持一个顶层活动运行，运行中输入通过补充进入原任务。停止先取消所属执行，再收尾保存，不能排在普通输出积压之后。进程重启恢复已保存事实并标记中断，不自动重做可能已经生效的外部操作。恢复阅读与恢复执行是两个不同边界。
 
-### 后台工具
+### 后台工具与观测
 
 `core/tool_tasks.py` 为长工具维护任务身份。达到等待窗口后返回 `background_tool`、`task_id`、状态及耗时，原操作继续；模型可通过 `wait_tool` 等待或请求取消。
 
 执行线程先保存结果，再公布完成状态。完成结果经原工具返回或隐藏的 `tool_completion` 事件交付，两条路径共用交付收据去重，界面更新原工具卡。
+
+用量浮窗读取宿主观测事件，不参与请求构造。`desktop/src/usageMetrics.ts` 计算实时速度、已上报用量和同次请求的上下文估算；浮窗开关保留在本机，指标和浏览状态按会话切换。历史尚未完整载入时标明统计范围，服务上报用量不与文本估算混为一谈。
 
 ## 工具与执行授权
 
@@ -384,7 +333,7 @@ example-skill/
 
 内置 `documents` 负责 Office/PDF 读取与 Word 创作，`presentations` 负责 PPTX，`data-analysis` 负责口径、质量、计算与结论，`visualize` 负责对话中的交互表达。创作与分析复用现有 Python 运行时；多个交付格式共用已核验的结果。`SKILL.md` 保留核心流程，`references` 按任务读取，加载后的指导提供实际文件路径，默认不把参考正文一并注入。
 
-`document-reader` 完整退役，目录、加载与发行入口统一为 `documents`，没有旧 ID 别名、转发或配置迁移；历史记录不改写。保留原 `document_read` 工具及分批读取协议，新增 `document_render`。上述技能摘要、指导与工具定义会改变模型请求前缀；详细参考按需读取，展示状态不进入模型上下文。
+`document_read` 与 `document_render` 分别负责内容读取和页面转图，创作结果通过现有文件能力保存和审阅。技能摘要、指导与工具定义都参与模型请求；变更时评估前缀影响，详细参考按需读取，展示状态不进入模型上下文。
 
 ### 配置与依赖
 
@@ -402,7 +351,7 @@ example-skill/
 
 本地文件夹和 ZIP 经结构、路径及内容校验后原子发布。标准 Agent Skill 保留上游指导并添加本地索引。
 
-远程安装流程先生成固定来源、commit、摘要和配置的预览，确认后发布同一快照。SkillHub 使用公开目录与官方 ZIP，`.skillhub.json` 记录来源及安装基线。
+统一安装器 `core/skill_install.py` 解析本地包、HTTPS Git 仓库和直接 ZIP/Markdown 下载，固定实际来源、commit 与内容摘要；`core/skill_package.py` 校验并发布同一份内容。网页安装说明需先解析为真实来源，不再使用独立安装 Agent 或固定二次确认。批量校验失败保留已有技能，同名冲突拒绝覆盖；安装完成与配置就绪分开报告。SkillHub 使用公开目录与官方 ZIP，`.skillhub.json` 记录来源及安装基线。
 
 能力需要额外授权时，由清单引用受信任 Provider ID，例如 `authorization.provider=wecom_cli`。Provider 在隔离位置完成授权与身份检查，再发布凭据。
 
@@ -416,7 +365,23 @@ AI 在执行阶段自主判断是否调用 `update_experience(scope, experience,
 
 “沉淀为 Skill”先提取用户选定会话范围并生成可编辑的复用分析，再生成草稿；发布前检查 Schema、证据引用、敏感内容、资源路径、Python AST 和目标 revision。指导、脚本和经验在同一包中组织。
 
+### 多媒体技能
+
+多媒体通过 `ai_skills/multimedia/SKILL.md` 与 `skill.json` 注册为可选技能，启停复用 `enabled_skills` / `disabled_skills`，模型绑定保存在 `skill_configs.multimedia.bindings`（沿用通用技能配置的字符串值，以 JSON 编码）。旧 `experimental_multimedia` 一次性迁移，显式技能选择优先；旧图片理解与音频绑定保留但不公开为新任务能力。`core/desktop_media.py` 负责宿主租约、中断恢复与任务记录，`core/multimedia/` 继续承载执行和服务适配。停用阻止新任务，已有任务和恢复操作持有租约，结束后释放实例。
+
+技能配置页按图片／视频分组，支持图片生成、视频生成与视频理解，选择模型或原位新增服务。保存复用宿主配置事务与修订检查，不发起远端请求；凭据留在受保护的模型服务配置中，不进入技能说明、任务记录、工具结果或日志。每轮 Worker 固定模型和服务快照。技能摘要随启用状态进入现有技能发现机制，完整说明按需加载；`media_create` 与 `media_task` 保持固定注册顺序和延迟披露，服务配置及进度不进入稳定前缀。新增技能说明和收敛后的工具 schema 会使对应上下文缓存重新建立。主模型不支持图片时，已配置图片生成能力允许附件作为文件引用交给工具，不假装主模型具备视觉能力。
+
+后台复用 `DesktopJobs`，按会话、逻辑执行 ID 和请求摘要去重。没有对应模型时保存 `needs_configuration` 和原请求；配置后通过 `media.continue` 继续同一任务。提交前先保存状态；只有 Agnes 视频明确返回未接单的 `video_queue_full` 才自动重试（最多 3 次），耗尽后通过 `media.retry` 使用同一任务和原请求。普通 5xx、超时或缺少回执不重发。视频查询临时失败最多连续重试 5 次，单轮等待最多 10 分钟；临时下载错误最多重试 3 次，不回到生成阶段。
+
+远端回执、下载来源和成果沿用宿主 SQLite `media:` 记录及工作目录回执。重启时，有回执的未完成任务继续查询或保存；明确未提交的任务仅在原服务凭据仍匹配时继续提交，在途且无回执则标为未确认。`media.resume` 只使用原任务回执，不接收手填编号；停用仍可查询或下载已有任务，不再提交。主动“停止等待”保留记录，不等于远端取消。聊天任务卡读取最新任务状态，工具详情保留调用时快照，不改写历史或模型请求前缀。
+
+Agnes 图片与视频、火山方舟视频使用独立请求契约。OpenAI 兼容接口支持图片生成／编辑和视频理解；Videos 使用服务的创建／查询／内容接口，不能假定第三方完全实现相同协议。旧图片理解与音频适配保留用于已有任务恢复，但新工具 schema 不披露这些能力。服务要求 URL 的素材不自动上传，也不静默改用组合解析。任务状态、结果和恢复入口统一位于所属聊天。
+
+音视频成果复用宿主授权的 `cowork-local:` 文件协议，聊天与工作区提供播放器。协议保留范围请求头并启用流媒体能力，页面 CSP 仅增加本地媒体来源；解码不支持时保留文件与本机应用入口。
+
 ## 工作区与交付物
+
+### 文件身份与保存
 
 每个会话保存工作目录和文件身份。`core/file_capabilities.py` 为预览、编辑和文件链接提供共同注册表，`core/deliverable_editing.py` 维护编辑会话、内容快照及事务保存。
 
@@ -428,25 +393,45 @@ AI 在执行阶段自主判断是否调用 `update_experience(scope, experience,
 
 终端使用 ConPTY／POSIX PTY 和离线 xterm.js，后台线程读取，UI 分批呈现；Windows Job 或 POSIX 会话管理所属进程。Office 预览通过后台 helper 或可选 LibreOffice 生成阅读副本，`core/preview_versions.py` 按内容版本组织缓存，界面通过显式刷新加载新内容。
 
+### 页面渲染与成果审阅
+
 `document_render(path, pages?, source_version?)` 接受 DOCX/PPTX/PDF，复用 LibreOffice 转 PDF，再以随包 `pypdfium2==5.15.2` 生成最长边 2000 像素的 PNG，每批最多 4 页。返回 `page_count`、内容 SHA-256 `source_version`、`renderer`、页面路径与 `next_pages`，后续批次携带版本校验；Office 转换及 PDF 转图共用取消与超时边界。PDFium 每批在独立 Python 进程运行，不在多会话线程间共享原生对象。只写入工作目录下 `.cowork/document-previews/<会话摘要>/` 的独立预览批次，不修改源文件；失败清理本批缓存，清理失败同时报告。调用 `view_image` 检查页面后才能声称版式已核验。
 
 写作页在会话中维护标题、正文和恢复副本，首次保存创建 Markdown 文件。富编辑器使用隔离 iframe 与限定命令的父页面桥接，前端资源由 `web/editors/` 构建并随应用分发。
 
+### Git 工作目录变更
+
+`core/workspace_changes.py` 使用运行时 Git 只读查询当前目录相对 `HEAD` 的变化；没有提交时使用空树作为基线。范围包含已暂存、未暂存与未忽略的新文件，限制在当前工作目录。`desktop/src/WorkspaceChanges.tsx` 与回复摘要共享读取结果，文件差异可复用编辑器标签；切换差异视图保留编辑草稿。结果代表磁盘现状，不能归因为某一轮 AI 独自产生。
+
+### 浏览器后端与代码预览
+
+内置浏览器默认启用，外部 BrowserSkill 通过技能启停选择，新任务固定后端租约，运行中不改后端。内置自动化将动作派发与等待结果分开，明确已派发的动作不会因等待超时重发；不确定结果只限制原标签后续输入。语义定位、坐标局部画面校验、用户接管和取消复用同一操作边界。
+
+`desktop/electron/snippets.cjs` 隔离执行用户主动打开的 HTML/JavaScript 代码预览。历史载入与主题变化不执行源码，切换显示保留实例，重新运行重建实例；禁止联网、导航、Node 与宿主接口，输出和错误只作为界面状态，不写入消息事实或模型上下文。
+
 ## 后台任务与企业协作
 
-### daemon、常用与子任务
+### 常用任务与调度
 
-daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位置，schedule 附加触发方式，运行历史记录每次任务。
+`task-automation` 用七个有类型工具覆盖查询、读取、保存、计划设置、运行、历史与删除。工具适配器、`favorites.*` 桌面 RPC 与 `DesktopScheduler` 共用宿主 `TaskAutomationService`；技能实现不自行创建 ConfigManager，不返回仅供前端解释的启动指令。旧 favorites 存储键和任务 ID 保留，运行配置中的 `favorites-manager` 标识归一为新技能，历史消息不改写。
+
+任务编辑使用 revision 防止覆盖并发修改；保存与运行的逻辑操作标识用于回执丢失后的去重。定时触发先保存 `task_id + scheduled_at` 对应的持久领取记录，再创建独立会话并调用标准发送流程，接受回执才表示进入运行。重启核对真实运行状态，不自动重放结果不确定的外部操作。手动任务正文与计划专用正文／交付配置分开，纯技能组合只创建待输入会话。运行记录保留任务版本、模型 ID、所选技能说明摘要与会话 ID，当前审批和运行控制仍走普通 Agent。
+
+新计划保存 IANA 时区，旧计划保留 `local` 及已有下次触发时间。绝对时间要求偏移，相对时间由后端计算；夏令时缺失时刻跳过并记录诊断，重复墙钟时刻只执行一次，每月日期超过当月天数时取月末。Windows 发行物包含 `tzdata`，发行检查拒绝残留旧技能目录。
 
 计划消息投递通过独立持久化作业处理：最终回答保存后入队，渠道网关消费作业并记录分段回执。任务终态与投递终态分别保存。
 
-`SessionAgentManager` 为子任务维护独立运行上下文与消息队列，父会话接收汇总结果，子会话保存完整过程。
+### 消息接入与子任务
 
-### 消息、资料和企业中心
+桌面与计划任务由本地服务调用统一运行核心，daemon 提供消息渠道的跨进程适配。
 
 `core/im_gateway_registry.py` 用 `ProviderSpec` 注册消息渠道及其配置、启动和交付能力。
 
-本地资料库按已登记项目及聊天工作目录汇总文件，按规范路径去重并排除已归档项目，不搬动原文件；添加到聊天复用附件提交边界。远程资料库通过各来源适配器访问 WeKnora、腾讯文档和乐享。任务提交时绑定来源、身份和选定资料范围；目录和正文缓存按身份与授权代次组织。
+`SessionAgentManager` 为子任务维护独立运行上下文与消息队列，父会话接收汇总结果，子会话保存完整过程。
+
+### 资料库与企业中心
+
+公共资料由 `core/local_library.py` 管理，支持导入、目录编辑、剪切复制及应用内回收站；文件与原件分开保存。项目资料按已登记项目及聊天工作目录汇总文件，按规范路径去重并排除已归档项目，不搬动原文件；添加到聊天复用附件提交边界。远程资料库通过各来源适配器访问 WeKnora、腾讯文档和乐享。任务提交时绑定来源、身份和选定资料范围；目录和正文缓存按身份与授权代次组织。
 
 企业中心采用 FastAPI、PostgreSQL 和同源静态页面，处理认证、模型授权与代理、提问记录、客户端分发及团队空间。空间共享对象保存在中心，本机任务在桌面运行。服务部署和配置见[企业平台说明](../web/platform/README.md)。
 
@@ -458,11 +443,52 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 
 设置保存按配置、记忆和外观分区处理。配置使用 `batch_save`，记忆按作用域写入，外观提交主题状态并刷新界面。管理表单将浏览位置、保存基准和实际修改分开：切换消息渠道不会改变启停配置；新草稿只恢复相对基准的修改字段。缺少可信基准的旧消息连接草稿由用户主动恢复或丢弃，不自动覆盖已保存配置。密码不写入持久化恢复副本。
 
-`VariableStore` 独立保存变量，敏感值通过共享凭据保护接口加密。`lookup_app_variable` 按明确名称和授权读取变量。资料库和脱敏映射复用该接口，企业账号在本轮继续沿用 Windows 实现。
+`VariableStore` 独立保存变量，敏感值通过共享凭据保护接口加密。`lookup_app_variable` 按明确名称和授权读取变量。资料库和脱敏映射复用该接口，企业账号凭据目前使用 Windows 实现。
 
 数据安全宿主位于 `core/data_security.py`，插件位于 `bundled_plugins/data_security/`，提供任务策略、能力检查、请求投影和参数处理。启用后在附件展开与 SDK 发送之间处理用户及工具文本副本，会话令牌映射独立保存。
 
 ## 构建与发布
+
+### 开发与 Windows 构建
+
+准备现有 Python 依赖和固定运行时后，安装前端依赖并启动：
+
+```powershell
+npm --prefix desktop ci
+npm --prefix web/editors ci
+node desktop/node_modules/electron/install.js
+.\.venv\Scripts\python.exe scripts/run_desktop.py
+# 已构建界面时可加 --no-build；--data-dir 指定隔离数据目录。
+```
+
+当前 Electron 45 的 npm 包与可执行运行时分开安装。`npm ci` 完成后仍需执行上述 `install.js`；安装器按包内摘要校验下载或缓存的压缩包。下载失败时保留错误并修复网络或提供同版本已校验缓存，不能把 npm 依赖安装成功当作桌面运行环境就绪。
+
+Windows 构建沿用 `deepseek-cowork.spec` 的依赖和资源；只使用独立服务入口，显式排除 Qt 绑定、插件和旧界面，再由 Electron Packager 组装目录。版本读取 `core/app_version.py` 的 `APP_VERSION`。
+
+BrowserSkill 的 CLI 与扩展固定为 0.5.0。升级时须同步 `core/browser_skill_component.py`、`resources/browser_skill/bundle.json`、`scripts/fetch_runtimes.ps1`、`deepseek-cowork.spec` 与 `scripts/package_release.py` 的版本、归档名、下载地址及 SHA-256；构建和发行审计均拒绝不一致或损坏的资源。打包只收集清单与许可证及其中指定的两个 ZIP，本地缓存的旧版本不会进入发行包。`test/test_packaging_runtime.py` 核对上述五处的一致性，`test/test_package_release.py` 使用真实清单生成隔离夹具并验证发行审计。
+
+文档和数据分析依赖统一放在随包 `python_env`。`requirements-data-analysis.txt` 锁定数据分析库及完整传递依赖，由 `requirements.txt` 引入；spec 核验构建环境版本并收集包文件、元数据、原生库与资源。生成 ZIP 前，`scripts/package_release.py` 使用随包 Python 在隔离目录验证导入、科学计算、机器学习、并行 worker、图表与 Office/PDF 文件读写；失败阻止出包。应用不再提供组件管理页、下载源或安装超时配置，也不加载旧工具包目录。通用 Python 工具优先使用随包库，第三方技能保留独立依赖环境与内部默认安装参数。
+
+Electron 启动服务时通过 `COWORK_ELECTRON_EXE` 传递自身可执行文件，通用 JavaScript 工具可复用宿主 Node.js。版本探测和实际执行仅对目标子进程设置 `ELECTRON_RUN_AS_NODE=1`，Python、Bash 与桌面宿主不继承该模式。`run_node_code` 保留原进程取消和输出路径；npm/npx 的交付范围不变。独立运行 Python 服务且没有 Electron 宿主时，仍可显式配置独立 Node.js。
+
+```powershell
+$env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
+npm --prefix desktop run package:win
+```
+
+如果默认输出目录中的程序正在使用，先设置 `$env:COWORK_PACKAGE_OUT_DIR = (Join-Path (Get-Location) 'dist/desktop-release')` 再构建，避免覆盖运行中的安装目录。该目录同时接收完整程序、ZIP 和清单；不要直接覆盖员工正在使用的安装目录。
+
+输出为 `desktop/out/DeepSeek Cowork-win32-x64/deepseek-cowork.exe`，必须保留相邻文件和 `resources/service`；同时生成 `cowork-desktop-v版本号-windows-x64.zip` 和 `latest-desktop-windows-x64.json`。ZIP 内顶层目录为 `Cowork`，成员路径最多 185 个 UTF-16 代码单元，为资源管理器的目标目录留出余量。打包排除用户数据、Python 字节码缓存和 Qt 运行时。应用显示名为 DeepSeek Cowork，可执行文件为 `deepseek-cowork.exe`；更新器按应用结构识别新旧包，也兼容早期 Electron 包的 `Cowork.exe` 入口。Windows 旧运行日志的按需读取在文件 I/O 边界使用扩展路径，不依赖系统开启长路径策略，持久化配置仍保存普通绝对路径。新包必须带 `desktop-release.json`；更新清单使用 `app_layout: electron`，在线地址为 `updates/desktop-windows-x64/latest.json`，与旧版更新源隔离。设置页支持检查、准备本地包和重启更新，沿用校验、保存退出、替换、启动确认与回滚事务。打包不会执行签名或公开发布；Mac 与 Linux 的新宿主安装包仍待目标系统验证。
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s test -p test_desktop_service.py -v
+npm --prefix desktop test
+npm --prefix desktop run build
+# 在与源码无关的工作目录验证冻结服务：
+$env:COWORK_TEST_DESKTOP_SERVICE = (Resolve-Path "desktop/out/DeepSeek Cowork-win32-x64/resources/service/cowork-service.exe").Path
+.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s test -p test_desktop_service.py -v
+Remove-Item Env:COWORK_TEST_DESKTOP_SERVICE
+```
 
 ### 桌面发行包
 
@@ -488,7 +514,7 @@ daemon 托管 Worker 和事件流。常用项保存 prompt、能力与执行位�
 
 ```text
 updates/desktop-windows-x64/latest.json
-updates/desktop-windows-x64/cowork-desktop-v5.4.1-windows-x64.zip
+updates/desktop-windows-x64/cowork-desktop-v5.4.2-windows-x64.zip
 ```
 
 清单字段如下：
@@ -501,23 +527,29 @@ updates/desktop-windows-x64/cowork-desktop-v5.4.1-windows-x64.zip
 | `target_os` / `arch` | `windows` / `x64` |
 | `filename` | `cowork-desktop-v版本号-windows-x64.zip` |
 | `size` / `sha256` | ZIP 实际字节数和 SHA-256 |
-| `notes` | `docs/releases/版本号.md` 全文，本版为 `docs/releases/5.4.1.md` |
+| `notes` | `docs/releases/版本号.md` 全文，本版为 `docs/releases/5.4.2.md` |
 
 发布顺序为：确定版本与说明 → 构建 EXE → 打包并审计 → GitHub Release 附加 ZIP 和清单 → 公共服务器上传同一 ZIP → 原子替换清单。GitHub 标签采用 `v版本号`。
 
 `DesktopUpdates` 持有同一个 `UpdateCoordinator`，设置页与侧栏经宿主状态订阅增量及快照；修订号防止迟到响应覆盖新状态。完整 Windows 包启动后延迟 15 秒恢复缓存或检查，每 24 小时再检查；开发运行只查询版本。取消、关闭提示和安装均为显式操作。
 
-准备清单持久化在渠道缓存目录，缓存绑定渠道、企业身份及来源配置，ZIP 按版本和摘要校验。重启和安装前都从校验过的 ZIP 重新解压，不能信任旧暂存目录。安装事务和日志仍在稳定根目录。用户选择的本地包先复制进托管缓存，按包内 `desktop-release.json` 判断版本、结构与平台，允许同版本重装、禁止降级；企业身份与当前发行一致。本地准备不查询网络，无法离线确认管理员撤回状态。
+准备清单持久化在渠道缓存目录，绑定安装目录、渠道、企业身份及来源配置。`core/desktop_update_payload.py` 按 ZIP 文件清单与当前文件生成变更计划，只准备需要替换的文件；旧包无清单时逐项读取 ZIP 建立同一计划。重启核验准备记录及文件摘要后复用暂存内容，安装前再次校验计划与来源，不能无条件信任缓存。安装事务与诊断日志保留在稳定根目录。同版本本地包逐项核对以修复缺失或损坏文件，低版本拒绝；企业身份须与当前发行一致，本地准备不查询网络，不能离线确认管理员撤回状态。
 
-用户触发安装后，宿主保存协调器保留草稿、编辑和设置恢复副本；宿主在请求前生成事务编号，服务端原子关闭新任务入口并立即接受准备请求，耗时工作沿用 `UpdateCoordinator`。宿主每 250 ms 查询同一事务，准备不占用一次 60 秒 RPC；30 秒未收到查询或准备超过 10 分钟会撤销。取消与提交在同一短锁内决定，耗时工作不持有该锁；提交前可取消，取消完成须等准备线程及独立安装器退出，随后解除输入限制。迟到准备结果不能启动已取消的事务。启动扫描撤销未提交的中断准备，已提交安装不重新执行。
+用户触发安装后，宿主保存协调器保留草稿、编辑和设置恢复副本；宿主在请求前生成事务编号，服务端原子关闭新任务入口并立即接受准备请求，文件比对已在后台准备阶段完成，安装阶段通过 `begin_desktop_install` 领取已准备计划。宿主每 250 ms 查询同一事务；30 秒未收到查询会撤销，取消持续传递到计划校验和安装器准备，移除原重复准备流程的固定 10 分钟等待。取消与提交在同一短锁内决定，耗时工作不持有该锁；提交前可取消，取消完成须等准备线程及独立安装器退出，随后解除输入限制。迟到准备结果不能启动已取消的事务。启动扫描撤销未提交的中断准备，已提交安装不重新执行。
 
 独立安装器 ready 握手完成后，宿主再次保存草稿，服务保存退出成功后才写入 commit。提交结果丢失时核对持久 commit，不盲目撤销或重新提交。安装器等待提交最多 60 秒，收到提交后等待原主进程退出最多 45 秒，超时不得直接替换仍在使用的文件。替换、备份、复制、哈希、删除及回滚均使用 Windows 扩展路径；Restart Manager 不支持的超长文件用独占文件访问检查占用。
 
 Electron 单实例通过 `additionalData` 转交更新启动请求，窗口实际就绪后由服务核验安装目录、事务、提交状态和实际版本；宿主与服务版本必须一致。启动进程退出码为 0 不能代替回执。更新成功，或失败回滚后旧版确认打开，安装器自动退出；无法打开／无法恢复时保留可见窗口和“结束更新”。关闭与异常退出在 `finally` 中释放互斥锁和窗口资源，失败退出码不冒充成功。失败原因持久保留并在更新页展示，成功重试覆盖先前失败结果。
 
+### 历史兼容与退役资源
+
+历史消息、配置和用户资产按各自存储边界保留，兼容读取不重新启用退役执行路径。文档技能使用 `documents`，旧 `document-reader` ID 没有别名或自动迁移；常用任务保留原存储键及任务 ID，运行配置中的旧技能标识归一为 `task-automation`。
+
+专门的 PPT 助手已下线，Frontend Slides 不再随包提供。旧会话的 PPT 元数据和内部阶段消息仍按历史兼容规则读取；新任务丢弃旧 PPT 专属运行参数，并停用由旧模式带来的 HTML-first 工作流。界面提前说明后续使用普通对话，不改写已有消息或文件。系统稳定提示词、普通工具定义及顺序保持原样；Huashu Design、Guizang PPT 不再内置；用户自行安装的副本仍按普通技能规则管理。重新打包时必须重建冻结服务，发行审计会拒绝包含旧 Frontend Slides 资源的构建目录。
+
 ### Mac 与统信原生构建
 
-本轮交付范围为 Windows。Mac 与统信保留共享业务和平台边界，Electron 安装包、签名、公证和更新仍需在目标系统实现与验收；Linux 容器检查不能替代统信实机验收。
+桌面发行目标为 Windows。Mac 与统信保留共享业务和平台边界，Electron 安装包、签名、公证和更新仍需在目标系统实现与验收；Linux 容器检查不能替代统信实机验收。
 
 Mac／统信的新宿主发行流程尚待实现。构建应在目标 CPU 和系统进行，组合 Python 服务与对应 Electron 运行时，沿用运行时清单的来源和摘要校验；旧发行流程可通过 Git 历史查阅。
 

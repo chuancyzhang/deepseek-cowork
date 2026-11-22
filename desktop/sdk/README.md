@@ -1,23 +1,19 @@
 # Cowork UI SDK 2
 
+文档适用版本：**5.4.2**；界面协议仍为 **SDK 2**。
+
 界面插件组合现有业务能力。执行扩展仍使用 Tool、Skill 或 MCP；界面插件不直接调用模型、访问数据库或维护第二套发送队列。
+
+开发顺序：选择贡献点 → 声明能力 → 调用宿主 SDK → 预览并检查 → 应用。自动试跑细节见[实时预览](live-preview.md)，业务运行与发布边界见[技术文档](../../docs/technical-design.md)。
 
 ## 从示例开始
 
-在“能力 → 插件 → 添加本地插件”或“创造模式 → 插件”中选择以下目录，预览后应用：
+在“能力 → 界面插件 → 添加本地插件”或“创造模式 → 插件”中选择以下目录，预览后应用：
 
 - [完整工作台](../examples/workbench)：对话选择、输入、发送与停止，复用宿主草稿。
 - [任务笔记](../examples/panel)：追加任务面板、替换文本编辑器并注册菜单命令。
 
-示例只使用包内资源，可直接安装。修改后重新选择目录生成新候选，预览和应用固定为同一份内容快照。包内 `client.js` 来自本目录，更新 SDK 时同时更新示例。内置工作台的 React 源码在 `src/plugins/BuiltinWorkbench.tsx`；其清单是宿主注册描述，不是可单独导出的完整网页。
-
-## 创造模式与模式插件
-
-“+ → 模式 → 创造模式”由内置 `cowork.creation` 插件提供。宿主创建独立设计会话，把 SDK 和工作台示例放在该会话的 `reference/sdk`、`reference/workbench`。AI 用 `apply_patch` 提交 `interface/` 中的候选，宿主试跑该快照并回传实际画面、操作检查和错误。试跑通过的候选出现在预览区，用户可以应用该快照。设计请求作为该会话的用户任务发送。 [实时预览与顶部工具栏](live-preview.md)
-
-内置 `cowork.grilling` 注册运行策略，负责拷问提示、问卷校验及确认执行的状态迁移。`core/mode_plugins.py` 统一提供模式描述和启停目录，插件管理与输入区读取同一目录。启停仅约束新任务，运行实例保留原策略；消息、提交队列、权限和恢复仍由宿主管理。
-
-模式插件是随应用交付的宿主扩展；外部 SDK 2 包继续使用下表中的界面贡献点，不能通过清单注入运行策略。创造模式复用现有 `PluginRegistry` 的快照、就绪检测、保存及安装事务，不另建发送链路。主题候选按设计会话保存，应用使用候选 ID 和 revision 校验；跨会话不能应用或丢弃另一份候选。
+示例只使用包内资源，可直接安装。修改后重新选择目录生成新候选，预览和应用固定为同一份内容快照。包内 `client.js` 来自本目录，更新 SDK 时同时更新示例。内置工作台的 React 源码在 [BuiltinWorkbench.tsx](../src/plugins/BuiltinWorkbench.tsx)；其清单是宿主注册描述，不是可单独导出的完整网页。
 
 ## 清单与包
 
@@ -76,7 +72,7 @@ send.addEventListener('click', () => cowork.runs.send().catch(showError));
 | --- | --- | --- |
 | conversations、projects、history | conversations.read / conversations.write | 读取、选择、重命名、归档、分支、带版本守卫的历史修订 |
 | runs、tasks | runs.control，读取任务需 conversations.read | 发送宿主草稿、停止指定运行、回复交互、查看子任务 |
-| drafts | drafts.read / drafts.write | 修改宿主草稿；save 等待版本回执；send 共用原发送队列 |
+| drafts | drafts.read / drafts.write | 修改宿主草稿；save 等待本机恢复副本写入；send 共用原发送队列 |
 | editors | document.read / document.edit；打开文件需 files.read | 编辑会话属于宿主；change 只改草稿，save 才写入文件 |
 | files | files.read / files.write | 限定工作目录与现有文件能力 |
 | management | management.read / management.write | `ManagementRead/Write` 明确枚举操作，不接受任意 RPC 名称 |
@@ -96,6 +92,14 @@ send.addEventListener('click', () => cowork.runs.send().catch(showError));
 切换、重载、退出和更新共用保存协调。恢复副本与正式文件／设置保存边界不同；插件不应把保留恢复副本显示成“文件已保存”。`state.change` 仅更新视图状态，不能存放第二套会话历史、运行状态或发送队列。
 
 停用与恢复内置界面由独立宿主入口提供。恢复上一版只恢复代码，不回滚用户数据。`hostApi: 1` 仅适配内置 `cowork.writing` 的 `document.read/change/save/render`，新插件使用版本 2。
+
+## 创造模式与模式插件
+
+“+ → 模式 → 创造模式”由内置 `cowork.creation` 插件提供。宿主创建独立设计会话，把 SDK 和工作台示例放在该会话的 `reference/sdk`、`reference/workbench`。AI 用 `apply_patch` 提交 `interface/` 中的候选，宿主试跑该快照并回传实际画面、操作检查和错误。试跑通过的候选出现在预览区，用户可以应用该快照。设计请求作为该会话的用户任务发送。 [实时预览与顶部工具栏](live-preview.md)
+
+内置 `cowork.grilling` 注册运行策略，负责拷问提示、问卷校验及确认执行的状态迁移。`core/mode_plugins.py` 统一提供模式描述和启停目录，插件管理与输入区读取同一目录。启停仅约束新任务，运行实例保留原策略；消息、提交队列、权限和恢复仍由宿主管理。
+
+模式插件是随应用交付的宿主扩展；外部 SDK 2 包继续使用下表中的界面贡献点，不能通过清单注入运行策略。创造模式复用现有 `PluginRegistry` 的快照、就绪检测、保存及安装事务，不另建发送链路。主题候选按设计会话保存，应用使用候选 ID 和 revision 校验；跨会话不能应用或丢弃另一份候选。
 
 ## 验证
 

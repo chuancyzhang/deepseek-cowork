@@ -1,8 +1,8 @@
 # Cowork 企业平台
 
-文档适用版本：**5.4.1**
+文档适用版本：**5.4.2**
 
-企业平台提供统一认证、成员与模型授权、客户端分发、企业提问查询和团队空间。桌面使用方法见[用户手册](../../docs/user-guide.md#企业账号与团队空间)。
+企业平台面向管理员集中管理账号、成员与模型授权、客户端分发、企业提问查询和团队空间。员工在桌面运行任务，平台管理授权与共享对象；两者通过认证接口连接。桌面使用方法见[用户手册](../../docs/user-guide.md#企业账号与团队空间)。
 
 `web/platform/` 是可独立复制的部署单元，由 FastAPI、PostgreSQL、同源静态页面和业务文件目录组成：
 
@@ -13,9 +13,18 @@
 | `compose.yaml` | Linux 服务、数据库与 HTTPS 代理 |
 | `compose.local.yaml` | Windows 本机 Docker 启动配置 |
 
-## Windows 本机 Docker 启动
+部署顺序是选择环境、准备服务与数据库、初始化账号和模型、分发客户端，最后安排备份与升级。桌面包与企业中心离线包是两个交付物：更新桌面版本不会自动升级中心。
 
-企业中心只分发 Windows x64 Electron 客户端；不再提供 Qt 包、Qt 推荐渠道或跨架构升级。账号、模型授权和团队空间独立于客户端发行格式。
+| 部署场景 | 阅读入口 |
+| --- | --- |
+| Windows 本机或离线交付 | [Windows Docker](#windows-本机-docker-启动) |
+| Linux 服务器与 HTTPS | [Linux 部署](#linux-部署) |
+| 反向代理子路径或原生进程 | [其他部署方式](#子路径与原生进程部署) |
+| 服务已经启动 | [初始化与成员管理](#初始化与成员管理) |
+| 给员工发布桌面包 | [客户端分发](#客户端分发) |
+| 备份、升级与诊断 | [日常运维](#日常运维) |
+
+## Windows 本机 Docker 启动
 
 源码部署先在此目录执行 `docker compose --env-file .env.local -f compose.local.yaml build platform`（首次尚无 `.env.local` 时使用 `docker build -t cowork-enterprise:local .`）。离线部署使用下节生成的完整交付包。随后执行：
 
@@ -39,23 +48,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\dist\enterprise-docker\sta
 产物为 `dist/enterprise-docker/` 与 `dist/cowork-enterprise-docker.zip`。打包从当前源码快照重新构建服务镜像，逐文件比对镜像中的源码，检查数据库版本及 Electron 分发能力，然后导出镜像、源码、启动脚本和校验清单。镜像标签包含应用版本及源码摘要；不复用可变的旧 `cowork-enterprise:local` 标签，不自动升级已有 PostgreSQL 镜像。
 
 打包只放行部署源码，排除 `.env.local`、密钥、业务数据和缓存；交付目录含本机配置或未知文件时拒绝覆盖。生产环境配置、数据库和文件卷不进入分发包。
-
-停止与再次启动：
-
-```powershell
-docker compose --env-file .env.local -f compose.local.yaml stop
-powershell -NoProfile -ExecutionPolicy Bypass -File .\start-local.ps1
-```
-
-服务端代码升级时，先构建镜像，再停止应用并完成业务备份，然后启动新服务：
-
-```powershell
-docker compose --env-file .env.local -f compose.local.yaml build platform
-docker compose --env-file .env.local -f compose.local.yaml stop platform
-docker compose --env-file .env.local -f compose.local.yaml up -d --no-deps --wait platform
-```
-
-离线升级时将新包解压到新目录，把原 `.env.local` 原样复制过去；停止原平台并按“日常运维”备份后，运行新包 `start-local.ps1`。Compose 项目名和卷名保持一致，不新建账号库，不重置加密密钥。结构迁移到版本 4 后不能直接换回旧中心镜像；如需恢复，应配套恢复升级前数据库和文件卷。
 
 ## Linux 部署
 
@@ -91,6 +83,20 @@ sh start.sh
 ```
 
 启动会检查数据库迁移。随后打开 `/app` 初始化管理员，配置认证、模型与成员授权。
+
+## 子路径与原生进程部署
+
+子路径可配置为 `COWORK_PUBLIC_URL=https://企业域名/cowork`。代理统一处理此前缀，并检查对应的登录、静态资源和下载地址。
+
+原生部署在独立 Python 3.12 环境执行：
+
+```bash
+python -m pip install -r requirements.txt
+python -m server migrate
+python -m server serve --host 127.0.0.1 --port 8080
+```
+
+配置相同的 `COWORK_*` 变量并指定绝对路径 `COWORK_DATA_DIR`。使用 systemd 等管理单进程服务，在前方配置 HTTPS 代理。
 
 ## 初始化与成员管理
 
@@ -147,21 +153,11 @@ OAuth2 来源使用 `mode: "oauth2"`。在表单和高级配置中填写 `author
 
 LDAP 使用 `mode: "ldap"`，填写 `host`、`port`、`tls`（`ldaps` 或 `starttls`）、`base_dn`、`user_filter`（如 `(uid={username})`）、`identity_attribute`（如 `entryUUID`），按需配置 `bind_dn` 和容器内 `ca_file`。查询密码保存为 `secrets.bind_password`。
 
-## 子路径与原生进程部署
-
-子路径可配置为 `COWORK_PUBLIC_URL=https://企业域名/cowork`。代理统一处理此前缀，并检查对应的登录、静态资源和下载地址。
-
-原生部署在独立 Python 3.12 环境执行：
-
-```bash
-python -m pip install -r requirements.txt
-python -m server migrate
-python -m server serve --host 127.0.0.1 --port 8080
-```
-
-配置相同的 `COWORK_*` 变量并指定绝对路径 `COWORK_DATA_DIR`。使用 systemd 等管理单进程服务，在前方配置 HTTPS 代理。
-
 ## 客户端分发
+
+分发目标为 Windows x64 Electron 客户端，按企业发行身份提供推荐版本；账号、模型授权和团队空间独立于客户端发行格式。
+
+先构建标准桌面 ZIP，再由中心校验、封装为企业包，最后由管理员发布推荐。源码版本号、本地构建和员工可下载的推荐版本应分别核对。
 
 Windows 标准客户端按[构建说明](../../docs/technical-design.md#构建与发布)生成 ZIP 和 `latest-desktop-windows-x64.json` 更新清单（也可使用显式生成的审计报告）。平台管理员执行：
 
@@ -194,7 +190,9 @@ docker compose run --rm platform python -m server migrate
 
 ## 日常运维
 
-启动或更新代码后运行 `sh start.sh`，使用以下入口查看状态和日志：
+### 状态与日志
+
+Linux 部署启动或更新代码后运行 `sh start.sh`，使用以下入口查看状态和日志：
 
 ```bash
 docker compose ps
@@ -204,6 +202,8 @@ docker compose stop
 
 健康检查 `/healthz` 返回实际数据库结构版本；`/api/v1/platform-info` 提供客户端分发能力，以及通过交付脚本构建的镜像版本和源码摘要。管理页面显示客户端处理状态和提问清理状态。
 
+### 业务备份
+
 业务数据库备份使用排除提问正文的命令，并在停止写入期间备份业务文件卷，独立保管加密密钥：
 
 ```bash
@@ -211,3 +211,23 @@ docker compose exec -T database pg_dump -U cowork -d cowork -Fc --exclude-table-
 ```
 
 开发测试入口统一维护在[技术文档](../../docs/technical-design.md#开发与测试)。
+### Windows 本机启停与升级
+
+以下命令在 Windows 部署目录执行，沿用 `.env.local` 与 `compose.local.yaml`。
+
+停止与再次启动：
+
+```powershell
+docker compose --env-file .env.local -f compose.local.yaml stop
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start-local.ps1
+```
+
+服务端代码升级时，先构建镜像，再停止应用并完成业务备份，然后启动新服务：
+
+```powershell
+docker compose --env-file .env.local -f compose.local.yaml build platform
+docker compose --env-file .env.local -f compose.local.yaml stop platform
+docker compose --env-file .env.local -f compose.local.yaml up -d --no-deps --wait platform
+```
+
+离线升级时将新包解压到新目录，把原 `.env.local` 原样复制过去；停止原平台并按“日常运维”备份后，运行新包 `start-local.ps1`。Compose 项目名和卷名保持一致，不新建账号库，不重置加密密钥。结构迁移到版本 4 后不能直接换回旧中心镜像；如需恢复，应配套恢复升级前数据库和文件卷。

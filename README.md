@@ -6,23 +6,19 @@ DeepSeek Cowork is a local Windows desktop agent workspace that brings conversat
 
 This is an independent personal project, unaffiliated with DeepSeek.
 
-Documented version: **5.4.1** · [Version notes](docs/releases/5.4.1.md) · [Release history](docs/releases/index.md)
+Documented version: **5.4.2** · [Version notes](docs/releases/5.4.2.md) · [Release history](docs/releases/index.md)
 
 ## What you can do
 
 - **Conversations and projects**: separate chat directories, project sessions, history search, guidance during execution, execution details, and subtasks.
-- **Files and deliverables**: file and image attachments, Office previews, text and spreadsheet editing, HTML drafts, Markdown writing pages, and Office/PDF output.
-- **Analysis and media**: bundled Python libraries for data analysis, Mermaid diagrams, interactive visualizations, and an optional multimedia plugin with separately configured services.
+- **Files and deliverables**: file and image attachments, Office previews, text and spreadsheet editing, HTML drafts, Markdown writing pages, Office/PDF output, and Git working-directory diffs.
+- **Analysis and media**: bundled Python libraries for data analysis, Mermaid diagrams, interactive visualizations, and a multimedia Skill with separately configured image and video services.
 - **Specialized capabilities**: built-in and optional Skills, SkillHub installation, MCP services, conversation experts, and browser automation.
 - **Knowledge and collaboration**: local project files, WeKnora, Tencent Docs, Lexiang, enterprise accounts and models, and team spaces.
 - **Recurring work**: saved tasks, schedules, messaging channels, and scheduled result delivery.
 - **Personalization**: themes, AI theme design, Visualize, long-term memory, and an Experience System.
 
-Version 5.4.1 bundles data-analysis dependencies and commonly used Skills, adds Office and Skill draft review with generation task cards, and improves diagrams, image interactions, browser automation, and update recovery. The version and documentation are ready; the 5.4.1 package still requires a build and release validation before publication.
-
 ## Get started
-
-This branch uses Electron + React/TypeScript + Python + SQLite. The default entry launches Electron; the runtime and Windows service package do not require Qt. Conversations, workspace tools, categorized Skills and SkillHub, management pages, and appearance settings use the new host. See the [workspace guide](docs/user-guide.md#新版-windows-工作台) and [development/build instructions](docs/technical-design.md#electron-工作台). Native validation and releases for Apple Silicon macOS and UOS V25 are pending.
 
 1. Extract the complete `cowork-desktop-vVERSION-windows-x64.zip` build and run `deepseek-cowork.exe`. Local builds are not automatically published to [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases); older releases retain their old entry point.
 2. Add a service and model under Settings → Models & Services, or sign in to an enterprise account. Production builds use the original configuration, conversation database, attachments, and workspaces in place; no copy or manual import is required.
@@ -31,9 +27,11 @@ This branch uses Electron + React/TypeScript + Python + SQLite. The default entr
 
 See the [user guide](docs/user-guide.md) for detailed instructions in Chinese.
 
-The [UI SDK](desktop/sdk/README.md) supports complete workbenches, pages, panels, editors, commands, and menus. The stable host preserves drafts and unsaved edits while background tasks continue through plugin changes.
+The [UI SDK](desktop/sdk/README.md) supports complete workbenches, pages, panels, editors, commands, and menus. Creation mode previews and tests candidates before application. The stable host preserves drafts and unsaved edits while background tasks continue through plugin changes.
 
 ## Run from source
+
+The desktop uses Electron + React/TypeScript for the interface and native integration, Python for models and tools, and SQLite for local history. See the [workspace guide](docs/user-guide.md#认识工作台) and [development/build instructions](docs/technical-design.md#构建与发布). Windows is the current delivery target; Apple Silicon macOS and UOS V25 releases require target-system validation.
 
 Use Python 3.12+ (the current Windows release uses 3.14) and Node.js 22.12+ with npm. Desktop JavaScript tools can reuse Electron's Node.js runtime; npm for source builds must still be installed separately. Run these commands from the repository root:
 
@@ -58,7 +56,7 @@ $env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
 npm --prefix desktop run package:win
 ```
 
-Packaging produces `desktop/out/DeepSeek Cowork-win32-x64`, a distributable ZIP, and `latest-desktop-windows-x64.json`. Updates distinguish Electron packages from legacy layouts. Signing and publication are separate steps. See [build and release instructions](docs/technical-design.md#electron-工作台).
+Packaging produces `desktop/out/DeepSeek Cowork-win32-x64`, a distributable ZIP, and `latest-desktop-windows-x64.json`. Updates distinguish Electron packages from legacy layouts. Signing and publication are separate steps. See [build and release instructions](docs/technical-design.md#构建与发布).
 
 ## Design principles
 

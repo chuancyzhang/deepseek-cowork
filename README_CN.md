@@ -6,34 +6,32 @@ DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，将对话、
 
 本项目为个人探索，与 DeepSeek 官方无隶属关系。
 
-当前分支使用 **Electron + React / TypeScript + Python + SQLite** 桌面架构，默认入口已切换，Windows 运行与打包不再依赖 Qt。对话、工作区、技能分类与 SkillHub、管理页面及外观设置的入口见[用户手册](docs/user-guide.md#新版-windows-工作台)，源码启动与构建见[技术文档](docs/technical-design.md#electron-工作台)。新宿主的 Apple Silicon Mac 与统信 V25 安装包仍待目标系统验收。
-
-文档适用版本：**5.4.1** · [本版说明](docs/releases/5.4.1.md) · [发布记录](docs/releases/index.md)
+文档适用版本：**5.4.2** · [本版说明](docs/releases/5.4.2.md) · [发布记录](docs/releases/index.md)
 
 ## 可以完成什么
 
 - **对话与项目工作**：独立聊天目录、项目会话、历史搜索、运行中补充要求、执行详情与子任务。
-- **文件与交付物**：文件和图片附件、办公文档预览、文本与表格编辑、HTML 工作稿、Markdown 写作页及 Office/PDF 输出。
+- **文件与交付物**：文件和图片附件、办公文档预览、文本与表格编辑、HTML 工作稿、Markdown 写作页、Office/PDF 输出及 Git 工作目录差异。
 - **分析与多媒体**：随包数据分析依赖、Mermaid 流程图、交互可视化，以及在技能中启用并配置模型的多媒体能力。
 - **专业能力**：内置与可选 Skill、SkillHub 安装、MCP 服务、会话专家和浏览器自动化。
 - **资料与协作**：本地项目资料汇总、WeKnora、腾讯文档、乐享资料库，以及企业账号、企业模型和团队空间。
 - **重复任务**：常用任务、定时计划、消息渠道与计划结果投递。
 - **个性化**：主题、AI 主题设计、Visualize、长期记忆与经验系统。
 
-5.4.1 内置数据分析依赖与常用技能，统一办公稿和 Skill 草稿审阅及生成任务卡片，完善流程图、图片交互、浏览器操作和更新恢复。版本号与文档已就绪；5.4.1 安装包仍待构建、成品验收和公开发布。
-
 ## 开始使用
 
-1. 新架构构建包为 `cowork-desktop-v版本号-windows-x64.zip`，完整解压后运行 `deepseek-cowork.exe`。本地构建不会自动发布到 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases)，旧版下载包仍使用旧入口。
+1. Windows 发行包为 `cowork-desktop-v版本号-windows-x64.zip`，完整解压后运行 `deepseek-cowork.exe`。本地构建不会自动发布到 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases)，旧版下载包仍使用旧入口。
 2. 到“设置 → 模型与服务”添加服务和模型，也可登录企业账号。正式包直接使用原配置、会话库、附件和工作区，保留历史及草稿，无需复制或手工导入。
 3. 新建聊天，添加资料并描述任务；处理固定项目时先选择项目目录。
 4. 查看回答与执行过程，在右侧工作区打开、编辑和保存成果。
 
 详细操作见[用户手册](docs/user-guide.md)。
 
-界面可通过 [UI SDK](desktop/sdk/README.md) 整体替换工作台，或组合页面、面板、编辑器及菜单。运行、草稿和未保存编辑由稳定宿主持有，切换插件不重启任务。
+创造模式可先用示例内容试跑界面候选，再由用户应用。界面也可通过 [UI SDK](desktop/sdk/README.md) 整体替换工作台，或组合页面、面板、编辑器及菜单。运行、草稿和未保存编辑由稳定宿主持有，切换插件不重启任务。
 
 ## 从源码运行
+
+桌面采用 **Electron + React / TypeScript + Python + SQLite**：Electron 承载原生窗口与网页，React 组织界面，Python 执行模型与工具，SQLite 保存本机历史。操作见[工作台介绍](docs/user-guide.md#认识工作台)，开发入口见[技术文档](docs/technical-design.md#构建与发布)。当前发行目标为 Windows；Apple Silicon Mac 与统信 V25 仍需完成目标系统发行与验收。
 
 使用 Python 3.12+（当前 Windows 发行包使用 3.14）和带 npm 的 Node.js 22.12+，在仓库根目录执行。桌面的 JavaScript 工具可复用 Electron 自带的 Node.js；源码构建所需的 npm 仍需另行准备：
 
@@ -58,7 +56,7 @@ $env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
 npm --prefix desktop run package:win
 ```
 
-打包生成 `desktop/out/DeepSeek Cowork-win32-x64`、完整 ZIP 和 `latest-desktop-windows-x64.json`。更新清单区分 Electron 与旧版包，构建会审计宿主、服务、资源和默认配置后再生成 ZIP；签名和公开发布需另行执行。具体步骤见[技术文档](docs/technical-design.md#electron-工作台)。
+打包生成 `desktop/out/DeepSeek Cowork-win32-x64`、完整 ZIP 和 `latest-desktop-windows-x64.json`。更新清单区分 Electron 与旧版包，构建会审计宿主、服务、资源和默认配置后再生成 ZIP；签名和公开发布需另行执行。具体步骤见[技术文档](docs/technical-design.md#构建与发布)。
 
 Mac／统信的新宿主发行流程尚待实现，必须在目标系统及 CPU 上构建和验收。
 

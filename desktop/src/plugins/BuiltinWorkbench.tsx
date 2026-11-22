@@ -80,7 +80,8 @@ export default function BuiltinWorkbench() {
   const hasMessages = messages.length > 0;
   const home = !hasMessages && !creationOpen;
   const chatVisible = !workspaceExpanded || workspaceView.selected === 'conversation';
-  const showUsage = usageOpen && route === 'chat' && !loading && hasMessages && chatVisible;
+  const usageAvailable = usageOpen && route === 'chat' && !loading && hasMessages;
+  const showUsage = usageAvailable && chatVisible && !workspaceOpen;
   const closeHistory = useCallback((restoreFocus = false) => {
     setShowHistory(false);
     if (restoreFocus) historyTrigger.current?.focus({preventScroll: true});
@@ -145,6 +146,7 @@ export default function BuiltinWorkbench() {
       pending => pending?.request_id === requestId ? null : pending);
   }
   function openUsage(view: UsageView) {
+    if (workspaceOpen) closeWorkspace();
     setUsageView(view);
     setUsageOpen(true);
     closeHistory();
@@ -155,7 +157,7 @@ export default function BuiltinWorkbench() {
   }
   function toggleUsage() {
     if (showUsage) closeUsage();
-    else openUsage('overview');
+    else openUsage(usageOpen ? usageView : 'overview');
   }
   function continueTask() {
     if (!current) return;
@@ -233,7 +235,7 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
       {loading ? <div className="loading"><LoaderCircle size={23} className="spin"/><p>正在打开你的工作台…</p></div> : route === 'chat' ? <div ref={layout} className={`work-layout ${workspaceOpen ? 'with-workspace' : ''} ${workspaceExpanded ? 'expanded' : ''}`}>
         <section className={`conversation ${hasMessages ? '' : 'home-conversation'} ${home ? 'workbench-home' : ''}`} style={chatVisible ? undefined : {display:'none'}}>
         <div className={hasMessages ? 'chat-layout' : 'chat-empty-layout'}>
-        {showUsage && settings && <div className="usage-dock"><Usage
+        {usageAvailable && settings && <div className="usage-dock" hidden={!showUsage}><Usage
           key={current?.id}
           id={usagePanelId}
           events={events}

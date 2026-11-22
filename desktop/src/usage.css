@@ -17,10 +17,22 @@
 }
 .chat-layout > .chat-reading-content {
   grid-area: messages;
+  grid-column: 1 / -1;
   min-width: 0;
   min-height: 0;
 }
-.chat-layout .message-scroll { scrollbar-gutter: stable both-edges; }
+.chat-layout .message-scroll {
+  padding-inline-end: var(--usage-track);
+  scrollbar-gutter: stable both-edges;
+}
+@media (forced-colors: none) {
+  .chat-layout .message-scroll::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--muted) 18%, transparent);
+  }
+  .chat-layout .message-scroll::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in srgb, var(--muted) 42%, transparent);
+  }
+}
 .chat-layout .messages,
 .chat-layout > .composer-container {
   width: var(--chat-content-width);
@@ -39,9 +51,10 @@
   pointer-events: none;
   z-index: 20;
 }
+.usage-dock[hidden] { display: none; }
 
 @container chat-available (min-width: 1080px) {
-  .chat-layout:has(> .usage-dock) {
+  .chat-layout:has(> .usage-dock:not([hidden])) {
     --usage-track: calc(var(--usage-width) + 2 * var(--usage-inset));
     grid-template: "messages usage" minmax(0, 1fr) "composer ." auto / minmax(0, 1fr) var(--usage-track);
   }

@@ -239,20 +239,22 @@ async function checkHomeProjectMenu() {
 async function checkUsageLayout(placement) {
   const layout = await read(`(() => {
     const bounds = selector => document.querySelector(selector)?.getBoundingClientRect();
-    const usage = bounds('.usage-popover'), viewport = bounds('.message-scroll');
+    const scroll = document.querySelector('.message-scroll'), viewport = scroll.getBoundingClientRect();
+    const usage = bounds('.usage-popover'), chat = bounds('.conversation');
     const content = bounds('.messages'), composer = bounds('.composer'), workspace = bounds('.workspace');
     const field = document.querySelector('[aria-label=消息输入]');
     const input = field.getBoundingClientRect();
-    const beside = viewport.right <= usage.left + 1;
+    const beside = content.right <= usage.left + 1;
     return {placement:beside ? 'right' : 'overlay',
       aligned: Math.abs(composer.left - content.left) < 1 && Math.abs(composer.right - content.right) < 1,
+      scrollAtEdge: Math.abs(viewport.right - chat.right) < 1 && scroll.scrollWidth <= scroll.clientWidth + 1,
       inputReachable: composer.top >= usage.bottom && composer.bottom <= innerHeight + 1 &&
         field === document.elementFromPoint(input.left + input.width / 2, input.top + input.height / 2),
       staysInChat: usage.top >= viewport.top - 1 && usage.bottom <= viewport.bottom + 1 &&
         (!workspace || usage.right <= workspace.left + 1)};
   })()`);
   if (placement) assert.equal(layout.placement, placement);
-  assert.equal(layout.aligned && layout.inputReachable && layout.staysInChat, true, JSON.stringify(layout));
+  assert.equal(layout.aligned && layout.scrollAtEdge && layout.inputReachable && layout.staysInChat, true, JSON.stringify(layout));
 }
 
 const composerBounds = () => read('document.querySelector(".composer").getBoundingClientRect().toJSON()');
@@ -309,10 +311,17 @@ async function checkChatHeader() {
   await read('document.querySelector("[aria-label=返回用量概览]").click()');
   await until('document.activeElement===document.querySelector(".usage-reveal")&&document.querySelectorAll(".usage-files li").length===2');
   await clickText('.usage-files li > button','快速开始.md');
-  await until('!!document.querySelector(".usage-overview")&&[...document.querySelectorAll(".workspace-tab")].some(tab=>tab.textContent.includes("快速开始.md"))');
-  await checkUsageLayout('overlay');
+  await until('[...document.querySelectorAll(".workspace-tab")].some(tab=>tab.textContent.includes("快速开始.md"))&&document.querySelector(".usage-overview")?.checkVisibility()===false');
+  assert.equal(await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").getAttribute("aria-expanded")'),'false');
   await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
-  await until('!document.querySelector(".workspace-bar")&&!!document.querySelector(".usage-overview")');
+  await until('!document.querySelector(".workspace-bar")&&document.querySelector(".usage-overview")?.checkVisibility()&&!!document.querySelector(".usage-files[open]")');
+  await checkUsageLayout('right');
+  await clickText('.usage-reveal','详情');
+  await until('!!document.querySelector("[aria-label=用量详情]")');
+  await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
+  await until('!!document.querySelector(".workspace-bar")&&document.querySelector("[aria-label=用量详情]")?.checkVisibility()===false');
+  await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
+  await until('!document.querySelector(".workspace-bar")&&document.querySelector("[aria-label=用量详情]")?.checkVisibility()');
 
   await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
   await until('!document.querySelector(".usage-popover")&&document.activeElement.getAttribute("aria-label")==="用量统计"');
@@ -327,7 +336,7 @@ async function checkChatHeader() {
   await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
   await until('!!document.querySelector(".workspace-bar")&&document.querySelector(".chat-header-tools [aria-label=工作区]").getAttribute("aria-expanded")==="true"');
   await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
-  await until('!document.querySelector(".workspace-bar")');
+  await until('!document.querySelector(".workspace-bar")&&!document.querySelector(".usage-popover")');
 }
 
 async function checkUsagePersistence(report) {
@@ -574,7 +583,7 @@ async function run(){
   await clickText('.project-dialog button','取消');
   await until('!document.querySelector(".project-dialog")');
   await clickText('.history-select > span','整理项目文档');
-  await until('document.querySelectorAll(".chat-header-tools button").length===3');
+  await until('document.querySelectorAll(".chat-header-tools button").length===3&&!!document.querySelector("#message-user")&&!!document.querySelector(".composer")');
   assert.equal(await read('(()=>{const buttons=[...document.querySelectorAll(".chat-header-tools button")].map(button=>button.getBoundingClientRect());return buttons.every(rect=>rect.top===buttons[0].top&&rect.left>=0&&rect.right<=innerWidth);})()'),true);
   const beforeUsage = await composerBounds();
   await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');

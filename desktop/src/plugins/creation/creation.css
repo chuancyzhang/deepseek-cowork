@@ -11,14 +11,14 @@
 .creation-sample-main>.app-header{padding:0 12px;min-height:44px;height:44px;gap:4px}
 .creation-sample-main .header-actions{gap:2px}
 .creation-sample-main .title-button{min-width:0}
-.creation-sample-main .header-popovers{top:44px;right:8px;max-width:calc(100% - 16px)}
-.creation-sample-main .usage-popover{max-height:min(calc(100cqh - 60px), 530px)}
+.creation-sample-main:has(> .chat-layout){container:chat-available / inline-size}
 .creation-sample-page{display:flex;flex-direction:column;flex:1;min-height:0;overflow:auto}
-.creation-sample-page .messages{padding:12px 20px}
+.creation-sample-page .messages{padding-block:12px}
 .creation-sample-page .message{margin:12px 0 18px}
 .creation-sample-page .welcome{margin:24px 0;padding:0 18px}
 .creation-sample-page .welcome h2{font-size:20px}
-.creation-sample-main .composer-container{padding:10px 12px}
+.creation-sample-main .composer-container{padding-block:10px}
+.creation-sample-main .chat-empty-layout>.composer-container{padding-inline:12px}
 .creation-sample-main .composer textarea{min-height:55px;height:62px}
 .creation-sample-detail{padding:20px;overflow:auto}
 .sample-workspace-tabs{padding:10px 0;border-bottom:1px solid var(--line);color:var(--muted)}
@@ -34,7 +34,6 @@
 @container (max-width:510px){
   .creation-sample.app-shell{grid-template-columns:minmax(0,1fr)}
   .creation-sample-sidebar{display:none}
-  .creation-sample-page .messages{padding-inline:12px}
 }
 .host-creation-toggle{position:fixed;right:115px;bottom:6px;z-index:90;background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:5px 10px;font-size:12px}
 @media(max-width:1000px){.creation-layout{grid-template-columns:minmax(260px,1fr) minmax(360px,48%)}.creation-header{padding:10px 12px}}

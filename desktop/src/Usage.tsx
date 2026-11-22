@@ -62,15 +62,15 @@ function useUsage(events: RuntimeEvent[], activeRunId?: string, turnId?: string)
   return useMemo(() => projection.project(events, activeRunId, turnId), [projection, events, activeRunId, turnId]);
 }
 
-export function UsageToolbarButton({ events, activeRunId, showRate, open, onClick, buttonRef, iconOnly = false }: {
+export function UsageToolbarButton({ events, activeRunId, showRate, open, panelId, onClick, buttonRef, iconOnly = false }: {
   events: RuntimeEvent[]; activeRunId?: string; showRate?: boolean; open: boolean; iconOnly?: boolean;
-  onClick: () => void; buttonRef?: Ref<HTMLButtonElement>;
+  panelId: string; onClick: () => void; buttonRef?: Ref<HTMLButtonElement>;
 }) {
   const usage = useUsage(events, showRate ? activeRunId : undefined);
   const rate = useGenerationRates(usage.request).at(-1);
   return <button ref={buttonRef} className={(iconOnly ? 'icon-button' : 'toolbar-button') + ' usage-toolbar-button'}
     title={iconOnly ? undefined : '用量统计'} aria-label="用量统计"
-    aria-haspopup="dialog" aria-expanded={open} onClick={onClick}><ChartColumn size={16}/>{!iconOnly && <span>用量统计</span>}
+    aria-controls={open ? panelId : undefined} aria-expanded={open} onClick={onClick}><ChartColumn size={16} aria-hidden="true"/>{!iconOnly && <span>用量统计</span>}
     {rate != null && <small className="usage-toolbar-rate">{rate.toFixed(1)} tok/s</small>}</button>;
 }
 
@@ -82,13 +82,11 @@ function GenerationSpeed({ request, lastSpeed, compact }: { request?: SpeedReque
   if (compact) {
     const value = request ? rate : lastSpeed;
     return <section className="usage-compact-speed">
-      <div>
-        <h4><Gauge size={15} aria-hidden="true"/>{!request && lastSpeed != null ? '上次均速' : '生成速度'}</h4>
-        {value != null ? <RateValue value={value}/> : <p className="usage-empty">
-          {request ? measuring ? '采样中' : '等待输出' : '暂无速度记录'}
-        </p>}
-      </div>
+      <h4><Gauge size={14} aria-hidden="true"/>{!request && lastSpeed != null ? '上次均速' : '生成速度'}</h4>
       {rate != null && <SpeedTrend rates={rates} compact/>}
+      {value != null ? <RateValue value={value}/> : <p className="usage-empty">
+        {request ? measuring ? '采样中' : '等待输出' : '暂无速度记录'}
+      </p>}
     </section>;
   }
 
@@ -106,7 +104,8 @@ function GenerationSpeed({ request, lastSpeed, compact }: { request?: SpeedReque
   </section>;
 }
 
-export default function Usage({ events, activeRunId, turnId, messages, hasMoreHistory, settings, view, onView, onSave, onOpenFile, onClose }: {
+export default function Usage({ id, events, activeRunId, turnId, messages, hasMoreHistory, settings, view, onView, onSave, onOpenFile, onClose }: {
+  id: string;
   events: RuntimeEvent[];
   activeRunId?: string;
   turnId?: string;
@@ -177,15 +176,16 @@ export default function Usage({ events, activeRunId, turnId, messages, hasMoreHi
     }
   }
 
-  return <section ref={pane} className={expanded ? 'usage-popover' : 'usage-popover usage-overview'}
-    role="dialog" aria-label={expanded ? '用量详情' : '用量概览'}>
+  return <section id={id} ref={pane} className={expanded ? 'usage-popover' : 'usage-popover usage-overview'}
+    aria-label={expanded ? '用量详情' : '用量概览'}>
     <div className="usage-heading usage-title">
       <div className="usage-title-start">
         {expanded && <button ref={back} className="icon-button" title="返回用量概览" aria-label="返回用量概览"
           onClick={() => onView('overview')}><ArrowLeft size={16} aria-hidden="true"/></button>}
+        {!expanded && <ChartColumn size={15} aria-hidden="true"/>}
         <h3>{expanded ? '用量详情' : 'Token 用量'}</h3>
       </div>
-      <button autoFocus className="icon-button" title="关闭用量" aria-label="关闭用量" onClick={onClose}><X size={16} aria-hidden="true"/></button>
+      <button className="icon-button" title="关闭用量" aria-label="关闭用量" onClick={onClose}><X size={15} aria-hidden="true"/></button>
     </div>
     <GenerationSpeed request={usage.request} lastSpeed={usage.lastSpeed} compact={!expanded}/>
 
@@ -206,7 +206,7 @@ export default function Usage({ events, activeRunId, turnId, messages, hasMoreHi
             const dot = file.name.lastIndexOf('.');
             const extension = dot > 0 ? file.name.slice(dot) : '';
             return <li key={file.path}><button title={file.path} aria-label={'打开文件 ' + file.name}
-              onClick={() => {onClose(); onOpenFile(file.path);}}><FileText size={15} aria-hidden="true"/>
+              onClick={() => onOpenFile(file.path)}><FileText size={15} aria-hidden="true"/>
               <span className="usage-file-name"><span>{extension ? file.name.slice(0, dot) : file.name}</span>{extension}</span>
             </button></li>;
           })}</ul>}

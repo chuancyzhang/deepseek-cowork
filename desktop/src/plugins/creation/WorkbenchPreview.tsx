@@ -1,4 +1,4 @@
-import {useEffect, useRef, useState, type KeyboardEvent, type MouseEvent} from 'react';
+import {useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent} from 'react';
 import {ArrowUp, ChartColumn, Folder, Puzzle, Square} from 'lucide-react';
 import Sidebar from '../../Sidebar';
 import Usage, {UsageToolbarButton, type UsageView} from '../../Usage';
@@ -49,6 +49,7 @@ export function WorkbenchPreview({theme, page = '对话', scope, picking = false
   const [question, setQuestion] = useState(conversation.messages![0].content as string);
   const [usageView, setUsageView] = useState<UsageView | null>(null);
   const usageButton = useRef<HTMLButtonElement>(null);
+  const usagePanelId = useId();
   const {events, activeRunId, start, stop} = useSampleRun();
   const text = events.filter(event => event.type === 'content').map(event => event.delta).join('');
   const inChat = page === '对话';
@@ -69,6 +70,7 @@ export function WorkbenchPreview({theme, page = '对话', scope, picking = false
     start();
   }
   function closeUsage() { setUsageView(null);usageButton.current?.focus(); }
+  function toggleUsage() { if (usageView) closeUsage(); else setUsageView('overview'); }
   return <div className={'creation-sample app-shell' + (picking ? ' is-picking' : '')} style={themeStyle(theme)}>
     <div {...region('侧栏导航')} className={region('侧栏导航').className+' creation-sample-sidebar'}>
       <StoreContext.Provider value={store}><Sidebar conversations={[conversation]} supplemental={[]} projects={[]} layout={null}
@@ -79,22 +81,21 @@ export function WorkbenchPreview({theme, page = '对话', scope, picking = false
         onProjectAction={() => {}} onMore={async () => {}} onLayoutAction={async () => ({groups:[],chats:{},projects:{}})} onError={() => {}}/>
       </StoreContext.Provider>
     </div>
-    <main className="main-shell creation-sample-main" onKeyDown={event => {
-      if (event.key === 'Escape' && usageView) { event.stopPropagation();closeUsage(); }
-    }}>
+    <main className="main-shell creation-sample-main">
       <header {...region('顶部工具栏')} className={region('顶部工具栏').className+' app-header'}>
         <div className="header-title"><span className="title-button">{inChat ? conversation.title : '我的工作台'}</span></div>
         <div className="header-actions">
           <button className="toolbar-button" onClick={() => changePage?.(page === '工作区' ? '对话' : '工作区')}><Folder size={16}/>工作区</button>
           {inChat && toolbar?.action === 'usage' && <UsageToolbarButton events={events} activeRunId={activeRunId}
-            showRate={toolbar.showRate} open={usageView != null} onClick={() => setUsageView(usageView ? null : 'overview')} buttonRef={usageButton}/>}
+            showRate={toolbar.showRate} open={usageView != null} panelId={usagePanelId} onClick={toggleUsage} buttonRef={usageButton}/>}
           {inChat && !toolbar && <MoreActions label="更多聊天工具" triggerRef={usageButton}
-            actions={[[ '用量统计', ChartColumn, async () => setUsageView('overview') ]]} error={() => {}}/>}
+            actions={[[ '用量统计', ChartColumn, async () => toggleUsage() ]]} error={() => {}}/>}
         </div>
       </header>
-      {inChat && usageView && <div className="header-popovers"><Usage events={events} activeRunId={activeRunId}
+      <div className={inChat ? 'chat-layout' : 'chat-empty-layout'}>
+      {inChat && usageView && <div className="usage-dock"><Usage id={usagePanelId} events={events} activeRunId={activeRunId}
         settings={contextPolicy} view={usageView} onView={setUsageView} onClose={closeUsage}/></div>}
-      <section {...region(inChat ? '整个界面' : page)} className={region(inChat ? '整个界面' : page).className+' creation-sample-page'}>
+      <section {...region(inChat ? '整个界面' : page)} className={region(inChat ? '整个界面' : page).className+' creation-sample-page chat-reading-content'}>
         {inChat ? <div className="message-scroll"><div className="messages">
           <article className="message user"><div className="message-body"><div className="user-text">{question}</div></div></article>
           <article className="message assistant"><div className="markdown"><p>{text || '我整理了本周的进展和接下来的安排。'}</p></div></article>
@@ -115,6 +116,7 @@ export function WorkbenchPreview({theme, page = '对话', scope, picking = false
             }}>{activeRunId ? <Square size={15}/> : <ArrowUp size={17}/>}</button></div>
         </div>
       </div>}
+      </div>
     </main>
   </div>;
 }

@@ -236,6 +236,27 @@ async function checkHomeProjectMenu() {
   assert.equal(await read('document.querySelector("[aria-label=消息输入]").value'),'切换项目后保留这条草稿');
 }
 
+async function checkUsageLayout(placement) {
+  const layout = await read(`(() => {
+    const bounds = selector => document.querySelector(selector)?.getBoundingClientRect();
+    const usage = bounds('.usage-popover'), viewport = bounds('.message-scroll');
+    const content = bounds('.messages'), composer = bounds('.composer'), workspace = bounds('.workspace');
+    const field = document.querySelector('[aria-label=消息输入]');
+    const input = field.getBoundingClientRect();
+    const beside = viewport.right <= usage.left + 1;
+    return {placement:beside ? 'right' : 'overlay',
+      aligned: Math.abs(composer.left - content.left) < 1 && Math.abs(composer.right - content.right) < 1,
+      inputReachable: composer.top >= usage.bottom && composer.bottom <= innerHeight + 1 &&
+        field === document.elementFromPoint(input.left + input.width / 2, input.top + input.height / 2),
+      staysInChat: usage.top >= viewport.top - 1 && usage.bottom <= viewport.bottom + 1 &&
+        (!workspace || usage.right <= workspace.left + 1)};
+  })()`);
+  if (placement) assert.equal(layout.placement, placement);
+  assert.equal(layout.aligned && layout.inputReachable && layout.staysInChat, true, JSON.stringify(layout));
+}
+
+const composerBounds = () => read('document.querySelector(".composer").getBoundingClientRect().toJSON()');
+
 async function checkChatHeader() {
   assert.deepEqual(await read('[...document.querySelectorAll(".chat-header-tools button")].map(button=>[button.getAttribute("aria-label"),button.textContent.trim(),button.hasAttribute("title")])'),
     [['历史提问','',false],['用量统计','',false],['工作区','',false]]);
@@ -244,18 +265,35 @@ async function checkChatHeader() {
   await until('document.querySelector(".history-popover")?.textContent.includes("让新同事能更快上手")');
   await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
   await until('!document.querySelector(".history-popover")&&document.activeElement.getAttribute("aria-label")==="历史提问"');
+  const beforeUsage = await composerBounds();
   await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
   await until('!!document.querySelector(".usage-overview")');
+  assert.ok(await read('(()=>{const panel=document.querySelector(".usage-overview").getBoundingClientRect();return panel.width<=266&&panel.height<=160;})()'));
+  assert.equal(await read('document.getElementById(document.querySelector(".chat-header-tools [aria-label=用量统计]").getAttribute("aria-controls"))===document.querySelector(".usage-overview")'),true);
   assert.deepEqual(await read('[...document.querySelectorAll(".usage-overview-metrics dd")].map(el=>el.textContent)'),['40,610','99,310','61%']);
   assert.equal(await read('Boolean(document.querySelector(".usage-budget, .usage-files ul"))'),false);
   assert.equal(await read('document.querySelector(".usage-files summary").getAttribute("aria-label")'),'文件，2 个');
-  await snap('usage','.usage-popover',0);
+  await checkUsageLayout('right');
+  const besideUsage = await composerBounds();
+  assert.ok(besideUsage.left < beforeUsage.left);
+  assert.equal(besideUsage.top, beforeUsage.top);
+  await read('document.querySelector("[aria-label=消息输入]").dispatchEvent(new PointerEvent("pointerdown",{bubbles:true}));document.querySelector("[aria-label=消息输入]").focus()');
+  assert.equal(await read('!!document.querySelector(".usage-overview")&&document.activeElement===document.querySelector("[aria-label=消息输入]")'),true);
+  await snap('usage','.main-shell',0);
+  await read('document.querySelector(".chat-header-tools [aria-label=历史提问]").click()');
+  await until('!!document.querySelector(".history-popover")&&!!document.querySelector(".usage-overview")');
+  await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
+  await until('!document.querySelector(".history-popover")&&!!document.querySelector(".usage-overview")&&document.activeElement.getAttribute("aria-label")==="历史提问"');
   await read('document.querySelector(".usage-files summary").click()');
   await until('document.querySelectorAll(".usage-files li").length===2');
   assert.deepEqual(await read('[...document.querySelectorAll(".usage-files .usage-file-name")].map(el=>el.textContent)'),['快速开始.md','需求说明.txt']);
+  await checkUsageLayout('right');
+  assert.deepEqual(await composerBounds(), besideUsage);
   await snap('usage-files','.usage-popover',0);
   await clickText('.usage-reveal','详情');
   await until('document.querySelector(".usage-budget")?.textContent.includes("300,000 Token")');
+  await checkUsageLayout('right');
+  assert.deepEqual(await composerBounds(), besideUsage);
   assert.equal(await read('document.activeElement.getAttribute("aria-label")'),'返回用量概览');
   assert.equal(await read('document.querySelector(".usage-popover select").value'),'1000000');
   assert.equal(await read('document.querySelector(".usage-limit label").textContent'),'下次目标');
@@ -271,18 +309,57 @@ async function checkChatHeader() {
   await read('document.querySelector("[aria-label=返回用量概览]").click()');
   await until('document.activeElement===document.querySelector(".usage-reveal")&&document.querySelectorAll(".usage-files li").length===2');
   await clickText('.usage-files li > button','快速开始.md');
-  await until('!document.querySelector(".usage-popover")&&[...document.querySelectorAll(".workspace-tab")].some(tab=>tab.textContent.includes("快速开始.md"))');
+  await until('!!document.querySelector(".usage-overview")&&[...document.querySelectorAll(".workspace-tab")].some(tab=>tab.textContent.includes("快速开始.md"))');
+  await checkUsageLayout('overlay');
   await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
-  await until('!document.querySelector(".workspace-bar")');
+  await until('!document.querySelector(".workspace-bar")&&!!document.querySelector(".usage-overview")');
 
+  await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
+  await until('!document.querySelector(".usage-popover")&&document.activeElement.getAttribute("aria-label")==="用量统计"');
+  assert.deepEqual(await composerBounds(), beforeUsage);
   await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
   await until('!!document.querySelector(".usage-overview")&&!document.querySelector(".usage-files[open]")');
   await read('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true,cancelable:true}))');
+  assert.equal(await read('!!document.querySelector(".usage-overview")'),true);
+  await read('document.querySelector("[aria-label=关闭用量]").click()');
   await until('!document.querySelector(".usage-popover")&&document.activeElement.getAttribute("aria-label")==="用量统计"');
+  assert.deepEqual(await composerBounds(), beforeUsage);
   await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
   await until('!!document.querySelector(".workspace-bar")&&document.querySelector(".chat-header-tools [aria-label=工作区]").getAttribute("aria-expanded")==="true"');
   await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
   await until('!document.querySelector(".workspace-bar")');
+}
+
+async function checkUsagePersistence(report) {
+  const example = {id: 'usage-other-chat', role: 'user', content: '汇总本周的进展。'};
+  snapshots.set(report.id, {has_messages: true, messages: [example], render_messages: [example], events: []});
+  await clickText('.history-select > span','整理项目文档');
+  await until('!!document.querySelector("#message-user")&&!!document.querySelector("[aria-label=用量统计]")');
+  await read('document.querySelector("[aria-label=用量统计]").click()');
+  await clickText('.usage-reveal','详情');
+  await until('!!document.querySelector("[aria-label=用量详情]")');
+  await clickText('.history-select > span','汇总本周工作进展');
+  const reportVisible = '!!document.querySelector("#message-usage-other-chat")&&!!document.querySelector("[aria-label=消息输入]")';
+  await until(reportVisible + '&&!!document.querySelector(".usage-overview")');
+  assert.deepEqual(await read('[...document.querySelectorAll(".usage-overview-metrics dd")].map(el=>el.textContent)'), ['—','—','—']);
+  assert.equal(await read('!!document.querySelector(".usage-files")'),false);
+
+  await read('document.querySelector(".sidebar-utilities button").click()');
+  await until('!!document.querySelector(".back-link")&&!document.querySelector(".usage-popover")');
+  await read('document.querySelector(".back-link").click()');
+  await until(reportVisible + '&&!!document.querySelector(".usage-overview")');
+
+  const reload = () => new Promise(resolve => {
+    window.webContents.once('did-finish-load',resolve);
+    window.webContents.reload();
+  });
+  await reload();
+  await until(reportVisible + '&&!!document.querySelector(".usage-overview")');
+  assert.equal(await read('!!document.activeElement.closest(".usage-popover")'),false);
+  await read('document.querySelector("[aria-label=关闭用量]").click()');
+  await reload();
+  await until(reportVisible + '&&document.querySelector("[aria-label=用量统计]")?.getAttribute("aria-expanded")==="false"');
+  assert.equal(await read('!!document.querySelector(".usage-popover")'),false);
 }
 
 async function checkSidebar() {
@@ -480,6 +557,7 @@ async function run(){
   await read('document.querySelector(".global-search .section-heading button").click()');await wait(()=>browserHost.visible?.id===opened.tab.id);
   await read('document.querySelector("[title=收起工作区]").click()');
   window.setSize(1000,720);window.webContents.setZoomFactor(1.25);
+  await until('innerWidth<=801&&innerHeight<=577');
   await rpc('settings.theme',{theme:'light'});await until('document.documentElement.dataset.theme==="light"');
   command('appearance');await until('document.documentElement.dataset.theme==="dark"');
   assert.equal(await read('(()=>{const brand=document.querySelector(".brand strong").getBoundingClientRect(),tools=document.querySelector(".brand .navigation-tools").getBoundingClientRect();return tools.left>=brand.right-1&&Math.abs((brand.top+brand.bottom)-(tools.top+tools.bottom))<=2;})()'),true);
@@ -498,15 +576,44 @@ async function run(){
   await clickText('.history-select > span','整理项目文档');
   await until('document.querySelectorAll(".chat-header-tools button").length===3');
   assert.equal(await read('(()=>{const buttons=[...document.querySelectorAll(".chat-header-tools button")].map(button=>button.getBoundingClientRect());return buttons.every(rect=>rect.top===buttons[0].top&&rect.left>=0&&rect.right<=innerWidth);})()'),true);
+  const beforeUsage = await composerBounds();
   await read('document.querySelector(".chat-header-tools [aria-label=用量统计]").click()');
   await until('!!document.querySelector(".usage-overview")');
   assert.equal(await read('document.querySelector(".usage-overview").scrollWidth<=document.querySelector(".usage-overview").clientWidth+1'),true);
+  await checkUsageLayout('overlay');
+  assert.deepEqual(await composerBounds(), beforeUsage);
+  await read('document.querySelector(".usage-files summary").click()');
+  await until('document.querySelectorAll(".usage-files li").length===2');
+  await checkUsageLayout('overlay');
+  assert.deepEqual(await composerBounds(), beforeUsage);
   await snap('usage-overview-dark-scaled');
+  await read('document.querySelector(".usage-reveal").scrollIntoView({block:"nearest"})');
   await clickText('.usage-reveal','详情');
   await until('document.querySelector(".usage-capacity")?.getAttribute("aria-valuemax")==="300000"');
+  await checkUsageLayout('overlay');
+  assert.deepEqual(await composerBounds(), beforeUsage);
   assert.equal(await read('(()=>{const r=document.querySelector(".usage-popover").getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;})()'),true);
   await snap('usage-dark-scaled');
+  const usageSnapshot = snapshots.get(docs.id);
+  const history = Array.from({length: 8}, (_, index) => messages.map(message => ({
+    id: 'usage-history-' + index + '-' + message.id, role: message.role, content: message.content
+  }))).flat().concat(messages);
+  snapshots.set(docs.id,{...usageSnapshot,messages:history,render_messages:history});
+  window.webContents.send('cowork:events',[{event:'conversation_changed',conversation_id:docs.id}]);
+  await until('!!document.querySelector("#message-usage-history-0-user")');
+  const usageRun = {id:'usage-layout-run',conversation_id:docs.id,status:'running',created_at:stamp,updated_at:stamp};
+  runs.set(docs.id,usageRun);
+  window.webContents.send('cowork:events',[
+    {event:'run_started',conversation_id:docs.id,run:usageRun},
+    {event:'runtime',conversation_id:docs.id,data:{type:'content',delta:'正在整理项目文档。',source_message_id:'usage-live-reply',run_id:usageRun.id,sequence:1}},
+  ]);
+  await until('!!document.querySelector(".message-scroll .process-summary .sr-only")');
+  assert.equal(await read('document.scrollingElement.scrollHeight<=innerHeight+1'),true);
+  assert.deepEqual(await composerBounds(), beforeUsage);
   await read('document.querySelector(".usage-popover [aria-label=关闭用量]").click()');
+  snapshots.set(docs.id,usageSnapshot);
+  runs.delete(docs.id);
+  window.webContents.send('cowork:events',[{event:'run_finished',conversation_id:docs.id,run:{...usageRun,status:'completed',updated_at:Date.now()/1000}}]);
   command('new-chat');await until('!!document.querySelector(".workbench-home .home-project-trigger")&&document.activeElement===document.querySelector("[aria-label=消息输入]")');
   window.setSize(850,620);
   window.webContents.setZoomFactor(1.5);
@@ -534,6 +641,7 @@ async function run(){
   await snap('browser-skill-dark-scaled');
   await read('document.querySelector(".settings-section input[type=checkbox]").click()');
   await until('!document.querySelector(".settings-section input[type=checkbox]").checked&&!document.querySelector(".settings-section input[type=checkbox]").disabled');
+  await checkUsagePersistence(report);
   assert.deepEqual(errors,[]);
   console.log('NAVIGATION_OK '+JSON.stringify({native:Boolean(process.env.COWORK_NAVIGATION_NATIVE),scale:screen.getPrimaryDisplay().scaleFactor,zoom:window.webContents.getZoomFactor(),size:window.getSize()}));
 }

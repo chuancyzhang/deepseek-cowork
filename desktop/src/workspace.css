@@ -8,7 +8,7 @@
 .workspace-divider{position:absolute;top:0;bottom:0;right:calc(var(--workspace-width) - 4px);width:8px;z-index:25;cursor:col-resize;touch-action:none;outline:none}
 .workspace-divider:hover,.workspace-divider:focus-visible{background:color-mix(in srgb,var(--primary) 18%,transparent)}
 .expanded>.workspace-divider{left:0;right:auto}
-.conversation{overflow:hidden;container-type:inline-size}
+.conversation{overflow:hidden;container:chat-available / inline-size}
 .home-conversation{overflow:auto}
 .file-toolbar{flex-wrap:wrap;gap:4px;min-height:40px}
 .file-toolbar>.icon-button{width:27px;height:28px;flex-shrink:0}
@@ -36,7 +36,7 @@
 .assistant-turn>.message{margin:0}
 .assistant-turn>*+.message{margin-top:8px}
 .messages .run-state{min-height:28px;margin:0;font-size:calc(12px * var(--font-scale,1))}
-.process-summary{display:inline-flex;align-items:center;min-height:28px;font-size:calc(12px * var(--font-scale,1));color:var(--muted);padding:3px 4px 3px 0;gap:7px;border-radius:5px}
+.process-summary{position:relative;display:inline-flex;align-items:center;min-height:28px;font-size:calc(12px * var(--font-scale,1));color:var(--muted);padding:3px 4px 3px 0;gap:7px;border-radius:5px}
 .process-summary .rotated{transform:rotate(90deg)}
 .generation-task{padding:20px;border:1px solid var(--line);border-radius:calc(10px * var(--radius-scale,1));background:var(--soft);margin:8px 0;min-width:0;overflow-wrap:anywhere}
 .generation-task-heading{display:flex;align-items:center;gap:14px;min-width:0}

@@ -827,6 +827,78 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.assertNotIn("unsaved-test-secret", encoded)
 
 
+class DesktopHistoryProjectionTests(unittest.TestCase):
+    def setUp(self):
+        from types import SimpleNamespace
+        from core.desktop_service import DesktopService
+        from core.desktop_store import DesktopChatStorage, DesktopStore
+        self.temp = tempfile.TemporaryDirectory(dir=QA_ROOT)
+        self.addCleanup(self.temp.cleanup)
+        self.storage = DesktopChatStorage(str(Path(self.temp.name) / 'history.db'))
+        self.storage.upsert_conversation('chat', title='分页历史')
+        self.store = DesktopStore(self.storage)
+        for turn in ['first', 'last']:
+            self.store.accept({'conversation_id': 'chat', 'request_id': turn, 'message_id': 'u-' + turn,
+                               'content': turn, 'display_text': turn})
+            self.store.set_run(turn, 'completed')
+        self.messages = [
+            {'id': 'u-first' if i == 0 else 'u-last' if i == 21 else 'm' + str(i),
+             'role': 'user' if i in {0, 21} else 'assistant', 'content': str(i),
+             'meta': {'turn_id': 'first' if i < 21 else 'last'}} for i in range(91)]
+        self.messages[2].update(role='tool', tool_call_id='same-call')
+        self.storage.save_conversation('chat', self.messages)
+        self.events = [
+            {'sequence': 1, 'payload': {'type': 'content', 'run_id': 'first', 'source_message_id': 'm1', 'delta': '1'}},
+            {'sequence': 2, 'payload': {'type': 'tool_result', 'run_id': 'first', 'source_message_id': 'm1', 'data': {'id': 'same-call'}}},
+            {'sequence': 3, 'payload': {'type': 'tool_result', 'run_id': 'first', 'source_message_id': 'm1', 'data': {'id': 'not-saved'}}},
+            {'sequence': 4, 'payload': {'type': 'thinking', 'run_id': 'first', 'delta': 'legacy'}},
+            {'sequence': 5, 'payload': {'type': 'content', 'run_id': 'first', 'source_message_id': 'interrupted', 'delta': 'retained'}},
+            {'sequence': 6, 'payload': {'type': 'turn_started', 'run_id': 'first'}, 'created_at': 100},
+            {'sequence': 7, 'payload': {'type': 'final', 'run_id': 'first'}, 'created_at': 428},
+            {'sequence': 1, 'payload': {'type': 'tool_result', 'run_id': 'last', 'source_message_id': 'm22', 'data': {'id': 'same-call'}}},
+        ]
+        service = self.service = DesktopService.__new__(DesktopService)
+        service.storage, service.store = self.storage, self.store
+        service.state = SimpleNamespace(runtime_journal=SimpleNamespace(
+            get_run=lambda cid, run: {'run_id': run},
+            read_events=lambda cid, run: [e for e in self.events if e['payload']['run_id'] == run]))
+        service.files = SimpleNamespace(message_files=lambda cid, messages: messages)
+        service.reviews = SimpleNamespace(entries=lambda cid: {}, summary=lambda entry: entry)
+        service.media = SimpleNamespace(records=lambda cid: [], public=lambda record: record)
+
+    def test_page_marks_saved_sources_outside_window_without_changing_events_or_pagination(self):
+        import copy
+        original = copy.deepcopy(self.events)
+        page = self.service.conversation('chat')
+        self.assertEqual((len(page['messages']), page['ledger_start'], page['before'], page['has_more']), (80, 11, 11, True))
+        self.assertEqual([e.get('persisted_position') for e in page['events']], [1, 2, None, None, None, None, None, None])
+        self.assertEqual(self.events, original)
+        older = self.service.conversation('chat', before=page['before'])
+        self.assertEqual((len(older['messages']), older['ledger_start'], older['has_more']), (11, 0, False))
+        self.assertEqual(older['events'][0]['persisted_position'], 1)
+        self.assertEqual([m['id'] for m in older['messages'] + page['messages']], [m['id'] for m in self.messages])
+
+    def test_provenance_is_conversation_scoped_and_uses_the_message_page_snapshot(self):
+        self.storage.upsert_conversation('other', title='其他会话')
+        self.storage.save_conversation('other', [{'id': 'interrupted', 'role': 'assistant', 'content': 'other', 'meta': {'turn_id': 'first'}}])
+        self.assertIsNone(self.service.conversation('chat')['events'][4]['persisted_position'])
+        self.storage.save_conversation('other', [])
+        original_reader = self.service.state.runtime_journal.read_events
+        appended = {'id': 'interrupted', 'role': 'assistant', 'content': 'retained', 'meta': {'turn_id': 'first'}}
+        def persist_during_read(cid, run):
+            self.storage.save_conversation('chat', [*self.messages, appended])
+            return original_reader(cid, run)
+        self.service.state.runtime_journal.read_events = persist_during_read
+        # Commit after the page SELECT: its provenance must still see that page's snapshot.
+        page = self.service.conversation('chat')
+        self.assertEqual(page['total'], 91)
+        self.assertIsNone(page['events'][4]['persisted_position'])
+        self.service.state.runtime_journal.read_events = original_reader
+        refreshed = self.service.conversation('chat')
+        self.assertEqual(refreshed['total'], 92)
+        self.assertEqual(refreshed['events'][4]['persisted_position'], 91)
+
+
 class DesktopTransactionTests(unittest.TestCase):
     def test_search_reports_preparation_and_retries_the_shared_index(self):
         from types import SimpleNamespace

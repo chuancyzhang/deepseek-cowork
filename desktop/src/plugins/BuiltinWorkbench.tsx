@@ -39,7 +39,7 @@ export default function BuiltinWorkbench() {
     projectDialog, sidebarLayout, sidebarConversations, changeSidebar, host, usePluginAction,
     creationOpen, creationTab, enterCreation, exitCreation, settings, setSettings,
     conversations, hasMoreConversations, runningConversations, current, setCurrent, events, setEvents,
-    route, loading, serviceError, setServiceError, draft, attachments, drafts, sending, sidebar,
+    route, loading, serviceError, setServiceError, projectionError, loadConversation, draft, attachments, drafts, sending, sidebar,
     workspaceOpen, setWorkspaceOpen, workspaceExpanded, setWorkspaceExpanded, workspaceView, changeWorkspace,
     fileTree, workspaceChanges, refreshChanges, editors, setEditors, fileChanged, interaction, ask, historyEdit, setHistoryEdit,
     historyUndo, setHistoryUndo, olderLoading, pluginPreview, themeCandidate, setThemeCandidate, themePreview,
@@ -249,6 +249,7 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
         {current?.has_more && <button className="secondary" disabled={olderLoading} onClick={() => void loadOlder()}>载入更早的对话</button>}
       </section></div>}
       {serviceError && <div className="service-error"><strong>本地服务异常</strong><span>{serviceError}</span><button onClick={() => void call('app.reconnect').catch(failure => setServiceError(failure.message))}>重新连接</button><button onClick={() => void call('app.logs')}>查看诊断日志</button></div>}
+      {!serviceError && route==='chat' && !loading && projectionError && <div className="service-error" role="alert"><span>{projectionError}</span><button onClick={() => {if(current)void loadConversation(current.id,true).catch(failure=>error(failure.message));}}>重试</button><button onClick={() => void call('app.logs')}>查看诊断日志</button></div>}
       <PluginSlot kind="page" target={route}>
       {loading ? <div className="loading"><LoaderCircle size={23} className="spin"/><p>正在打开你的工作台…</p></div> : route === 'chat' ? <div ref={layout} className={`work-layout ${workspaceOpen ? 'with-workspace' : ''} ${workspaceExpanded ? 'expanded' : ''}`}>
         <section className={`conversation ${hasMessages ? '' : 'home-conversation'} ${home ? 'workbench-home' : ''}`} style={chatVisible ? undefined : {display:'none'}}>

@@ -19,7 +19,8 @@ export function messageText(content: any): string {
   return '';
 }
 export function unwrapEvents(events: any[]): RuntimeEvent[] {
-  return events.map(event => event.payload ? { ...event.payload, sequence: event.sequence, created_at: event.payload.created_at ?? event.created_at } : event).filter(event => typeof event.type === 'string');
+  return events.map(event => event.payload ? { ...event.payload, sequence: event.sequence, created_at: event.payload.created_at ?? event.created_at,
+    persisted_position: event.persisted_position } : event).filter(event => typeof event.type === 'string');
 }
 function messageDate(createdAt?: number) {
   if (typeof createdAt !== 'number' || !Number.isFinite(createdAt) || createdAt <= 0) return null;
@@ -99,52 +100,83 @@ export function mergeEvents(previous: RuntimeEvent[], incoming: RuntimeEvent[]):
 export function displayMessages(saved: Message[], events: RuntimeEvent[], activeRun?: string): Message[] {
   return new MessageProjection().project(saved,events,activeRun);
 }
+export type ProjectionIssue = {runId?: string; messageId: string; reason: 'missing_turn' | 'missing_source' | 'missing_order' | 'split_turn'};
+type MessageFragment = {message: Message; position?: number; order: number; source?: string};
 /** Reuse unaffected message objects and process only newly appended events. */
 export class MessageProjection {
   private previous:RuntimeEvent[]=[];
-  private fragments=new Map<string,Message>();
-  project(saved:Message[],events:RuntimeEvent[],activeRun?:string):Message[]{
+  private fragments=new Map<string,MessageFragment>();
+  project(saved:Message[],events:RuntimeEvent[],activeRun?:string,onIssue?:(issue:ProjectionIssue)=>void):Message[]{
   if(events.length<this.previous.length||this.previous.length&&(events[0]!==this.previous[0]||events[this.previous.length-1]!==this.previous.at(-1))){
     this.previous=[];this.fragments.clear();
   }
   const messages = saved.filter(m => !m.meta?.hidden && !m.meta?.ui_hidden && !m.meta?.context_hidden
     && !['system', 'developer'].includes(m.role) && !['skill_context', 'skill_context_update', 'skill_state_update', 'runtime_context'].includes(m.meta?.kind));
-  const ids = new Set(messages.map(m => m.id));
-  const toolIds = new Set(messages.filter(m => m.role === 'tool').map(m => m.tool_call_id));
+  const ids = new Set(saved.map(m => m.id));
+  const toolKey = (run:string | undefined, call:string) => `tool:${run || ''}:${call}`;
+  const toolIds = new Set(saved.filter(m => m.role === 'tool').map(m => toolKey(messageRun(m),m.tool_call_id!)));
   const live = this.fragments;
   for (const event of events.slice(this.previous.length)) {
     if (!['content', 'content_snapshot', 'thinking', 'tool_call', 'tool_result'].includes(event.type)) continue;
     if (event.type === 'tool_result') {
       const data = event.data || {};
       if (!data.id) continue;
-      const id = `tool:${event.run_id}:${data.id}`;
-      live.set(id, {id, role: 'tool', tool_call_id: data.id, content: data.result || '', result_obj: data.result_obj,
-        meta: {turn_id: event.run_id, tool_name: data.name}});
+      const id = toolKey(event.run_id,data.id), prior = live.get(id);
+      live.set(id, {order:prior?.order ?? live.size, position:event.persisted_position ?? prior?.position, source:event.source_message_id,
+        message:{id, role: 'tool', tool_call_id: data.id, content: data.result || '', result_obj: data.result_obj,
+          meta: {turn_id: event.run_id, tool_name: data.name}}});
       continue;
     }
     const id = event.source_message_id || `live-${event.run_id || ''}`;
-    const message: Message = {...(live.get(id)||{ id, role: 'assistant', content: '', reasoning_content: '', tool_calls: [], live:false, meta: { turn_id: event.run_id } })};
+    const prior = live.get(id);
+    const message: Message = {...(prior?.message||{ id, role: 'assistant', content: '', reasoning_content: '', tool_calls: [], live:false, meta: { turn_id: event.run_id } })};
     if (!messageDate(message.created_at) && messageDate(event.created_at)) message.created_at = event.created_at;
     if (event.type === 'content') message.content += event.delta || '';
     if (event.type === 'content_snapshot') message.content = event.content || '';
     if (event.type === 'thinking') message.reasoning_content += event.delta || '';
     if (event.type === 'tool_call' && event.data) message.tool_calls=[...(message.tool_calls||[]),event.data];
-    live.set(id,message);
+    live.set(id,{message,order:prior?.order ?? live.size,position:event.persisted_position ?? prior?.position});
   }
   this.previous=events;
-  const visible=[...live.values()].filter(message=>!ids.has(message.id)&&!(message.role==='tool'&&toolIds.has(message.tool_call_id)));
-  const streaming = visible.filter(message => activeRun && message.meta?.turn_id===activeRun && message.role === 'assistant');
-  const last=streaming.at(-1)?.id;
-  for(const message of visible){const active=message.id===last;if(Boolean(message.live)!==active)live.set(message.id,{...message,live:active});}
-  // Journal fragments belong before the next turn. Keeping every run's durable
-  // events preserves interrupted output after the user sends another message.
+  // Reconcile the whole cache, not just new deltas. Saved sources outside the
+  // page belong to pagination, even when their user anchor is no longer loaded.
+  const visible=[...live.values()].filter(({message,position})=>position == null && !ids.has(message.id) &&
+    !(message.role==='tool' && (toolIds.has(toolKey(messageRun(message),message.tool_call_id!)) || toolIds.has(toolKey(undefined,message.tool_call_id!)))));
+  const streaming = visible.filter(({message}) => activeRun && messageRun(message)===activeRun && message.role === 'assistant');
+  const last=streaming.at(-1)?.message.id;
+  for(const fragment of visible){const active=fragment.message.id===last;if(Boolean(fragment.message.live)!==active)fragment.message={...fragment.message,live:active};}
+  const orders = new Map([...live].map(([id,fragment])=>[id,fragment.order]));
+  // A tool result also proves that its calling assistant precedes it, even
+  // when that assistant's content events are absent from a legacy journal.
+  for(const fragment of live.values())if(fragment.source && !orders.has(fragment.source))orders.set(fragment.source,fragment.order-.5);
+  const sourceOrder = (message:Message) => orders.get(message.role === 'tool' ? toolKey(messageRun(message),message.tool_call_id!) : message.meta?.ui_source_message_id || message.id);
+  const onlyTurn = new Set([...live.values()].map(({message})=>messageRun(message))).size === 1;
+  // Restore unsaved output within its own turn, using source order even when
+  // the page begins halfway through that turn. Never guess a global tail slot.
   const result = [...messages];
-  for (const original of visible) {
-    const message=live.get(original.id)!;
-    const run = message.meta?.turn_id;
-    const start = result.findIndex(m => m.role === 'user' && m.meta?.turn_id === run);
-    let next = start < 0 ? -1 : result.findIndex((m, i) => i > start && m.role === 'user' && m.meta?.turn_id !== run);
-    if (next < 0) next = result.length;
+  for (const {message,order} of visible) {
+    const run = messageRun(message);
+    const report = (reason:ProjectionIssue['reason']) => onIssue?.({runId:run,messageId:message.id,reason});
+    if (message.id === `live-${run || ''}` && (saved.some(m=>m.role==='assistant' && messageRun(m)===run) ||
+        [...live.values()].some(({message:m})=>m.role==='assistant' && messageRun(m)===run && m.id!==message.id))) {
+      report('missing_source'); continue;
+    }
+    const start = result.findIndex(m => messageRun(m) === run);
+    if (start < 0) {
+      // A single event-only turn is unambiguous (e.g. before its first snapshot).
+      if (!result.length && onlyTurn) result.push(message);
+      else report('missing_turn');
+      continue;
+    }
+    const end = result.findLastIndex(m => messageRun(m) === run);
+    if (result.slice(start,end+1).some(m=>messageRun(m) && messageRun(m)!==run)) {
+      report('split_turn'); continue;
+    }
+    if (result.slice(start,end+1).some(m=>m.role!=='user' && sourceOrder(m)==null)) {
+      report('missing_order'); continue;
+    }
+    const following = result.findIndex((m,i)=>i>=start && i<=end && m.role!=='user' && sourceOrder(m)!>order);
+    const next = following < 0 ? end + 1 : following;
     result.splice(next, 0, message);
   }
   return interleaveGuidance(result, events).filter(m => messageText(m.content) || m.reasoning_content || m.tool_calls?.length || m.role === 'tool' || m.meta?.desktop_attachments?.length || m.meta?.user_added_files?.length);

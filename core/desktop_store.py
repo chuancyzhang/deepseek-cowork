@@ -323,9 +323,9 @@ class DesktopStore:
                        (key, json.dumps(value, ensure_ascii=False)))
         return {"saved": True, "revision": revision + 1}
 
-    def message_window(self, conversation_id, *, before=None, limit=80):
+    def message_window(self, conversation_id, *, before=None, limit=80, connection=None):
         limit = max(1, min(int(limit), 200))
-        with self.storage._connect() as db:
+        with nullcontext(connection) if connection is not None else self.storage._connect() as db:
             params = [conversation_id]
             condition = ""
             if before is not None:
@@ -338,6 +338,39 @@ class DesktopStore:
         return {"messages": [self.storage._message_row_to_dict(row) for row in rows], "total": count,
                 "before": rows[0]["position"] if rows and has_more else None, "has_more": has_more,
                 "ledger_start": rows[0]["position"] if rows else 0, "message_positions": {row["id"]: row["position"] for row in rows}}
+
+    def position_events(self, conversation_id, events, *, connection):
+        """Read-only provenance from the same snapshot as the message window.
+
+        A source outside the page is still saved. Tool-result source_message_id
+        identifies the calling assistant, so results use their own call identity.
+        Only lightweight identities are read; neither messages nor events mutate.
+        """
+        if not events:
+            return []
+        sources, results = {}, {}
+        for row in connection.execute(
+                "SELECT id, role, tool_call_id, position, json_extract(meta, '$.turn_id') AS turn_id "
+                "FROM messages WHERE conversation_id=?", (conversation_id,)):
+            if row["role"] == "assistant":
+                sources[row["id"]] = (row["turn_id"], row["position"])
+            elif row["role"] == "tool" and row["tool_call_id"]:
+                results[(row["turn_id"], row["tool_call_id"])] = row["position"]
+        positioned = []
+        for event in events:
+            payload = event.get("payload", event)
+            kind, run = payload.get("type"), payload.get("run_id")
+            if kind == "tool_result":
+                position = results.get((run, (payload.get("data") or {}).get("id")))
+            elif kind in {"thinking", "content", "content_snapshot", "tool_call"}:
+                owner, position = sources.get(payload.get("source_message_id"), (None, None))
+                if owner and owner != run:
+                    position = None
+            else:
+                positioned.append(event)
+                continue
+            positioned.append({**event, "persisted_position": position})
+        return positioned
 
     def summarize_conversations(self, records):
         """Project existing draft/view data without rewriting history or activity dates."""

@@ -160,12 +160,18 @@ class DesktopService:
         if not record:
             raise ValueError("对话不存在。")
         run = self.store.latest_run(conversation_id)
-        window = self.store.message_window(conversation_id, before=before, limit=limit)
-        visible_turns = {str((message.get("meta") or {}).get("turn_id") or "") for message in window["messages"]}
-        events = []
-        for historical_run in self.store.conversation_runs(conversation_id):
-            if historical_run["id"] in visible_turns and self.state.runtime_journal.get_run(conversation_id, historical_run["id"]):
-                events.extend(self.state.runtime_journal.read_events(conversation_id, historical_run["id"]))
+        with self.storage._connect() as db:
+            db.execute("BEGIN")
+            window = self.store.message_window(conversation_id, before=before, limit=limit, connection=db)
+            visible_turns = {str((message.get("meta") or {}).get("turn_id") or "") for message in window["messages"]}
+            events = []
+            for historical_run in self.store.conversation_runs(conversation_id):
+                if historical_run["id"] in visible_turns and self.state.runtime_journal.get_run(conversation_id, historical_run["id"]):
+                    events.extend(self.state.runtime_journal.read_events(conversation_id, historical_run["id"]))
+            events = self.store.position_events(conversation_id, events, connection=db)
+        log.debug("history_projection_snapshot conversation=%s start=%s messages=%s events=%s persisted=%s",
+                  conversation_id, window["ledger_start"], len(window["messages"]), len(events),
+                  sum(event.get("persisted_position") is not None for event in events))
         from core.conversation_render import project_visible_messages
         draft = self.store.versioned_state("draft:" + conversation_id, {"text": "", "attachments": []})
         view = self.store.versioned_state("view:" + conversation_id, {})

@@ -96,8 +96,8 @@ async function createWindow() {
   window.setMenuBarVisibility(false);
   snippetHost.attach(window.webContents);
   window.webContents.on('console-message', details => {
-    if (!details.message?.startsWith('workbench_render_failed ')) return;
-    // Persist the boundary diagnostic only, never general page console output.
+    if (!['workbench_render_failed ', 'message_projection_unplaced '].some(prefix=>details.message?.startsWith(prefix))) return;
+    // Persist explicit renderer diagnostics only, never general page console output.
     void fs.mkdir(path.join(dataDir, 'logs'), {recursive:true})
       .then(() => fs.appendFile(path.join(dataDir, 'logs', 'desktop-renderer.log'), `${new Date().toISOString()} ${details.message}\n`))
       .catch(error => console.error('renderer_diagnostic_write_failed', error.message));

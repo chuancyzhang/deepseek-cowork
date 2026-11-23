@@ -1,11 +1,11 @@
 const {app,BrowserWindow}=require('electron');
-const path=require('node:path'),assert=require('node:assert/strict');
+const path=require('node:path'),assert=require('node:assert/strict'),fs=require('node:fs/promises');
 const data=process.env.COWORK_TASK_TEST_DATA;
 app.setPath('userData',path.join(data,'profile'));
 let window;const errors=[];
 const deadline=setTimeout(()=>{console.error('task workspace fixture timeout',errors);app.exit(1);},20000);
 app.whenReady().then(async()=>{
-  window=new BrowserWindow({show:false,width:1100,height:800,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});
+  window=new BrowserWindow({show:false,width:1100,height:800,webPreferences:{offscreen:true,sandbox:true,contextIsolation:true,nodeIntegration:false}});
   window.webContents.on('console-message',details=>{if(details.level==='error')errors.push(details.message);});
   const read=code=>window.webContents.executeJavaScript(code);
   const until=async(code)=>{const start=Date.now();while(Date.now()-start<6000){if(await read(code))return;await new Promise(resolve=>setTimeout(resolve,30));}throw Error('Timed out: '+code+' '+errors.join('\n'));};
@@ -33,6 +33,30 @@ app.whenReady().then(async()=>{
   await until('document.querySelector(".call-detail")?.textContent.includes("调用返回时的结果")');
   assert.match(await read('document.querySelector(".task-detail-heading").textContent'),/已返回/);
   assert.match(await read('document.querySelector(".call-detail").textContent'),/"status": "queued"/);
+  const snapshot=async name=>{
+    if(!process.env.COWORK_TASK_SCREENSHOTS)return;
+    await new Promise(resolve=>setTimeout(resolve,150));
+    await fs.mkdir(process.env.COWORK_TASK_SCREENSHOTS,{recursive:true});
+    await fs.writeFile(path.join(process.env.COWORK_TASK_SCREENSHOTS,name+'.png'),(await window.webContents.capturePage()).toPNG());
+  };
+  await read('window.historyPreview(false)');
+  await until('Boolean(document.querySelector(".history-fixture"))');
+  assert.deepEqual(await read('window.historyProjection'),{ids:['old-answer','new-question','new-answer'],issues:[]});
+  assert.equal(await read('document.querySelectorAll("[data-turn=old]").length'),1);
+  assert.match(await read('document.querySelector("[data-turn=old] .process-summary").textContent'),/5 分 28 秒/);
+  assert.match(await read('[...document.querySelectorAll(".process-summary")].at(-1).textContent'),/2.0 秒/);
+  await snapshot('history-page');
+  await read('document.querySelector(".load-history").click()');
+  await until('window.historyProjection.ids.length===6');
+  assert.deepEqual(await read('window.historyProjection.ids'),['old-question','old-stage','old-result','old-answer','new-question','new-answer']);
+  assert.match(await read('[...document.querySelectorAll("[data-turn]")].at(-1).textContent'),/建议先确认目标/);
+  await snapshot('history-full');
+  await read('window.historyPreview(false)');
+  await until('window.historyProjection.ids.length===3');
+  window.setSize(560,800);window.webContents.setZoomFactor(1.25);
+  await read('document.documentElement.dataset.theme="dark";document.body.style.background="var(--bg)"');
+  assert.ok(await read('document.documentElement.scrollWidth<=document.documentElement.clientWidth+1'));
+  await snapshot('history-narrow-dark');
   assert.deepEqual(errors,[]);
   console.log('TASK_WORKSPACE_FIXTURE_OK');
 }).then(()=>{clearTimeout(deadline);window?.destroy();app.exit(0);}).catch(error=>{console.error(error);clearTimeout(deadline);window?.destroy();app.exit(1);});

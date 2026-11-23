@@ -226,6 +226,85 @@ test('interrupted output stays before the next turn, without a false running sta
   assert.equal(messages[1].live, false);
 });
 
+test('page-excluded saved sources and tool results never reappear at the tail, including after reload and backfill', () => {
+  const msg=(id,role,turn,extra={})=>({id,role,content:id,meta:{turn_id:turn},...extra});
+  const first=msg('a1','assistant','first'),tool=msg('t1','tool','first',{tool_call_id:'call'});
+  const page=[msg('a2','assistant','first'),msg('u2','user','last'),msg('a3','assistant','last')];
+  const raw=[
+    {sequence:1,persisted_position:0,payload:{type:'content',run_id:'first',source_message_id:'a1',delta:'a1'}},
+    {sequence:2,persisted_position:1,payload:{type:'tool_result',run_id:'first',source_message_id:'a1',data:{id:'call',result:'t1'}}},
+    {sequence:3,created_at:100,payload:{type:'turn_started',run_id:'first'}},
+    {sequence:4,created_at:428,payload:{type:'final',run_id:'first'}},
+  ];
+  const original=structuredClone(raw),events=unwrapEvents(raw),projection=new MessageProjection();
+  assert.deepEqual(projection.project(page,events),page);
+  assert.deepEqual(messageGroups(projection.project(page,unwrapEvents(structuredClone(raw)))).map(g=>g.messages[0].meta.turn_id),['first','last','last']);
+  const older=[msg('u1','user','first'),first,tool,...page];
+  assert.deepEqual(projection.project(older,events),older);
+  assert.deepEqual(new MessageProjection().project(page,events),page);
+  assert.equal(elapsedTime(turnTimings(events).get('first').start,turnTimings(events).get('first').end),328);
+  assert.deepEqual(raw,original);
+});
+
+test('unsaved interrupted fragments follow source order within a partial turn and reconcile after persistence', () => {
+  const saved=[{id:'a','role':'assistant',content:'first stage',meta:{turn_id:'r'}},
+    {id:'z',role:'assistant',content:'later stage',meta:{turn_id:'r'}},
+    {id:'next',role:'user',content:'next question',meta:{turn_id:'next'}},
+    {id:'answer',role:'assistant',content:'next answer',meta:{turn_id:'next'}}];
+  const events=[{type:'content',run_id:'r',sequence:1,source_message_id:'a',delta:'first stage'},
+    {type:'thinking',run_id:'r',sequence:2,source_message_id:'partial',delta:'retained thinking'},
+    {type:'tool_result',run_id:'r',sequence:3,source_message_id:'partial',data:{id:'call',result:'retained result'}},
+    {type:'content',run_id:'r',sequence:4,source_message_id:'z',delta:'later stage'},
+    {type:'final',run_id:'r',sequence:5}];
+  const projection=new MessageProjection(),issues=[];
+  const out=projection.project(saved,events,undefined,issue=>issues.push(issue));
+  assert.deepEqual(out.map(m=>m.id),['a','partial','tool:r:call','z','next','answer']);
+  assert.equal(out[1].reasoning_content,'retained thinking');
+  assert.equal(out[1].live,false);
+  assert.deepEqual(issues,[]);
+  // A later snapshot knows the source is now saved, even if the page moved past it.
+  const snapshot=events.map(e=>({...e,persisted_position:e.sequence===2?2:e.sequence===3?3:undefined}));
+  assert.deepEqual(projection.project(saved,mergeEvents(snapshot,events)),saved);
+});
+
+test('tool-result deduplication is scoped by turn, not by the assistant source or another turn call', () => {
+  const saved=[{id:'u1',role:'user',content:'one',meta:{turn_id:'r1'}},
+    {id:'t1',role:'tool',tool_call_id:'same-call',content:'one result',meta:{turn_id:'r1'}},
+    {id:'u2',role:'user',content:'two',meta:{turn_id:'r2'}},
+    {id:'a2',role:'assistant',content:'saved caller',meta:{turn_id:'r2'}}];
+  const events=[{type:'tool_result',run_id:'r2',source_message_id:'a2',data:{id:'same-call',result:'two result'}}];
+  assert.equal(displayMessages(saved,events).at(-1).content,'two result');
+});
+
+test('unlocatable output is retained for a later anchor and reported instead of appended to another turn', () => {
+  const projection=new MessageProjection(),issues=[];
+  const events=[{type:'content',run_id:'old',source_message_id:'partial',delta:'retained'}];
+  const next=[{id:'u2',role:'user',content:'next',meta:{turn_id:'next'}}];
+  assert.deepEqual(projection.project(next,events,undefined,issue=>issues.push(issue)),next);
+  assert.deepEqual(issues,[{runId:'old',messageId:'partial',reason:'missing_turn'}]);
+  const restored=projection.project([{id:'u1',role:'user',content:'one',meta:{turn_id:'old'}},...next],events);
+  assert.deepEqual(restored.map(m=>m.id),['u1','partial','u2']);
+  assert.equal(restored[1].content,'retained');
+});
+
+test('a legacy event without source identity cannot duplicate a saved assistant', () => {
+  const saved=[{id:'u',role:'user',content:'question',meta:{turn_id:'r'}},
+    {id:'a',role:'assistant',content:'saved answer',meta:{turn_id:'r'}}];
+  const issues=[],events=[{type:'content',run_id:'r',delta:'saved answer'}];
+  assert.deepEqual(new MessageProjection().project(saved,events,undefined,issue=>issues.push(issue)),saved);
+  assert.equal(issues[0].reason,'missing_source');
+});
+
+test('a turn match alone cannot establish order relative to a saved answer with no source events', () => {
+  const saved=[{id:'answer',role:'assistant',content:'saved answer',meta:{turn_id:'r'}}];
+  const issues=[],events=[{type:'content',run_id:'r',source_message_id:'partial',delta:'retained stage'}];
+  const projection=new MessageProjection();
+  assert.deepEqual(projection.project(saved,events,undefined,issue=>issues.push(issue)),saved);
+  assert.equal(issues[0].reason,'missing_order');
+  const complete=[...events,{type:'content',run_id:'r',source_message_id:'answer',delta:'saved answer'}];
+  assert.deepEqual(projection.project(saved,complete).map(m=>m.id),['partial','answer']);
+});
+
 test('tool results survive streaming and reconcile once canonical messages arrive', () => {
   const events = [{type:'tool_call', run_id:'a', source_message_id:'m1', data:{id:'c1', name:'read_file'}},
     {type:'tool_result', run_id:'a', source_message_id:'m1', data:{id:'c1', name:'read_file', result:'file content'}},

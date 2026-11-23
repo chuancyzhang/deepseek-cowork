@@ -2746,6 +2746,7 @@ class LLMWorker(TaskWorker):
                 session_id, self.request_id or self.turn_id or session_id,
                 persist=persist, classify=self._tool_result_failure_kind,
                 abort_check=lambda: self.is_stopped,
+                output_root=getattr(journal, 'root', None),
             )
             self.tool_tasks = manager
             self._tool_delivery_receipts = []

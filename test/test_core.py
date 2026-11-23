@@ -1222,6 +1222,23 @@ class TestEnvUtils(unittest.TestCase):
                 env_utils.ensure_package_installed("openpyxl")
             self.assertIn("bundled Python runtime is missing", str(cm.exception))
 
+    def test_explicit_package_retry_clears_cached_failure(self):
+        key = 'python-runner:qa_package'
+        env_utils._INSTALL_FAILED[key] = 'previous install failed'
+        try:
+            with patch.object(env_utils, 'get_python_executable', return_value=env_utils.sys.executable), \
+                 patch.object(env_utils, '_inject_skill_python_path'), \
+                 patch.object(env_utils, '_sandbox_can_import', side_effect=[False, False, True, True]), \
+                 patch('core.sandbox_runtime.install_skill_dependencies', return_value={'ok': True}) as install:
+                with self.assertRaisesRegex(RuntimeError, 'previous install failed'):
+                    env_utils.ensure_package_installed('qa-package', 'qa_package', skill_id='python-runner')
+                env_utils.ensure_package_installed('qa-package', 'qa_package', skill_id='python-runner', retry=True)
+                install.assert_called_once()
+                self.assertNotIn(key, env_utils._INSTALL_FAILED)
+        finally:
+            env_utils._INSTALL_FAILED.pop(key, None)
+            env_utils._INSTALL_SUCCESS.discard(key)
+
     def test_ensure_package_installed_uses_sandbox_probe_instead_of_host_import(self):
         env_utils._INSTALL_FAILED.clear()
         env_utils._INSTALL_SUCCESS.clear()
@@ -1267,7 +1284,8 @@ class TestEnvUtils(unittest.TestCase):
             stderr="",
         )
         with patch("core.sandbox_runtime.build_sandbox_env", return_value={"PYTHONPATH": "C:\\sandbox\\site-packages"}), \
-             patch("subprocess.run", return_value=completed):
+             patch("subprocess.Popen"), \
+             patch("core.tool_output.capture_process", return_value={"stdout":completed.stdout,"stderr":completed.stderr,"exit_code":completed.returncode}):
             probe = env_utils._sandbox_import_probe("C:\\runtime\\python.exe", "markitdown", skill_id="python-runner")
 
         self.assertFalse(probe["ok"])

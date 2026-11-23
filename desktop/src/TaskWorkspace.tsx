@@ -5,6 +5,7 @@ import {agentStatuses as statuses, childMessages} from './subagents';
 import type { Conversation, Message } from './types';
 import {reviewId} from './reviews';
 import { messageGroups, formatDuration, toolErrorText } from './runtime';
+import {ToolOutputDetail} from './ToolOutput';
 
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 export type TaskView = { section: 'calls' | 'agents' | 'context'; callId?: string; runId?: string; agentId?: string; scroll?: Record<string, number>; open?: Record<string, boolean>; drafts?: Record<string, {text: string; messageId?: string; submitted?: string}> };
@@ -59,7 +60,7 @@ export default function TaskWorkspace({ openReview, openFile = () => {}, cid, co
     if (loadedScope.current !== scope) {loadedScope.current=scope;setSnapshot(null);setChild(null);setActionError('');setBusy(false);actionSequence.current++;}
     void update();
     return () => { stopped = true; clearTimeout(timer); };
-  }, [cid, runId, value.agentId, agentsOnly, revision]);
+  }, [cid, runId, value.agentId, agentsOnly, revision, historical ? undefined : conversation.run?.status]);
   useLayoutEffect(() => {
     if (scroll.current && snapshot) scroll.current.scrollTop = latest.current.value.scroll?.[route] || 0;
   }, [route, Boolean(snapshot), Boolean(child)]);
@@ -114,7 +115,7 @@ export default function TaskWorkspace({ openReview, openFile = () => {}, cid, co
     {historical && <div className="task-scope"><span>正在查看历史任务</span><button className="text-link" onClick={() => change({runId: undefined, callId: undefined, agentId: undefined})}>返回当前任务</button></div>}
     {failure && <div className="inline-error" role="alert">{failure}<button onClick={() => setRevision(previous => previous + 1)}><RefreshCw size={13}/>重试</button></div>}
     <div className="task-scroll" ref={scroll} onScroll={event => { const top = event.currentTarget.scrollTop; change({scroll: {...value.scroll, [route]: top}}); }}>
-      {!snapshot && !failure ? <div className="loading"><LoaderCircle size={18} className="spin"/>正在读取任务…</div> : value.callId ? selected ? <div className="call-detail">{reviewId(selected.result) && openReview && <button className="primary" onClick={()=>openReview!(reviewId(selected.result)!)}>打开草稿审阅</button>}{selected.error && <p className="run-error">{toolErrorText(selected.error)}</p>}{disclosure('arguments:' + selected.id, '参数', selected.arguments, true)}{mediaSnapshot(selected) && <p className="muted">以下为调用返回时的记录。最新进度请看聊天中的任务卡。</p>}{disclosure('result:' + selected.id, mediaSnapshot(selected) ? '调用返回时的结果' : '结果', selected.result ?? '尚未收到结果', true)}{disclosure('info:' + selected.id, '运行信息', {id: selected.id, run_id: snapshot.run?.id, started_at: selected.started_at, elapsed_ms: selected.elapsed_ms})}</div> : <p className="task-empty">尚未找到这次调用的记录。<button onClick={() => setRevision(previous => previous + 1)}>重新读取</button></p> : value.agentId ? <>
+      {!snapshot && !failure ? <div className="loading"><LoaderCircle size={18} className="spin"/>正在读取任务…</div> : value.callId ? selected ? <div className="call-detail">{reviewId(selected.result) && openReview && <button className="primary" onClick={()=>openReview!(reviewId(selected.result)!)}>打开草稿审阅</button>}{selected.error && <p className="run-error">{toolErrorText(selected.error)}</p>}{disclosure('arguments:' + selected.id, '参数', selected.arguments)}{!agentsOnly && <ToolOutputDetail key={cid+':'+runId+':'+selected.id} cid={cid} runId={runId} callId={selected.id} running={['running','queued','stopping'].includes(snapshot?.run?.status)}/>}{mediaSnapshot(selected) && <p className="muted">以下为调用返回时的记录。最新进度请看聊天中的任务卡。</p>}{disclosure('result:' + selected.id, mediaSnapshot(selected) ? '调用返回时的结果' : '返回值', selected.result ?? '尚未收到结果', true)}{disclosure('info:' + selected.id, '运行信息', {id: selected.id, run_id: snapshot.run?.id, started_at: selected.started_at, elapsed_ms: selected.elapsed_ms, waits: selected.waits})}</div> : <p className="task-empty">尚未找到这次调用的记录。<button onClick={() => setRevision(previous => previous + 1)}>重新读取</button></p> : value.agentId ? <>
         {selectedAgent?.control_error && <div className="inline-error">{selectedAgent.control_error}</div>}
         {selectedAgent?.last_error && <p className="run-error">{toolErrorText(selectedAgent.last_error)}</p>}
         {child?.has_more && <button className="load-history" disabled={busy} onClick={async () => {

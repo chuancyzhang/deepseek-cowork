@@ -216,6 +216,10 @@ class DesktopBrowser:
                 result['unresolved_action'] = blocked
             if reconciled:
                 result['reconciled_action'] = reconciled
+            if result.get('ok') and action == 'open' and identity:
+                self.w.s.publish({'event': 'browser_opened', 'conversation_id': cid,
+                                  'run_id': identity.get('run_id'), 'data': {'tab_id': tab.id}})
+                log.info('browser_opened session=%s run=%s tab=%s', cid, identity.get('run_id'), tab.id)
             if result.get('ok') and action == 'close':
                 with self.w.lock:
                     self.w.close_tab(cid, tab.id)

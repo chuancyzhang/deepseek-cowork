@@ -64,6 +64,10 @@ def workspace_list_files(workspace_dir, path=".", recursive=False, include_hidde
 def text_file_read(workspace_dir, path, offset=1, limit=None, encoding=None, _context=None):
     """Read a plain text file. Does not parse DOCX, PPTX, XLSX, XLS, or PDF documents."""
     action = "text_file_read"
+    from core.tool_output import read_owned_output
+    saved_output = read_owned_output(path, offset, limit)
+    if saved_output is not None:
+        return saved_output
     error = _structured_document_error(action, path)
     if error:
         return error

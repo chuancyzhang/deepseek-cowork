@@ -27,7 +27,7 @@ class ConversationActions:
     methods = frozenset({"project.list", "project.save", "project.edit", "project.folder", "project.archive", "project.restore", "conversation.search",
         "conversation.pin", "conversation.restore", "conversation.delete", "conversation.preferences", "conversation.export",
         "conversation.reference", "conversation.branch", "history.prepare", "history.edit", "history.delete", "history.undo",
-        "agent.list", "agent.get", "agent.send", "agent.stop", "agent.resume", "conversation.workspace", "task.inspect", "task.context", "visualization.get", "visualization.state"})
+        "agent.list", "agent.get", "agent.send", "agent.stop", "agent.resume", "conversation.workspace", "task.inspect", "task.output", "task.context", "visualization.get", "visualization.state"})
 
     def __init__(self, service):
         self.service = service
@@ -118,6 +118,18 @@ class ConversationActions:
                 duration = data.get('duration')
                 if isinstance(duration, (int, float)):
                     item['elapsed_ms'] = duration * 1000
+        # Waiting is bookkeeping for an existing execution, never another execution row.
+        for identity, item in list(calls.items()):
+            arguments = item.get('arguments')
+            if item['name'] != 'wait_tool' or not isinstance(arguments, dict) or not run:
+                continue
+            target = journal.get_tool(cid, str(arguments.get('task_id') or ''))
+            if not isinstance(target, dict) or target.get('run_id') != run['id']:
+                continue
+            original = calls.get(target.get('tool_call_id'))
+            if original is not None:
+                original.setdefault('waits', []).append(item)
+                calls.pop(identity)
         def context(preferences, submission=None):
             submission = submission or {}
             return {'workspace': submission.get('workspace_dir') or str(self.service.workspace(cid)),
@@ -440,6 +452,17 @@ class ConversationActions:
             return self.service.conversation(cid)
         if method == "task.inspect":
             return self.task_snapshot(cid, p.get('run_id'))
+        if method == "task.output":
+            from core.tool_output import read_output
+            self.record(cid)
+            run = self.store.get_run(p['run_id']) if p.get('run_id') else None
+            if not run or run['conversation_id'] != cid:
+                raise ValueError('任务不属于当前对话。')
+            result = read_output(self.service.state.runtime_journal.root, cid, run['id'], str(p.get('call_id') or ''),
+                                 cursor=p.get('cursor'), limit=p.get('limit', 65536))
+            if result and result['status'] == 'running' and run['status'] not in {'running', 'queued', 'stopping'}:
+                result = {**result, 'status': 'unknown', 'reason': '任务已结束，执行结果尚未确认；已保存输出仍可查看。'}
+            return result
         if method == "task.context":
             from core.request_snapshot import RequestSnapshotStore
             self.record(cid)

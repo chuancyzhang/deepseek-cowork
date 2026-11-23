@@ -1,11 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {HostStore} from '../src/host/store.ts';
-import {receiveConversation,receiveEvents,conversationAt} from '../src/host/conversations.ts';
+import {receiveConversation,receiveEvents,conversationAt,presentOpenedBrowser} from '../src/host/conversations.ts';
 import {HostSDK} from '../src/host/sdk.ts';
 import {PluginRegistry} from '../src/plugins/registry.ts';
 import {SaveCoordinator} from '../src/host/saveCoordinator.ts';
 import {MessageProjection,mergeEvents} from '../src/runtime.ts';
+
+test('browser presentation opens once without overriding selection, closed panels or background chats',()=>{
+  const host=new HostStore(),initial=()=>({selected:'new'});
+  host.set('navigation:selected','a');host.set('navigation:route','chat');
+  host.set('runs',{a:{id:'r'},b:{id:'s'}});
+  const event={event:'browser_opened',conversation_id:'a',run_id:'r',data:{tab_id:'web'}};
+  assert.equal(presentOpenedBrowser(host,event,initial),true);
+  assert.equal(host.get(host.sessionKey('workspaceOpen','a')),true);
+  assert.equal(host.get(host.sessionKey('workspaceView','a')).selected,'workbench:web');
+  host.set(host.sessionKey('workspaceOpen','a'),false);
+  assert.equal(presentOpenedBrowser(host,{...event,data:{tab_id:'second'}},initial),false);
+  assert.equal(host.get(host.sessionKey('workspaceOpen','a')),false);
+  assert.equal(presentOpenedBrowser(host,{...event,conversation_id:'b',run_id:'s'},initial),false);
+  assert.equal(host.get('navigation:selected'),'a');
+  for(const patch of [{selected:'file:editing.md'},{selected:'new',browserPresentationSuppressed:true}]){
+    host.set(host.sessionKey('workspaceView','a'),patch);
+    assert.equal(presentOpenedBrowser(host,event,initial),false);
+  }
+  host.set(host.sessionKey('workspaceView','a'),initial());
+  assert.equal(presentOpenedBrowser(host,{...event,run_id:'old'},initial),false);
+});
 
 test('media task state belongs to its conversation and newer events survive late snapshots',()=>{
   const host=new HostStore();host.set('navigation:selected','b');

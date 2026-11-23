@@ -13,6 +13,7 @@ import MermaidDiagram from './MermaidDiagram';
 import SnippetPreview from './SnippetPreview';
 import ImageAttachments, {ImagePreviewLink, isImageAttachment} from './ImageAttachment';
 import {reviewTitle, type ReviewSummary} from './reviews';
+import {ToolProcess} from './ToolOutput';
 
 export function MediaResult({file,cid,onFile,onPlayable}:{file:FileReference;cid:string;onFile:(path:string)=>void;onPlayable?:(playable:boolean)=>void}) {
   const [url,setUrl]=useState(''),[failure,setFailure]=useState('');
@@ -173,6 +174,9 @@ export default MessageBubble;
 const toolTitles = new Map([
   ['run_python_code', '运行 Python'],
   ['run_node_code', '运行 JavaScript'],
+  ['bash', '运行命令'],
+  ['install_package', '安装 Python 依赖'],
+  ['run_skill_script', '运行技能脚本'],
   ['request_user_input', '向你提问'],
   ['request_user_approval', '请求确认'],
   ['read_file', '读取文件'],
@@ -228,6 +232,7 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
   }
   const [expanded, setExpanded] = useHostField<boolean | null>('reply:' + cid + ':' + messages[0].id, null);
   const task = activeRun && reviewTask?.run_id === activeRun ? reviewTask : undefined;
+  useEffect(() => {if (running && !task && expanded === null) setExpanded(true);}, [running, task, expanded, setExpanded]);
   const previousTask = useRef(task);
   useEffect(() => {
     if (previousTask.current && !task) setExpanded(null);
@@ -255,6 +260,8 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
     const resultObject = result?.result_obj;
     const failed = Boolean(resultObject?.error || ['failed', 'error'].includes(resultObject?.status));
     const toolName = tool.function?.name || tool.name || result?.meta?.tool_name;
+    // Waiting updates the original invocation; its protocol records remain in history/details.
+    if (toolName === 'wait_tool') return null;
     if (!readOnly && agentTools.has(toolName)) {
       if (tool.id !== collaboration[0]?.callId) return null;
       return <div className="process-step agent-step" key={tool.id}><Users className="timeline-node" size={14} aria-hidden="true"/><Disclosure stateKey={cid+':agents:'+tool.id} kind="thinking agent-process" title={<>{agentTitle}{collaboration.some(item=>item.failed) && <small className="error-text">有调用失败</small>}</>}>
@@ -268,26 +275,23 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
     const title = toolTitles.get(toolName) || toolName || '工具调用';
     const toolQuestions = questions.filter(question => question.callId === tool.id);
     const mediaSnapshot = (toolName === 'media_create' || toolName === 'media_task') && resultObject?.task_id;
-    const state = result ? failed ? '失败' : mediaSnapshot ? '已返回' : ['running','queued'].includes(resultObject?.status) ? '运行中' : '已完成'
+    const state = result ? failed ? '失败' : resultObject?.cancel_requested ? '正在停止' : resultObject?.status === 'cancelled' ? '已停止' : resultObject?.status === 'unknown' ? '结果未确认' : mediaSnapshot ? '已返回' : ['running','queued'].includes(resultObject?.status) ? '运行中' : '已完成'
       : running ? toolQuestions.length ? '已发起' : '运行中' : '结果未确认';
     let args = tool.function?.arguments ?? tool.arguments ?? tool.args ?? {};
     if (typeof args === 'string') {try {args = JSON.parse(args);} catch {args = {};}}
     const paths = ['path','file_path','filename','file'].flatMap(key => typeof args?.[key] === 'string' ? [args[key]] : []);
     const images = toolName === 'view_image' && result && !failed ? (resultObject?.content_parts || []).filter((part: any) => part.type === 'input_image' && typeof part.path === 'string') : [];
     if (images.length) return <ViewedImages key={tool.id} cid={cid} callId={tool.id} images={images} onFile={onFile} onDetails={() => onAction('tool', {...message, tool_call_id: tool.id})}/>;
-    return <div className="process-step tool-step" key={tool.id}>
-      <Wrench className="timeline-node" size={14} aria-hidden="true"/>
-      <button className="process-tool" onClick={() => onAction('tool', {...message, tool_call_id: tool.id})}>
-        <span>{title}</span><small className="process-tool-state" data-failed={failed || undefined}>{state}</small>
-        <span className="process-tool-detail">详情 <ChevronRight size={13} aria-hidden="true"/></span>
-      </button>
-      {toolName && title !== toolName && <code className="process-tool-name">{toolName}</code>}
+    return <ToolProcess key={cid+':'+(message.meta?.turn_id || message.meta?.ui_turn_id || timing?.id || activeRun || '')+':'+tool.id} cid={cid} runId={message.meta?.turn_id || message.meta?.ui_turn_id || timing?.id || activeRun} callId={tool.id}
+      title={title} name={toolName || ''} state={state} running={running} failed={failed} readOnly={readOnly}
+      result={result ? messageText(resultObject?.output_preview || resultObject?.content || resultObject?.stdout || result.content).slice(-8192) : ''}
+      details={() => onAction('tool', {...message, tool_call_id: tool.id})}>
       {[...new Set(paths)].map(path => isImageAttachment({path})
         ? <ImagePreviewLink key={path} cid={cid} file={{path, name:path.split(/[\\/]/).pop() || path}} onOpen={onFile}>{path}</ImagePreviewLink>
         : <button className="text-link process-path" key={path} onClick={() => onFile(path)}>{path}</button>)}
       {failed && <p className="process-tool-error error-text">{processError(resultObject?.error)}</p>}
       {toolQuestions.map(questionRow)}
-    </div>;
+    </ToolProcess>;
   }
   return <section className="assistant-turn">
     {expert && !readOnly && <div className="assistant-name">{expert.meta?.conversation_agent?.name || expert.meta?.ui_conversation_agent?.name}</div>}

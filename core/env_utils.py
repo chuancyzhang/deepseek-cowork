@@ -97,7 +97,8 @@ def _summarize_import_probe(probe):
     return "\n".join([item for item in parts if item])
 
 
-def _sandbox_import_probe(python_exe, import_name, skill_id=None):
+def _sandbox_import_probe(python_exe, import_name, skill_id=None, context=None):
+    from core.tool_output import ProcessExecutionError
     if not python_exe:
         return {"ok": False, "returncode": None, "stdout": "", "stderr": "", "error": "Sandbox Python runtime is missing."}
     try:
@@ -115,19 +116,30 @@ def _sandbox_import_probe(python_exe, import_name, skill_id=None):
             "print(json.dumps(payload, ensure_ascii=False))\n"
             "raise SystemExit(0 if payload['ok'] else 1)\n"
         )
-        completed = subprocess.run(
-            [python_exe, "-X", "utf8", "-c", code],
+        from core.tool_output import capture_process, current_output
+        from core.tool_cancellation import abort_requested
+        from core.tool_tasks import current_tool_run, current_tool_task
+        owner, task = current_tool_run(), current_tool_task()
+        if abort_requested(context) or owner and task and owner.abort_requested(task.task_id):
+            raise ProcessExecutionError({'status': 'cancelled', 'error': '依赖验证已取消，代码尚未执行。'})
+        output = current_output()
+        if output:
+            output.append('phase', f'正在验证 {import_name}…\n')
+        process = subprocess.Popen(
+            [python_exe, "-u", "-X", "utf8", "-c", code],
             env=build_sandbox_env(skill_id=skill_id),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **({"start_new_session": True} if os.name != 'nt' else {}),
             **subprocess_kwargs_no_window(),
         )
-        stdout = (completed.stdout or "").strip()
-        stderr = (completed.stderr or "").strip()
+        completed = capture_process(process, context, timeout=60)
+        if completed.get('status') in {'cancelled', 'unknown'} or completed.get('error'):
+            raise ProcessExecutionError(completed)
+        stdout = (completed['stdout'] or "").strip()
+        stderr = (completed['stderr'] or "").strip()
         error = ""
-        ok = completed.returncode == 0
+        ok = completed['exit_code'] == 0
         if stdout:
             last_line = stdout.splitlines()[-1]
             try:
@@ -142,17 +154,19 @@ def _sandbox_import_probe(python_exe, import_name, skill_id=None):
             error = stderr
         return {
             "ok": ok,
-            "returncode": completed.returncode,
+            "returncode": completed['exit_code'],
             "stdout": stdout,
             "stderr": stderr,
             "error": error,
         }
+    except ProcessExecutionError:
+        raise
     except Exception as exc:
         return {"ok": False, "returncode": None, "stdout": "", "stderr": "", "error": str(exc)}
 
 
-def _sandbox_can_import(python_exe, import_name, skill_id=None):
-    return _sandbox_import_probe(python_exe, import_name, skill_id=skill_id).get("ok", False)
+def _sandbox_can_import(python_exe, import_name, skill_id=None, context=None):
+    return _sandbox_import_probe(python_exe, import_name, skill_id=skill_id, context=context).get("ok", False)
 
 def _refresh_sys_path():
     import site
@@ -202,7 +216,7 @@ def _attach_external_site_packages(python_exe):
             sys.path.append(p)
             print(f"[System] Added External Site to sys.path: {p}")
 
-def ensure_package_installed(package_name, import_name=None, skill_id=None):
+def ensure_package_installed(package_name, import_name=None, skill_id=None, context=None, retry=False):
     """
     Ensure a python package is installed using the environment's pip.
     
@@ -215,10 +229,12 @@ def ensure_package_installed(package_name, import_name=None, skill_id=None):
     if not import_name:
         import_name = package_name
     cache_key = f"{skill_id or 'global'}:{import_name}"
+    if retry:
+        _INSTALL_FAILED.pop(cache_key, None)
     python_exe = get_python_executable()
     if skill_id:
         _inject_skill_python_path(skill_id)
-    sandbox_ready = _sandbox_can_import(python_exe, import_name, skill_id=skill_id)
+    sandbox_ready = _sandbox_can_import(python_exe, import_name, skill_id=skill_id, context=context)
     if sandbox_ready:
         _INSTALL_SUCCESS.add(cache_key)
         _INSTALL_FAILED.pop(cache_key, None)
@@ -226,7 +242,7 @@ def ensure_package_installed(package_name, import_name=None, skill_id=None):
 
     from core.sandbox_runtime import BUNDLED_PYTHON_IMPORTS
     if getattr(sys, "frozen", False) and import_name.split(".", 1)[0] in BUNDLED_PYTHON_IMPORTS:
-        probe = _sandbox_import_probe(python_exe, import_name, skill_id=skill_id)
+        probe = _sandbox_import_probe(python_exe, import_name, skill_id=skill_id, context=context)
         raise RuntimeError(
             f"随应用提供的 {import_name} 不可用，请重新安装完整的 Cowork 分发包。\n"
             + _summarize_import_probe(probe)
@@ -247,18 +263,19 @@ def ensure_package_installed(package_name, import_name=None, skill_id=None):
 
         from core.sandbox_runtime import build_sandbox_env, install_skill_dependencies
         if skill_id:
-            status = install_skill_dependencies(skill_id, python_dependencies=[package_name])
+            status = install_skill_dependencies(skill_id, python_dependencies=[package_name], context=context)
             if not status.get("ok"):
                 msg = status.get("message") or f"Failed to install {package_name}."
                 _INSTALL_FAILED[cache_key] = msg
-                raise RuntimeError(msg)
+                from core.tool_output import ProcessExecutionError
+                raise ProcessExecutionError(status)
             _inject_skill_python_path(skill_id)
-            if not _sandbox_can_import(python_exe, import_name, skill_id=skill_id):
-                status = install_skill_dependencies(skill_id, python_dependencies=[package_name], force=True)
+            if not _sandbox_can_import(python_exe, import_name, skill_id=skill_id, context=context):
+                status = install_skill_dependencies(skill_id, python_dependencies=[package_name], force=True, context=context)
                 if not status.get("ok"):
                     msg = status.get("message") or f"Failed to install {package_name}."
                     _INSTALL_FAILED[cache_key] = msg
-                    raise RuntimeError(msg)
+                    raise ProcessExecutionError(status)
                 _inject_skill_python_path(skill_id)
         else:
             from core.sandbox_runtime import PYTHON_INDEX_URL
@@ -275,7 +292,7 @@ def ensure_package_installed(package_name, import_name=None, skill_id=None):
             if os.path.abspath(python_exe) != os.path.abspath(sys.executable):
                 _attach_external_site_packages(python_exe)
 
-        if _sandbox_can_import(python_exe, import_name, skill_id=skill_id):
+        if _sandbox_can_import(python_exe, import_name, skill_id=skill_id, context=context):
             print(f"[System] Verified {import_name} is importable in sandbox runtime.")
             _INSTALL_SUCCESS.add(cache_key)
             _INSTALL_FAILED.pop(cache_key, None)
@@ -285,7 +302,7 @@ def ensure_package_installed(package_name, import_name=None, skill_id=None):
                 pass
             return
 
-        probe = _sandbox_import_probe(python_exe, import_name, skill_id=skill_id)
+        probe = _sandbox_import_probe(python_exe, import_name, skill_id=skill_id, context=context)
         detail = _summarize_import_probe(probe)
         if getattr(sys, 'frozen', False) and not skill_id:
             print(f"[System] Warning: {package_name} installed to external env. Restart required for in-process use.")

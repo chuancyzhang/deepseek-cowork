@@ -1,49 +1,18 @@
-from core.tool_cancellation import init_abort_state as _init_abort_state, stop_tool_process
+from core.tool_cancellation import init_abort_state as _init_abort_state
+from core.tool_output import capture_process, process_text
 import json
-import locale
 import os
-import re
 import subprocess
 import tempfile
 import time
+from pathlib import Path
+from urllib.parse import quote
 
 
 from core.interaction import ask_user
 from core.runtime_components import install_node_runtime
 from core.filesystem_ops import glob_paths, grep_contents
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox, run_skill_script_in_sandbox
-
-def _decode_bytes(raw):
-    if raw is None:
-        return ""
-    if isinstance(raw, str):
-        return raw
-    candidates = ["utf-8", "utf-8-sig"]
-    preferred = locale.getpreferredencoding(False)
-    if preferred:
-        candidates.append(preferred)
-    if os.name == "nt":
-        candidates.extend(["mbcs", "cp936", "gbk", "cp950", "cp932"])
-    best = None
-    best_score = -1
-    for enc in candidates:
-        try:
-            text = raw.decode(enc, errors="replace")
-        except Exception:
-            continue
-        score = -text.count("�")
-        if re.search(r"[\u4e00-\u9fff]", text):
-            score += 5
-        if score > best_score:
-            best_score = score
-            best = text
-    if best is not None:
-        return best
-    try:
-        return raw.decode("utf-8", errors="replace")
-    except Exception:
-        return str(raw)
-
 
 def bash(workspace_dir, command, _context=None):
     """
@@ -61,22 +30,7 @@ def bash(workspace_dir, command, _context=None):
             shell_kind="bash",
             text=False,
         )
-        while True:
-            if abort_state["aborted"]:
-                return stop_tool_process(process, _context)
-            try:
-                output_raw, error_raw = process.communicate(timeout=0.2)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        output = _decode_bytes(output_raw)
-        error = _decode_bytes(error_raw)
-        output = output or ""
-        if error:
-            if output:
-                output += "\n"
-            output += f"STDERR:\n{error}"
-        return output if output else "(No output)"
+        return process_text(capture_process(process, _context))
     except Exception as e:
         return f"Error executing command: {str(e)}"
 
@@ -119,27 +73,13 @@ def run_node_code(workspace_dir, code, _context=None):
         if abort_state["aborted"]:
             return {"ok": False, "status": "cancelled", "error": "任务已停止，本次操作未执行。"}
         process = run_in_sandbox(
-            [node_exe, temp_path],
+            [node_exe, '--import', _node_resolution_hook(temp_path, workspace_dir), temp_path],
             cwd=workspace_dir,
             skill_id="command-tools",
             shell_kind="exec",
             text=False,
         )
-        while True:
-            if abort_state["aborted"]:
-                return stop_tool_process(process, _context)
-            try:
-                output_raw, error_raw = process.communicate(timeout=0.2)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        output = _decode_bytes(output_raw) or ""
-        error = _decode_bytes(error_raw)
-        if error:
-            if output:
-                output += "\n"
-            output += f"STDERR:\n{error}"
-        return output if output.strip() else "(No output)"
+        return process_text(capture_process(process, _context))
     except Exception as e:
         return f"Error executing Node.js code: {str(e)}"
     finally:
@@ -148,6 +88,37 @@ def run_node_code(workspace_dir, code, _context=None):
                 os.remove(temp_path)
             except Exception:
                 pass
+
+
+def _node_resolution_hook(script, workspace):
+    """Use project modules first and the managed dependency environment second, for CJS and ESM."""
+    from core.sandbox_runtime import _skill_node_root
+    script_url = Path(script).resolve().as_uri()
+    project_url = (Path(workspace).resolve() / '__cowork__.js').as_uri()
+    managed_url = (Path(_skill_node_root('command-tools')).resolve() / '__cowork__.js').as_uri()
+    source = '''import {registerHooks,isBuiltin,createRequire} from 'node:module';
+import {fileURLToPath,pathToFileURL} from 'node:url';
+import {dirname,join} from 'node:path';
+import {existsSync} from 'node:fs';
+registerHooks({resolve(specifier,context,nextResolve){
+  if(context.parentURL===SCRIPT && context.conditions.includes('require') && !isBuiltin(specifier))
+    return {url:pathToFileURL(createRequire(PROJECT).resolve(specifier)).href,shortCircuit:true};
+  const scoped=context.parentURL===SCRIPT ? {...context,parentURL:PROJECT} : context;
+  try {return nextResolve(specifier,scoped);} catch(error) {
+    if(!['MODULE_NOT_FOUND','ERR_MODULE_NOT_FOUND'].includes(error.code) || isBuiltin(specifier)
+       || specifier.startsWith('.') || specifier.startsWith('/') || specifier.includes(':')) throw error;
+    const name=specifier.startsWith('@') ? specifier.split('/').slice(0,2).join('/') : specifier.split('/')[0];
+    let folder=dirname(fileURLToPath(scoped.parentURL || PROJECT));
+    while(true){
+      if(existsSync(join(folder,'node_modules',name))) throw error;
+      const parent=dirname(folder);if(parent===folder)break;folder=parent;
+    }
+    return nextResolve(specifier,{...context,parentURL:MANAGED});
+  }
+}});'''
+    for key, value in [('SCRIPT', script_url), ('PROJECT', project_url), ('MANAGED', managed_url)]:
+        source = source.replace(key, json.dumps(value))
+    return 'data:text/javascript,' + quote(source)
 
 
 def _glob_internal(workspace_dir, pattern="*", path=".", limit=200, _context=None):

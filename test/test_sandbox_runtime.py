@@ -133,7 +133,10 @@ class TestSandboxRuntime(unittest.TestCase):
     def test_skill_script_abort_terminates_process_tree(self):
         process = MagicMock()
         process.poll.return_value = None
-        process.communicate.return_value = (b"partial output", b"")
+        from io import BytesIO
+        process.stdout = BytesIO(b"partial output")
+        process.stderr = BytesIO()
+        process.stdin = None
         command = ["python", "demo.py"]
         with patch.object(
             sandbox_runtime,
@@ -143,7 +146,7 @@ class TestSandboxRuntime(unittest.TestCase):
             sandbox_runtime,
             "run_in_sandbox",
             return_value=process,
-        ), patch("core.tool_cancellation.terminate_process_tree", return_value=True) as terminate:
+        ), patch("core.tool_output.terminate_process_tree", return_value=True) as terminate:
             result = sandbox_runtime.run_skill_script_in_sandbox(
                 "demo",
                 "demo.py",
@@ -302,7 +305,7 @@ class TestSandboxRuntime(unittest.TestCase):
 
             with patch("core.sandbox_runtime.ensure_sandbox_runtime", return_value=fake_runtime), \
                  patch("core.sandbox_runtime.get_app_data_dir", return_value=temp_dir), \
-                 patch("core.sandbox_runtime.subprocess.check_output", return_value="installed"):
+                 patch("core.sandbox_runtime._install_command", return_value="installed"):
                 sandbox_runtime._python_dll_dirs(fake_runtime, skill_id="demo-skill")
                 self.assertIn("demo-skill", sandbox_runtime._SKILL_NATIVE_LIBRARY_DIRS_CACHE)
                 result = sandbox_runtime.install_skill_dependencies("demo-skill", python_dependencies=["Pillow"], force=True)
@@ -441,7 +444,7 @@ class TestSandboxRuntime(unittest.TestCase):
 
             with patch("core.sandbox_runtime.ensure_sandbox_runtime", return_value=fake_runtime), \
                  patch("core.sandbox_runtime.get_app_data_dir", return_value=temp_dir), \
-                 patch("core.sandbox_runtime.subprocess.check_output", return_value="installed") as check_output:
+                 patch("core.sandbox_runtime._install_command", return_value="installed") as check_output:
                 first = sandbox_runtime.install_skill_dependencies("demo-skill", python_dependencies=["Pillow"], force=True)
                 second = sandbox_runtime.install_skill_dependencies("demo-skill", python_dependencies=["Pillow"])
                 third = sandbox_runtime.install_skill_dependencies("demo-skill", python_dependencies=["Pillow"], force=True)
@@ -470,7 +473,7 @@ class TestSandboxRuntime(unittest.TestCase):
             with patch("core.sandbox_runtime.ensure_sandbox_runtime", return_value=fake_runtime), \
                  patch("core.sandbox_runtime.build_sandbox_env", return_value={}), \
                  patch("core.sandbox_runtime.get_app_data_dir", return_value=temp_dir), \
-                 patch("core.sandbox_runtime.subprocess.check_output", return_value="installed") as check_output:
+                 patch("core.sandbox_runtime._install_command", return_value="installed") as check_output:
                 result = sandbox_runtime.install_skill_dependencies(
                     "fixture-node-skill",
                     node_dependencies=["fixture-package@1.0.0"],

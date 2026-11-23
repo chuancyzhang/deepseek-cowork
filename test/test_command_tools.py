@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from unittest.mock import patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +23,13 @@ class _FakeProcess:
     def __init__(self, stdout=b"", stderr=b""):
         self._stdout = stdout
         self._stderr = stderr
+        self.stdout = BytesIO(stdout)
+        self.stderr = BytesIO(stderr)
+        self.stdin = None
+        self.returncode = 0
+
+    def poll(self):
+        return self.returncode
 
     def communicate(self, timeout=None):
         return self._stdout, self._stderr
@@ -126,7 +134,8 @@ class TestCommandTools(unittest.TestCase):
         args, kwargs = run_mock.call_args
         command = args[0]
         self.assertEqual(command[0], node_exe)
-        self.assertTrue(command[1].endswith(".js"))
+        self.assertTrue(command[-1].endswith(".js"))
+        self.assertEqual(command[1], '--import')
         self.assertEqual(kwargs["cwd"], self.workspace_dir)
         self.assertEqual(kwargs["skill_id"], "command-tools")
         self.assertEqual(kwargs["shell_kind"], "exec")
@@ -142,6 +151,32 @@ class TestCommandTools(unittest.TestCase):
         export_names = {item["name"] for item in self.module.TOOL_EXPORTS}
 
         self.assertIn("run_node_code", export_names)
+
+    def test_real_node_resolves_project_and_managed_dependencies_for_require_and_import(self):
+        import json
+        from pathlib import Path
+        from core import sandbox_runtime
+        node = shutil.which('node.exe') or shutil.which('node')
+        if not node:
+            self.skipTest('Node runtime unavailable')
+        project, managed = Path(self.workspace_dir, 'project'), Path(self.workspace_dir, 'managed')
+        project.mkdir()
+        (project / 'package.json').write_text('{"type":"module"}', encoding='utf-8')
+        for root, name, value in [(project,'local-dep','project'),(managed,'shared-dep','managed'),(managed,'local-dep','wrong')]:
+            package=root / 'node_modules' / name
+            package.mkdir(parents=True)
+            (package / 'package.json').write_text(json.dumps({'exports':{'require':'./index.cjs','import':'./index.mjs'}}),encoding='utf-8')
+            (package / 'index.cjs').write_text('module.exports='+json.dumps(value),encoding='utf-8')
+            (package / 'index.mjs').write_text('export default '+json.dumps(value),encoding='utf-8')
+        with patch.object(sandbox_runtime, '_skill_node_root', return_value=str(managed)), \
+             patch.object(sandbox_runtime, 'get_app_data_dir', return_value=self.workspace_dir), \
+             patch.object(sandbox_runtime, 'ensure_sandbox_runtime', return_value={'root':self.workspace_dir,'node':node}), \
+             patch('core.execution_authorization.require_process_authorization'):
+            common=self.module.run_node_code(str(project), "console.log(require('local-dep'),require('shared-dep'))")
+            modules=self.module.run_node_code(str(project), "import a from 'local-dep'; import b from 'shared-dep'; console.log(a,b)")
+        self.assertIn('project managed', common)
+        self.assertIn('project managed', modules)
+        self.assertEqual(list(project.glob('.cowork-*')),[])
 
 
 if __name__ == "__main__":

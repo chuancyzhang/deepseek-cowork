@@ -765,42 +765,14 @@ def run_skill_script_in_sandbox(
         text=False,
         extra_env=extra_env,
     )
-    input_bytes = None if input_text is None else str(input_text).encode("utf-8")
-    deadline = time.monotonic() + max(0.1, float(timeout_seconds or 0.0))
-    first_poll = True
-    while True:
-        if callable(abort_check) and bool(abort_check()):
-            from core.tool_cancellation import stop_tool_process
-            return {
-                **stop_tool_process(process),
-                "runtime": (runtime or "").strip().lower(),
-                "command": command if isinstance(command, str) else subprocess.list2cmdline(command),
-                "cwd": cwd or os.path.dirname(os.path.abspath(script_path)),
-            }
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            terminate_process_tree(process)
-            raise subprocess.TimeoutExpired(command, timeout_seconds)
-        try:
-            output_raw, error_raw = process.communicate(
-                input=input_bytes if first_poll else None,
-                timeout=min(0.2, remaining),
-            )
-            break
-        except subprocess.TimeoutExpired:
-            first_poll = False
-            continue
-    stdout = output_raw.decode("utf-8", errors="replace") if isinstance(output_raw, (bytes, bytearray)) else (output_raw or "")
-    stderr = error_raw.decode("utf-8", errors="replace") if isinstance(error_raw, (bytes, bytearray)) else (error_raw or "")
-    return {
-        "ok": process.returncode == 0,
-        "exit_code": process.returncode,
-        "stdout": stdout,
-        "stderr": stderr,
-        "runtime": (runtime or "").strip().lower(),
-        "command": command if isinstance(command, str) else subprocess.list2cmdline(command),
-        "cwd": cwd or os.path.dirname(os.path.abspath(script_path)),
-    }
+    from core.tool_output import capture_process
+    result = capture_process(process, {"abort_check": abort_check},
+                             input_bytes=None if input_text is None else str(input_text).encode("utf-8"),
+                             timeout=max(.1, float(timeout_seconds or 0)))
+    return {**result, "runtime": (runtime or "").strip().lower(),
+            "command": command if isinstance(command, str) else subprocess.list2cmdline(command),
+            "cwd": cwd or os.path.dirname(os.path.abspath(script_path))}
+
 
 
 def _run_version(executable, args):
@@ -886,13 +858,14 @@ def read_skill_dependency_status(skill_id):
     return dict(_read_dependency_status(skill_id) or {})
 
 
-def install_skill_dependencies(
+def _install_skill_dependencies(
     skill_id,
     python_dependencies=None,
     node_dependencies=None,
     force=False,
     timeout_seconds=300,
     node_registry_url=None,
+    context=None,
 ):
     from .platform_capabilities import skill_unavailable_reason
     issue = skill_unavailable_reason(skill_id)
@@ -920,16 +893,7 @@ def install_skill_dependencies(
             target = _skill_python_path(skill_id)
             os.makedirs(target, exist_ok=True)
             cmd = [python_exe, "-m", "pip", "install", "--index-url", PYTHON_INDEX_URL, "--upgrade", "--target", target] + python_dependencies
-            out = subprocess.check_output(
-                cmd,
-                env=env,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                stderr=subprocess.STDOUT,
-                timeout=timeout_seconds,
-                **_no_window_kwargs(),
-            )
+            out = _install_command(cmd, env, timeout_seconds, context)
             logs.append(out.strip())
         if node_dependencies:
             npm_exe = runtime.get("npm")
@@ -944,16 +908,7 @@ def install_skill_dependencies(
                     raise ValueError("npm registry must use HTTPS.")
                 cmd.extend(["--registry", registry_url])
             cmd.extend(node_dependencies)
-            out = subprocess.check_output(
-                cmd,
-                env=_node_process_env(cmd[0], env),
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                stderr=subprocess.STDOUT,
-                timeout=timeout_seconds,
-                **_no_window_kwargs(),
-            )
+            out = _install_command(cmd, _node_process_env(cmd[0], env), timeout_seconds, context)
             logs.append(out.strip())
         reset_native_library_dir_caches(skill_id)
         status = {"ok": True, "hash": dep_hash, "message": "\n".join([line for line in logs if line]), "installed": True}
@@ -961,6 +916,45 @@ def install_skill_dependencies(
         return status
     except Exception as exc:
         reset_native_library_dir_caches(skill_id)
-        status = {"ok": False, "hash": dep_hash, "message": str(exc), "installed": False}
+        status = {"ok": False, "hash": dep_hash, "message": str(exc), "installed": False,
+                  "status": getattr(exc, "result", {}).get("status", "failed")}
         _write_dependency_status(skill_id, status)
         return status
+
+
+def _install_command(command, env, timeout, context):
+    from core.tool_output import capture_process, ProcessExecutionError
+    process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               **({"start_new_session": True} if os.name != "nt" else {}), **_no_window_kwargs())
+    result = capture_process(process, context, timeout=timeout)
+    if not result["ok"]:
+        raise ProcessExecutionError(result)
+    return result["stdout"] + result["stderr"]
+
+
+def install_skill_dependencies(skill_id, python_dependencies=None, node_dependencies=None, force=False,
+                               timeout_seconds=300, node_registry_url=None, context=None):
+    from core.process_utils import ProcessSingletonLock
+    from core.tool_cancellation import abort_requested
+    from core.tool_tasks import current_tool_run, current_tool_task
+    from core.tool_output import current_output
+    owner, task = current_tool_run(), current_tool_task()
+    cancelled = lambda: abort_requested(context) or bool(owner and task and owner.abort_requested(task.task_id))
+    lock = ProcessSingletonLock(os.path.join(_skill_root(skill_id), 'dependencies.lock'))
+    output = current_output()
+    if output:
+        output.append('phase', '正在准备依赖环境…\n')
+    started = time.monotonic()
+    try:
+        while not lock.acquire():
+            if cancelled():
+                return {"ok": False, "status": "cancelled", "message": "已取消等待依赖安装，代码尚未执行。"}
+            if time.monotonic() - started > timeout_seconds:
+                return {"ok": False, "status": "failed", "message": "依赖环境正被其他安装占用，请稍后重试。"}
+            time.sleep(.05)
+        if cancelled():
+            return {"ok": False, "status": "cancelled", "message": "安装已取消，代码尚未执行。"}
+        return _install_skill_dependencies(skill_id, python_dependencies, node_dependencies, force,
+                                           timeout_seconds, node_registry_url, context)
+    finally:
+        lock.release()

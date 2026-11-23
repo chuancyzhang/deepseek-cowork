@@ -388,6 +388,9 @@ class ToolTasksWorkerTest(unittest.TestCase):
         requests, finished, events = [], [], []
 
         class Skills:
+            def builtin_skill_catalog(self, *args): return []
+            def builtin_skill_catalog_prompt(self, *args): return ""
+            def select_builtin_skill_prompts(self, *args): return []
             def get_tool_definitions(self, **kwargs):
                 return [{"type": "function", "function": {"name": "slow", "description": "slow tool",
                         "parameters": {"type": "object", "properties": {}}}}]
@@ -741,6 +744,149 @@ class ToolTasksProjectionTest(unittest.TestCase):
         response_input = provider._prepare_responses_input(messages)
         self.assertEqual(response_input[0]["content"][0]["text"], "stable")
         self.assertEqual(response_input[-1]["content"][0]["text"], completion["content"])
+
+
+class ToolOutputTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = self.directory.name
+
+    def launch(self, code):
+        import subprocess, sys
+        from core.process_utils import subprocess_kwargs_no_window, terminate_process_tree
+        process = subprocess.Popen([sys.executable, '-u', '-c', code], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, **subprocess_kwargs_no_window())
+        self.addCleanup(lambda: terminate_process_tree(process) if process.poll() is None else None)
+        return process
+
+    def test_stream_is_durable_before_completion_and_utf8_chunks_remain_intact(self):
+        from core.tool_output import capture_process, read_output
+        manager = ToolTaskManager('session', 'run', output_root=self.root, wait_seconds=.05)
+        process = self.launch("import os,time; os.write(1,b'first\\n'); time.sleep(.15); os.write(1,bytes([228,184])); time.sleep(.05); os.write(1,bytes([173])+b'\\n'); os.write(2,b'warning\\n'); time.sleep(.5)")
+        task, _ = manager.submit('task', 'python', {}, 'call', lambda: capture_process(process))
+        first = manager.await_initial(task, True)
+        self.assertEqual(first['status'], 'running')
+        eventually(lambda: bool((read_output(self.root,'session','run','call') or {}).get('preview')))
+        self.assertFalse(task.done.is_set())
+        self.assertTrue(task.done.wait(3))
+        page = read_output(self.root,'session','run','call',cursor=0)
+        text = ''.join(record['text'] for record in page['records'])
+        self.assertIn('first', text)
+        self.assertIn('中', text)
+        self.assertNotIn('�', text)
+        self.assertEqual({record['channel'] for record in page['records']}, {'stdout','stderr'})
+        self.assertEqual(page['status'],'succeeded')
+        self.assertEqual(len(manager.tasks),1)
+        self.assertIsNone(read_output(self.root,'other','run','call'))
+        self.assertIsNone(read_output(self.root,'session','another-run','call'))
+
+    def test_output_limit_drains_without_killing_and_bounds_result_and_pages(self):
+        from core.tool_output import capture_process, read_output, OutputLog, RESULT_BYTES, PAGE_BYTES
+        output = OutputLog(self.root,'session','run','task','call',limit=100000)
+        process = self.launch("import os; [os.write(1,b'x'*4096) for _ in range(8192)]; os.write(2,b'done')")
+        result = capture_process(process,output=output)
+        output.finish('succeeded')
+        self.assertTrue(result['ok'])
+        self.assertIn('done',result['stderr'])
+        self.assertLessEqual(len(result['stdout'].encode()),RESULT_BYTES)
+        self.assertTrue(result['output_truncated'])
+        cursor=0
+        while True:
+            page=read_output(self.root,'session','run','call',cursor=cursor)
+            self.assertTrue(page['incomplete'])
+            self.assertLessEqual(page['bytes'],100000)
+            self.assertLessEqual(page['cursor']-cursor,PAGE_BYTES)
+            self.assertLessEqual(len(page['preview'].encode()),8192)
+            self.assertLessEqual(len(page['preview'].splitlines()),8)
+            if not page['has_more']:break
+            self.assertGreater(page['cursor'],cursor)
+            cursor=page['cursor']
+
+    def test_process_output_decodes_bom_and_native_encoding_across_chunks(self):
+        from core.tool_output import capture_process
+        for encoding in ('utf-8-sig', 'cp936'):
+            with self.subTest(encoding=encoding), patch('core.tool_output.locale.getencoding', return_value='cp936'):
+                raw = '中文输出\n'.encode(encoding)
+                process = self.launch(f'import os,time; raw={raw!r}; [(os.write(1,bytes([b])),time.sleep(.01)) for b in raw]')
+                result = capture_process(process)
+                self.assertEqual(result['stdout'], '中文输出\n')
+                self.assertTrue(result['ok'])
+
+    def test_metadata_reader_waits_for_concurrent_publication(self):
+        from core.tool_output import OutputLog, metadata_lock, read_output
+        output = OutputLog(self.root, 'session', 'run', 'task', 'call')
+        output.finish('succeeded')
+        result, failures = [], []
+        started = threading.Event()
+        def read():
+            started.set()
+            try:
+                result.append(read_output(self.root, 'session', 'run', 'call'))
+            except Exception as exc:
+                failures.append(exc)
+        with metadata_lock(output.base):
+            reader = threading.Thread(target=read)
+            reader.start()
+            self.assertTrue(started.wait(1))
+            reader.join(.05)
+            self.assertTrue(reader.is_alive())
+        reader.join(2)
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(result[0]['status'], 'succeeded')
+
+    def test_log_write_failure_stops_process_and_preserves_result(self):
+        from core.tool_output import capture_process, OutputLog
+        output=OutputLog(self.root,'session','run','task','call')
+        process=self.launch("import time; print('partial',flush=True); time.sleep(20)")
+        with patch.object(output,'append',side_effect=OSError('disk full')):
+            result=capture_process(process,output=output)
+        output.finish('failed')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['status'],'failed')
+        self.assertIn('partial',result['stdout'])
+        self.assertIsNotNone(process.poll())
+
+    def test_exit_codes_are_real_and_small_results_keep_original_text(self):
+        from core.tool_output import capture_process, process_text
+        result=capture_process(self.launch("print('ok')"))
+        self.assertEqual(process_text(result),'ok'+os.linesep)
+        failed=process_text(capture_process(self.launch("print('partial'); raise SystemExit(7)")))
+        self.assertEqual(failed['exit_code'],7)
+        self.assertEqual(failed['status'],'failed')
+        self.assertIn('partial',failed['content'])
+
+    def test_large_return_is_archived_and_existing_reader_can_page_it(self):
+        from core.tool_output import read_owned_output
+        records=[]
+        manager=ToolTaskManager('session','run',output_root=self.root,persist=lambda task,payload:records.append(payload))
+        task,_=manager.submit('large','api',{},'call',lambda:{'ok':True,'rows':['中文'*1000]*100})
+        self.assertTrue(task.done.wait(3))
+        self.assertTrue(task.result['result_truncated'])
+        self.assertLess(len(json.dumps(records,ensure_ascii=False).encode()),40000)
+        reader,_=manager.submit('reader','text_file_read',{},'read',lambda:read_owned_output(task.result['output_ref'],1,2))
+        self.assertTrue(reader.done.wait(3))
+        self.assertEqual(reader.result['returned_lines'],2)
+        self.assertEqual(reader.result['next_offset'],3)
+        self.assertIn('中文',reader.result['content'])
+
+    def test_output_rpc_rejects_another_conversation_and_pages_without_history(self):
+        from types import SimpleNamespace
+        from core.desktop_conversations import ConversationActions
+        from core.tool_output import OutputLog
+        output=OutputLog(self.root,'session','run','task','call')
+        output.append('stdout','saved output')
+        output.finish('succeeded')
+        service=SimpleNamespace(storage=SimpleNamespace(get_conversation_record=lambda cid:{'id':cid}),
+            config=None,store=SimpleNamespace(get_run=lambda run:{'id':'run','conversation_id':'session','status':'completed'}),
+            state=SimpleNamespace(runtime_journal=SimpleNamespace(root=self.root)))
+        actions=ConversationActions(service)
+        self.addCleanup(actions.close)
+        result=actions.dispatch('task.output',{'conversation_id':'session','run_id':'run','call_id':'call','cursor':0})
+        self.assertEqual(result['records'][0]['text'],'saved output')
+        with self.assertRaisesRegex(ValueError,'不属于'):
+            actions.dispatch('task.output',{'conversation_id':'another','run_id':'run','call_id':'call'})
 
 
 if __name__ == "__main__":

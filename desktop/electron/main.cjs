@@ -40,6 +40,7 @@ for (const method of ['project.list', 'project.save', 'project.edit', 'project.a
   'agent.list', 'agent.get', 'agent.send', 'agent.stop', 'agent.resume', 'conversation.receipt', 'conversation.workspace']) allowed.add(method);
 for (const method of require('./management-methods.cjs')) allowed.add(method);
 allowed.add('task.inspect');
+allowed.add('task.output');
 allowed.add('updates.abort_install');
 allowed.add('task.context');
 for (const method of ['file.render', 'file.render_result', 'file.install_renderer']) allowed.add(method);

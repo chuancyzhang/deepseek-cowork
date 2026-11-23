@@ -22,6 +22,7 @@ import ${source('styles.css')};import ${source('management.css')};import ${sourc
 document.body.style.background='var(--bg)';
 const store=new HostStore();window.replies=[];window.fail=true;window.sent=0;
 window.cowork={call:async(method,p)=>{
+  if(method==='task.output')return null;
   if(method!=='interaction.respond')throw Error(method);
   window.replies.push(p);
   if(window.fail){window.fail=false;throw Error('暂时无法提交，请重试');}
@@ -62,7 +63,7 @@ const requests={
 const models=[{id:'m1',model_name:'model-one',label:'模型一',display_name:'模型一',channel_id:'c',channel_display_name:'模型服务',configured:true},{id:'m2',model_name:'model-two',label:'模型二',display_name:'模型二',channel_id:'c',channel_display_name:'模型服务',configured:true}];
 function App(){
   const [text,setText]=useState(''),[model,setModel]=useState('m1'),textarea=useRef(null);
-  const [questionnaire,setQuestionnaire]=useState({name:'multiple',id:'conversation',status:'running'});
+  const [questionnaire,setQuestionnaire]=useState(()=>JSON.parse(sessionStorage.getItem('initialQuestionnaire') || '{"name":"multiple","id":"conversation","status":"running"}'));
   const {name,id,outcome,status,accepted}=questionnaire;
   const request=requests[name];
   const no=async()=>{};
@@ -207,6 +208,9 @@ await until('!'+bubbles);
 assert.match(await read('document.querySelector(".message.assistant .message-body").textContent'),/已按你的回答整理资料/);
 await click(processSummary);await until('Boolean('+bubbles+')');
 const outcome={answered:true,status:'completed',response:await read('window.lastResponse')};
+// History must mount in its saved state, without a transient running fixture
+// sharing the same message identity and expanding its host-owned disclosure.
+await read('sessionStorage.setItem("initialQuestionnaire",'+JSON.stringify(JSON.stringify({name:'single',id:'conversation',outcome,status:'completed'}))+')');
 const reloaded=new Promise(resolve=>w.webContents.once('did-finish-load',resolve));
 w.reload();
 await reloaded;
@@ -246,7 +250,7 @@ await until('Boolean('+answer+')');
 await input(answer,'保留未提交的草稿');
 await read('window.finishTurn("stopped")');
 await until(processSummary+'?.textContent.includes("已停止")');
-await click(processSummary);
+assert.equal(await read(processSummary+'.getAttribute("aria-expanded")'),'true');
 await until('Boolean('+receipt+')');
 assert.equal(await read('Boolean('+bubbles+')'),false);
 await click(receipt+'.querySelector("summary")');
@@ -285,7 +289,7 @@ await click('document.querySelectorAll(".choice-options input")[0]');
 await click('document.querySelectorAll(".choice-options input")[2]');
 await read('window.finishTurn("stopped")');
 await until(processSummary+'?.textContent.includes("已停止")');
-await click(processSummary);
+assert.equal(await read(processSummary+'.getAttribute("aria-expanded")'),'true');
 await until('Boolean('+receipt+')');
 await click(receipt+'.querySelector("summary")');
 assert.match(await read(receipt+'.textContent'),/回答未提交.*整理后的目录、原始来源/);

@@ -1,13 +1,12 @@
-from core.tool_cancellation import init_abort_state as _init_abort_state, stop_tool_process
-import subprocess
+from core.tool_cancellation import init_abort_state as _init_abort_state
+from core.tool_output import capture_process, process_text
 import tempfile
 import os
 import ast
-import locale
 from core.env_utils import ensure_package_installed
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 
-def install_package(package_name, import_name=None):
+def install_package(package_name, import_name=None, _context=None):
     """
     Install a Python package and hot-reload it.
     
@@ -16,10 +15,12 @@ def install_package(package_name, import_name=None):
         import_name (str, optional): The import module name.
     """
     try:
-        ensure_package_installed(package_name, import_name, skill_id="python-runner")
+        ensure_package_installed(package_name, import_name, skill_id="python-runner", context=_context, retry=True)
         return f"Successfully installed and verified '{package_name}' for run_python_code."
     except Exception as e:
-        return f"Failed to install '{package_name}': {e}"
+        if getattr(e, 'result', {}).get('status') in {'cancelled', 'unknown'}:
+            return {"ok": False, "status": e.result['status'], "error": str(e), "content": "代码尚未执行，已有安装日志已保留。"}
+        return {"ok": False, "status": "failed", "error": f"安装 {package_name} 失败：{e}", "content": "代码尚未执行。可修正原因后重试安装。"}
 
 class SecurityError(Exception):
     pass
@@ -61,37 +62,6 @@ def _validate_code_safety(code, allowed_dir, god_mode=False):
                      raise SecurityError(f"Security Alert: Unauthorized absolute path access: '{val}'")
     return True
  
-def _decode_output(raw):
-    if raw is None:
-        return ""
-    if isinstance(raw, str):
-        return raw
-    candidates = ["utf-8", "utf-8-sig"]
-    preferred = locale.getpreferredencoding(False)
-    if preferred:
-        candidates.append(preferred)
-    if os.name == "nt":
-        candidates.extend(["mbcs", "cp936", "gbk", "cp950", "cp932"])
-    best_text = None
-    best_score = -1
-    for enc in candidates:
-        try:
-            text = raw.decode(enc, errors="replace")
-        except Exception:
-            continue
-        score = -text.count("�")
-        if any("\u4e00" <= ch <= "\u9fff" for ch in text):
-            score += 5
-        if score > best_score:
-            best_score = score
-            best_text = text
-    if best_text is not None:
-        return best_text
-    try:
-        return raw.decode("utf-8", errors="replace")
-    except Exception:
-        return str(raw)
-
 def run_python_code(workspace_dir, code, _context=None):
     """
     Execute Python code in the workspace.
@@ -143,29 +113,14 @@ def run_python_code(workspace_dir, code, _context=None):
         if abort_state["aborted"]:
             return {"ok": False, "status": "cancelled", "error": "任务已停止，本次操作未执行。"}
         process = run_in_sandbox(
-            [python_exe, "-X", "utf8", temp_path],
+            [python_exe, "-u", "-X", "utf8", temp_path],
             cwd=workspace_dir,
             skill_id="python-runner",
             shell_kind="exec",
             text=False,
             extra_env={"COWORK_VISUALIZATION_DIR": visualization_dir} if visualization_dir else None,
         )
-        while True:
-            if abort_state["aborted"]:
-                return stop_tool_process(process, _context)
-            try:
-                output_raw, error_raw = process.communicate(timeout=0.2)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        output = _decode_output(output_raw)
-        error = _decode_output(error_raw)
-        output = output or ""
-        if error:
-            output += f"\nStderr: {error}"
-        if process.returncode:
-            return f"Error: Python exited with code {process.returncode}.\n{output}"
-        return output if output.strip() else "(No output)"
+        return process_text(capture_process(process, _context), 'Stderr:')
     except FileNotFoundError:
         return "Error: Executable not found. If you are trying to run a command (like 'ls', 'git'), ensure it is installed and in the system PATH."
     except Exception as e:

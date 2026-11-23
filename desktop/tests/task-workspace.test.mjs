@@ -34,7 +34,7 @@ const failed={id:'call',name:'browser_skill_cli',status:'incomplete',error,resul
 const media={id:'media-call',name:'media_create',status:'queued',result:{task_id:'video-task',status:'queued'},arguments:{capability:'video_generate'}};
 let snapshot=JSON.parse(localStorage.getItem('snapshot')||'null')||{run:{id:'r',status:'running'},calls:[]};
 window.deliver=()=>{snapshot={run:{id:'r',status:'completed'},calls:[failed,media]};localStorage.setItem('snapshot',JSON.stringify(snapshot));};
-window.cowork={onEvents:()=>()=>{},call:async(method,params)=>{if(method==='clipboard.write'){window.copied=params.text;return;}if(method==='task.inspect')return params.conversation_id==='c'?snapshot:{run:{id:'other',status:'completed'},calls:[]};throw Error(method);}};
+window.cowork={onEvents:()=>()=>{},call:async(method,params)=>{if(method==='clipboard.write'){window.copied=params.text;return;}if(method==='task.output')return null;if(method==='task.inspect')return params.conversation_id==='c'?snapshot:{run:{id:'other',status:'completed'},calls:[]};throw Error(method);}};
 const store=new HostStore();store.set('reply:c:a',true);
 const oldStage={id:'old-stage',role:'assistant',content:'已完成资料核对。',reasoning_content:'先核对资料来源。',tool_calls:[{id:'old-call',function:{name:'read_file',arguments:'{}'}}],meta:{turn_id:'old'}};
 const oldResult={id:'old-result',role:'tool',content:'资料已读取。',tool_call_id:'old-call',meta:{turn_id:'old'}};
@@ -79,8 +79,32 @@ function SubtasksPreview(){
     <button id="agent-switch" onClick={()=>setCid(cid==='c'?'other':'c')}>切换会话</button>
   </main><Workspace key={cid} conversation={conversation} value={value} change={change} expanded={false} expand={no} close={no} obscured={false} dark={false} editors={[]} fileTree={{files:[]}} fileContent={null} libraryContent={null} selectFile={no} openFile={no} closeFile={no} refreshFiles={no} createDocument={no} preserve={no} openReview={no} registerEditorFlush={()=>{}} error={error} confirm={async()=>1}/></div></StoreContext.Provider>;
 }
-function Fixture(){const [context,setContext]=useState(false),[subtasks,setSubtasks]=useState(false),[history,setHistory]=useState(null),[cid,setCid]=useState('c'),[view,setView]=useState(()=>JSON.parse(localStorage.getItem('view')||'null')||{section:'calls'});
+const streamCall=window.cowork.call;
+window.streamText='one\\ntwo\\n'+('x'.repeat(1000));window.streamRunning=true;window.streamReads=0;
+window.cowork.call=async(method,p)=>{
+  if(!window.streamMode)return streamCall(method,p);
+  if(method==='task.output'){
+    window.streamReads++;if(window.delayStream){window.delayStream=false;await new Promise(resolve=>window.releaseStream=resolve);}
+    const text=p.conversation_id==='stream' ? window.streamText : 'OTHER SESSION';
+    return {preview:text,path:'saved-log.jsonl',bytes:200,status:window.streamRunning?'running':'succeeded',incomplete:window.streamIncomplete,reason:window.streamIncomplete?'日志已达上限，后续输出已省略。':'',started_at:now-70,finished_at:window.streamRunning?undefined:now,records:[{sequence:1,channel:'stdout',text}],cursor:200,has_more:false};
+  }
+  if(method==='task.inspect')return {run:{id:'stream-run',status:window.streamRunning?'running':'completed'},calls:[{id:'stream-call',name:'run_node_code',arguments:{code:'console.log(42)'},status:window.streamRunning?'running':'completed',result:window.streamRunning?null:'done'}]};
+  if(method==='clipboard.write')return;
+  return streamCall(method,p);
+};
+function StreamingPreview(){
+  const [cid,setCid]=useState('stream'),[running,setRunning]=useState(true),[view,setView]=useState({section:'calls'}),[detail,setDetail]=useState(false);
+  window.finishStream=()=>{window.streamRunning=false;setRunning(false);};window.switchStream=()=>setCid(value=>value==='stream'?'other-stream':'stream');
+  const messages=[{id:'stream-stage',role:'assistant',reasoning_content:'逐项检查目录。',tool_calls:[{id:'stream-call',function:{name:'run_node_code',arguments:'{}'}}]},
+    {id:'stream-result',role:'tool',tool_call_id:'stream-call',content:'',result_obj:{background_tool:true,status:running?'running':'completed',task_id:'task'},meta:{turn_id:'stream-run'}},
+    {id:'wait-stage',role:'assistant',tool_calls:[{id:'wait-call',function:{name:'wait_tool',arguments:'{"task_id":"task"}'}}],meta:{turn_id:'stream-run'}}];
+  return <StoreContext.Provider value={store}><div style={{display:'flex',height:'100vh',background:'var(--bg)',color:'var(--text)'}}><main id="stream-main" style={{flex:1,minWidth:0,padding:24,overflow:'auto'}}><textarea id="stream-input" defaultValue="保留输入"/>
+    <AssistantTurn key={cid} cid={cid} messages={messages} active={running} activeRun={running?'stream-run':undefined} timing={{id:'stream-run',start:now-70,end:running?undefined:now,thinking:{}}} onFile={()=>{}} onAction={(action,message)=>{setDetail(true);setView({section:'calls',callId:message.tool_call_id});}}/>
+    <div style={{height:1200}}>继续阅读</div></main>{detail&&<aside style={{width:'46%',display:'flex',minWidth:0}}><TaskWorkspace key={cid} cid={cid} conversation={{id:cid,meta:{},run:{id:'stream-run',status:running?'running':'completed'}}} value={view} change={patch=>setView(value=>({...value,...patch}))} error={()=>{}}/></aside>}</div></StoreContext.Provider>;
+}
+function Fixture(){const [stream,setStream]=useState(false);window.streamingPreview=()=>{window.streamMode=true;setStream(true);};const [context,setContext]=useState(false),[subtasks,setSubtasks]=useState(false),[history,setHistory]=useState(null),[cid,setCid]=useState('c'),[view,setView]=useState(()=>JSON.parse(localStorage.getItem('view')||'null')||{section:'calls'});
 window.historyPreview=full=>setHistory({full});window.subtasksPreview=()=>setSubtasks(true);window.contextPreview=()=>{window.contextMode=true;setSubtasks(false);setHistory(null);setContext(true);setView({section:'context',runId:'historical'});};
+if(stream)return <StreamingPreview/>;
 if(context)return <StoreContext.Provider value={store}><div style={{height:'100vh',display:'flex',background:'var(--bg)'}}><TaskWorkspace cid="c" conversation={{id:'c',meta:{project_name:'客户研究'},run:{id:'r',status:'completed'}}} value={view} change={patch=>setView(prior=>({...prior,...patch}))} error={message=>{throw Error(message);}}/></div></StoreContext.Provider>;
 if(subtasks)return <SubtasksPreview/>;
 if(history)return <StoreContext.Provider value={store}><HistoryPreview full={history.full} loadOlder={()=>setHistory({full:true})}/></StoreContext.Provider>;

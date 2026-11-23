@@ -99,6 +99,7 @@ class ToolTask:
     active_elapsed: float = 0.0
     pause_depth: int = 0
     dependencies: tuple = ()
+    output: object = None
     cancel_requested: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     lock: object = field(default_factory=threading.RLock)
@@ -130,7 +131,7 @@ class ToolTask:
 
 class ToolTaskManager:
     def __init__(self, session_id, run_id, *, persist=None, classify=None,
-                 abort_check=None, clock=time.monotonic, wait_seconds=None):
+                 abort_check=None, clock=time.monotonic, wait_seconds=None, output_root=None):
         self.session_id = str(session_id)
         self.run_id = str(run_id)
         self.persist = persist or (lambda task_id, payload: None)
@@ -139,6 +140,7 @@ class ToolTaskManager:
         self.clock = clock
         self.wait_seconds = TOOL_WAIT_SECONDS if wait_seconds is None else wait_seconds
         self.tasks = {}
+        self.output_root = output_root
         self.closed = threading.Event()
         self.changed = threading.Event()
         self.events = queue.SimpleQueue()
@@ -217,6 +219,9 @@ class ToolTaskManager:
                     return
                 task.result = execute()
                 task.execution_finished = True
+                if self.output_root:
+                    from core.tool_output import compact_result
+                    task.result = compact_result(task.result)
             except Exception as exc:
                 task.error = exc
             finally:
@@ -233,6 +238,8 @@ class ToolTaskManager:
                     cancelled = isinstance(task.result, dict) and task.result.get("status") == "cancelled"
                     task.state = ("unknown" if task.error else "cancelled" if cancelled else failure or "succeeded")
                     try:
+                        if task.output is not None:
+                            task.output.finish(task.state)
                         self._record(task, status=task.state, finished_at=task.finished_at,
                                      result_obj=task.result if isinstance(task.result, dict) else None,
                                      result_text=self.result_text(task.result),
@@ -262,6 +269,7 @@ class ToolTaskManager:
             cancelling = task.cancel_requested.is_set()
         self._log(task, "yielded")
         return {"background_tool": True, "status": state, "task_id": task.task_id,
+                **({'output_ref': str(task.output.path), 'output_preview': task.output.meta['preview']} if task.output is not None else {}),
                 "tool_name": task.name, "elapsed_seconds": round(task.elapsed(), 3),
                 "cancel_requested": cancelling,
                 "content": ("已请求停止此工具，但尚未确认结束，不能视为已停止。已有输出将保留；"

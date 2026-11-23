@@ -2,6 +2,21 @@ import type {Conversation,HostEvent,Run,RuntimeEvent,MediaTask} from '../types';
 import type {HostStore,Update} from './store';
 import {mergeEvents,isActive} from '../runtime.ts';
 import {mergeReviews,type ReviewSummary} from '../reviews.ts';
+import type {WorkspaceView} from '../Workspace';
+
+export function presentOpenedBrowser(store:HostStore,event:HostEvent,initial:()=>WorkspaceView) {
+  const cid=event.conversation_id;
+  if(event.event!=='browser_opened' || !cid || !event.run_id || !event.data?.tab_id)return false;
+  const run=store.get<Record<string,Run>>('runs',{})[cid];
+  if(run && run.id!==event.run_id)return false;
+  const key=store.sessionKey('workspaceView',cid),view=store.get<WorkspaceView>(key,initial);
+  if(view.browserPresentedRun===event.run_id)return false;
+  const show=cid===store.get('navigation:selected','') && store.get('navigation:route','chat')==='chat'
+    && !view.browserPresentationSuppressed && view.selected==='new';
+  store.set(key,{...view,browserPresentedRun:event.run_id,...(show?{selected:'workbench:'+event.data.tab_id}:{})});
+  if(show)store.set(store.sessionKey('workspaceOpen',cid),true);
+  return show;
+}
 
 export function mergeMediaTasks(previous:MediaTask[], incoming:MediaTask[]) {
   const merged=new Map(previous.map(item=>[item.id,item]));let changed=false;

@@ -11,7 +11,7 @@ import TaskWorkspace, { type TaskView } from './TaskWorkspace';
 
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 export type WorkbenchTab = { id: string; kind: string; title: string; cwd: string; url?: string; owner: string; control_revision: number; status: string };
-export type WorkspaceView = { selected: string; newOpen: boolean; filesOpen: boolean; filesPinned: boolean; tasksOpen: boolean; tasksPinned: boolean; fileQuery: string; task: TaskView; agentsOpen?: boolean; agents?: TaskView; width?: number; changesOpen?: boolean; libraryOpen?: boolean; reviewOpen?: string[]; reviewClosed?: string[]; reviewEdits?: Record<string, ReviewEdit> };
+export type WorkspaceView = { selected: string; newOpen: boolean; filesOpen: boolean; filesPinned: boolean; tasksOpen: boolean; tasksPinned: boolean; fileQuery: string; task: TaskView; agentsOpen?: boolean; agents?: TaskView; width?: number; changesOpen?: boolean; libraryOpen?: boolean; reviewOpen?: string[]; reviewClosed?: string[]; reviewEdits?: Record<string, ReviewEdit>; browserPresentedRun?: string; browserPresentationSuppressed?: boolean };
 export const emptyWorkspace = (): WorkspaceView => ({ selected: 'new', newOpen: false, filesOpen: false, filesPinned: false, tasksOpen: false, tasksPinned: false, fileQuery: '', task: { section: 'calls' } });
 type Props = {
   conversation: Conversation; value: WorkspaceView; change: (value: Partial<WorkspaceView>) => void;

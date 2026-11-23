@@ -3,6 +3,40 @@ import test from 'node:test';
 import { contextRecoveryForRun, displayMessages, mergeEvents, messageGroups, replyParts, MessageProjection, unwrapEvents, messageTime, conversationTime, turnTimings, elapsedTime, thinkingTime, interactionRecords, isUserStopped, toolErrorText } from '../src/runtime.ts';
 import { UsageProjection, generationRates } from '../src/usageMetrics.ts';
 import { conversationFiles } from '../src/attachments.ts';
+import {agentRecords, childMessages} from '../src/subagents.ts';
+
+test('collaboration records preserve exact targets, failed calls and historical result shapes',()=>{
+  const call=(id,name,args)=>({id:'message-'+id,role:'assistant',tool_calls:[{id,function:{name,arguments:JSON.stringify(args)}}]});
+  const result=(id,data)=>({id:'result-'+id,role:'tool',tool_call_id:id,content:JSON.stringify(data)});
+  const messages=[call('spawn','spawn_agent',{name:'Runtime',message:'检查运行'}),result('spawn',{agent_id:'a',name:'Runtime'}),
+    call('wait','wait_agent',{targets:['a','b']}),result('wait',{completed:[{id:'a',name:'Runtime'}],pending:[{id:'b',name:'E2e'}]}),
+    call('failed','spawn_agent',{name:'Review'}),result('failed',{error:{message:'没有可用执行槽'}}),
+    call('missing','spawn_agent',{}),result('missing',null)];
+  const original=structuredClone(messages),records=agentRecords(messages,replyParts(messages).results);
+  assert.deepEqual(records.map(item=>[item.target,item.name]),[['a','Runtime'],['a','Runtime'],['b','E2e'],['','Review'],['','']]);
+  assert.equal(records[3].failed,true);
+  assert.equal(records[3].callId,'failed');
+  assert.deepEqual(messages,original);
+});
+
+test('child projection isolates runs and retains text, structured failures and partial output',()=>{
+  const activity=[{run_id:'one',payload:{event_type:'tool_call',tool_call_id:'read',tool_name:'read_file',tool_args:{path:'notes.md'}}},
+    {run_id:'one',payload:{event_type:'tool_result',tool_call_id:'read',tool_result:'原始文本结果'}},
+    {run_id:'two',payload:{event_type:'tool_call',tool_call_id:'write',tool_name:'write_file',tool_args:{path:'report.md'}}},
+    {run_id:'two',payload:{event_type:'tool_result',tool_call_id:'write',tool_result_obj:{error:{message:'保存失败'}}}}];
+  const child={summary:{run_id:'two',status:'running'},messages:[{id:'seed-system',role:'system',content:'内部配置'},
+    {id:'one:assistant',role:'assistant',content:'第一轮成果',reasoning_content:'第一轮思考'},
+    {id:'question',role:'user',content:'继续'}, {id:'two:assistant',role:'assistant',content:'已输出部分',reasoning_content:'第二轮思考'}],activity:[...activity,...activity]};
+  const original=structuredClone(child),groups=messageGroups(childMessages(child));
+  assert.equal(groups.length,3);
+  assert.equal(groups[0].messages.filter(item=>item.role==='tool').length,1);
+  assert.equal(replyParts(groups[0].messages).results.get('read').content,'原始文本结果');
+  assert.equal(replyParts(groups[0].messages).results.get('write'),undefined);
+  assert.deepEqual(replyParts(groups[2].messages).results.get('write').result_obj.error,{message:'保存失败'});
+  assert.equal(replyParts(groups[2].messages).answer.content,'已输出部分');
+  assert.equal(replyParts(groups[2].messages).answer.live,true);
+  assert.deepEqual(child,original);
+});
 
 const providerEvent = (run_id, type, created_at, status) => ({
   type: 'observability', run_id, created_at, data: { type, request_id: run_id + ':request:1', status },

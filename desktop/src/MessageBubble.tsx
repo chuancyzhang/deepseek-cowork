@@ -1,7 +1,8 @@
 import { createContext, useContext, memo, useRef, useState, useEffect, type ReactNode } from 'react';
 import ReactMarkdown, {type Components} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Copy, ExternalLink, FileText, GitBranch, Image as ImageIcon, Link, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Puzzle, RefreshCw, Sparkles, Trash2, Wrench } from 'lucide-react';
+import { BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Copy, ExternalLink, FileText, GitBranch, Image as ImageIcon, Link, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Puzzle, RefreshCw, Sparkles, Trash2, Users, Wrench } from 'lucide-react';
+import {agentRecords, agentTools} from './subagents';
 import type { FileReference, MediaTask, Message } from './types';
 import { messageText, toolErrorText, messageTime, replyParts, elapsedTime, thinkingTime, formatDuration, type TurnTiming, type QuestionRecord } from './runtime';
 import {useHost, useHostField} from './host/context';
@@ -117,8 +118,8 @@ function MessageVideo({file, cid, onFile}: {file: FileReference; cid: string; on
   return <MediaResult file={file} cid={cid} onFile={onFile}/>;
 }
 
-const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, active, cid, answerOnly = false, changeSummary }: {
-  message: Message; active: boolean; cid: string; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; answerOnly?: boolean; changeSummary?: ReactNode;
+const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, active, cid, answerOnly = false, changeSummary, readOnly = false }: {
+  message: Message; active: boolean; cid: string; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; answerOnly?: boolean; changeSummary?: ReactNode; readOnly?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   const [filesExpanded, setFilesExpanded] = useHostField('message-files:' + cid + ':' + message.id, false);
@@ -160,9 +161,9 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
     </div>
     <div className="message-footer">{message.role !== 'assistant' && <MessageTimestamp createdAt={message.created_at}/>}<div className="message-actions">
       <button title="复制消息" aria-label="复制消息" onClick={async () => { try {await window.cowork.call('clipboard.write', {text}); setCopied(true); setFailure(''); setTimeout(() => setCopied(false), 1500);} catch (error) {setFailure('复制未完成：' + (error as Error).message);} }}>{copied ? <Check size={14}/> : <Copy size={14}/>}</button>
-      {message.role === 'user' && !message.meta?.same_turn_guidance && <><button title="编辑消息" disabled={active} onClick={() => onAction('edit', message)}><Pencil size={14}/></button><button title="删除此处及后续对话" disabled={active} onClick={() => onAction('delete', message)}><Trash2 size={14}/></button></>}
-      {message.role === 'assistant' && !message.live && <><button title="重新生成" disabled={active} onClick={() => onAction('retry', message)}><RefreshCw size={14}/></button><button title="从这里创建分支" onClick={() => onAction('branch', message)}><GitBranch size={14}/></button></>}
-      {message.role === 'assistant' && !message.live && <div className="message-more" ref={menu}><button title="更多操作" aria-expanded={more} onClick={() => setMore(!more)}><MoreHorizontal size={15}/></button>{more && <div className="message-more-menu">{[['office', '生成办公稿'], ['skill', '沉淀为 Skill']].map(([action, title]) => <button key={action} onClick={() => {setMore(false); onAction(action, message);}}>{title}</button>)}</div>}</div>}
+      {!readOnly && message.role === 'user' && !message.meta?.same_turn_guidance && <><button title="编辑消息" disabled={active} onClick={() => onAction('edit', message)}><Pencil size={14}/></button><button title="删除此处及后续对话" disabled={active} onClick={() => onAction('delete', message)}><Trash2 size={14}/></button></>}
+      {!readOnly && message.role === 'assistant' && !message.live && <><button title="重新生成" disabled={active} onClick={() => onAction('retry', message)}><RefreshCw size={14}/></button><button title="从这里创建分支" onClick={() => onAction('branch', message)}><GitBranch size={14}/></button></>}
+      {!readOnly && message.role === 'assistant' && !message.live && <div className="message-more" ref={menu}><button title="更多操作" aria-expanded={more} onClick={() => setMore(!more)}><MoreHorizontal size={15}/></button>{more && <div className="message-more-menu">{[['office', '生成办公稿'], ['skill', '沉淀为 Skill']].map(([action, title]) => <button key={action} onClick={() => {setMore(false); onAction(action, message);}}>{title}</button>)}</div>}</div>}
     </div>{message.role === 'assistant' && <MessageTimestamp createdAt={message.created_at}/>}</div>
     {failure && <p className="error-text" role="alert">{failure}</p>}
   </article>;
@@ -210,8 +211,8 @@ export function GenerationTaskStatus({task, statusLabel = '正在处理', durati
   </div>;
 }
 
-export function AssistantTurn({messages, cid, active, onAction, onFile, timing, activeRun, interactionRun = activeRun, showDuration = true, stopped = false, statusLabel = '正在处理', questions = [], onInteractionDone = () => {}, reviewTask, changeSummary}: {
-  messages: Message[]; cid: string; active: boolean; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; timing?: TurnTiming; activeRun?: string; interactionRun?: string; showDuration?: boolean; stopped?: boolean; statusLabel?: string; questions?: QuestionRecord[]; onInteractionDone?: (requestId: string) => void; reviewTask?: ReviewSummary; changeSummary?: ReactNode;
+export function AssistantTurn({messages, cid, active, onAction, onFile, timing, activeRun, interactionRun = activeRun, showDuration = true, stopped = false, statusLabel = '正在处理', questions = [], onInteractionDone = () => {}, reviewTask, changeSummary, readOnly = false}: {
+  messages: Message[]; cid: string; active: boolean; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; timing?: TurnTiming; activeRun?: string; interactionRun?: string; showDuration?: boolean; stopped?: boolean; statusLabel?: string; questions?: QuestionRecord[]; onInteractionDone?: (requestId: string) => void; reviewTask?: ReviewSummary; changeSummary?: ReactNode; readOnly?: boolean;
 }) {
   const {answer, results, hasProcess: messageProcess} = replyParts(messages);
   const hasProcess = messageProcess || questions.length > 0;
@@ -243,6 +244,9 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
   </>;
   const expert = messages.find(message => message.meta?.conversation_agent?.name || message.meta?.ui_conversation_agent?.name);
   const callIds = new Set(messages.flatMap(message => message.tool_calls || []).map(tool => tool.id));
+  const collaboration = readOnly ? [] : agentRecords(messages, results);
+  const agentNames = [...new Set(collaboration.map(item=>item.name).filter(Boolean))];
+  const agentTitle = agentNames.length ? agentNames.slice(0,3).join('、') + (agentNames.length > 3 ? ' 等子任务' : '') : '子任务协作';
   function questionRow(question: QuestionRecord) {
     return <Interaction key={cid + ':' + question.request.request_id} request={question.request} outcome={question.outcome}
       conversationId={cid} active={active && question.runId === interactionRun} done={onInteractionDone}/>;
@@ -251,6 +255,16 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
     const resultObject = result?.result_obj;
     const failed = Boolean(resultObject?.error || ['failed', 'error'].includes(resultObject?.status));
     const toolName = tool.function?.name || tool.name || result?.meta?.tool_name;
+    if (!readOnly && agentTools.has(toolName)) {
+      if (tool.id !== collaboration[0]?.callId) return null;
+      return <div className="process-step agent-step" key={tool.id}><Users className="timeline-node" size={14} aria-hidden="true"/><Disclosure stateKey={cid+':agents:'+tool.id} kind="thinking agent-process" title={<>{agentTitle}{collaboration.some(item=>item.failed) && <small className="error-text">有调用失败</small>}</>}>
+        <div className="agent-process-records">{collaboration.map(item=><div className="agent-process-record" key={item.key}>
+          <button className="process-tool" onClick={()=>onAction(item.failed ? 'tool' : 'agent', {...item.message,tool_call_id:item.callId,meta:{...item.message.meta,ui_agent_target:item.target}})}>
+            <span>{item.verb}{item.name ? ' '+item.name : '子任务'}</span>{item.failed && <small className="process-tool-state" data-failed>失败</small>}<ChevronRight size={13} aria-hidden="true"/>
+          </button>{item.text && <p className="agent-process-text" title={item.text}>{item.text}</p>}{item.failed && <p className="error-text">{processError(item.error)}</p>}
+        </div>)}</div>
+      </Disclosure></div>;
+    }
     const title = toolTitles.get(toolName) || toolName || '工具调用';
     const toolQuestions = questions.filter(question => question.callId === tool.id);
     const mediaSnapshot = (toolName === 'media_create' || toolName === 'media_task') && resultObject?.task_id;
@@ -276,7 +290,7 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
     </div>;
   }
   return <section className="assistant-turn">
-    {expert && <div className="assistant-name">{expert.meta?.conversation_agent?.name || expert.meta?.ui_conversation_agent?.name}</div>}
+    {expert && !readOnly && <div className="assistant-name">{expert.meta?.conversation_agent?.name || expert.meta?.ui_conversation_agent?.name}</div>}
     {(hasProcess || task) && <div className="reply-process">
       {task ? <GenerationTaskStatus task={task} statusLabel={statusLabel} duration={duration} expanded={open} toggle={hasProcess && !pending ? () => setExpanded(!open) : undefined}/>
         : pending ? <div className="process-summary">{summary}</div>
@@ -293,6 +307,6 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
     {!hasProcess && !task && (running || stopped
       ? <RunStatus label={running ? statusLabel : '已停止'} duration={durationLabel}/>
       : durationLabel && <div className="process-duration">{durationLabel}</div>)}
-    {answer && <MessageBubble message={answer} cid={cid} active={active} onAction={onAction} onFile={onFile} answerOnly changeSummary={!answer.live && changeSummary}/>}
+    {answer && <MessageBubble message={answer} cid={cid} active={active} onAction={onAction} onFile={onFile} answerOnly readOnly={readOnly} changeSummary={!answer.live && changeSummary}/>}
   </section>;
 }

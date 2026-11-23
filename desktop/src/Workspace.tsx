@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { ArrowLeft, BookOpen, Check, ChevronDown, ChevronRight, FileDiff, FileText, Folder, Globe, ListChecks, Maximize2, MessageSquare, Minimize2, Pin, PinOff, Plus, RefreshCw, Search, Terminal, X } from 'lucide-react';
+import { ArrowLeft, BookOpen, Check, ChevronDown, ChevronRight, FileDiff, FileText, Folder, Globe, ListChecks, Maximize2, MessageSquare, Minimize2, Pin, PinOff, Plus, RefreshCw, Search, Terminal, Users, X } from 'lucide-react';
 import type { Conversation, FileSession } from './types';
 import PluginSlot from './plugins/PluginSlot';
 import {useHostField} from './host/context';
@@ -11,7 +11,7 @@ import TaskWorkspace, { type TaskView } from './TaskWorkspace';
 
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 export type WorkbenchTab = { id: string; kind: string; title: string; cwd: string; url?: string; owner: string; control_revision: number; status: string };
-export type WorkspaceView = { selected: string; newOpen: boolean; filesOpen: boolean; filesPinned: boolean; tasksOpen: boolean; tasksPinned: boolean; fileQuery: string; task: TaskView; width?: number; changesOpen?: boolean; libraryOpen?: boolean; reviewOpen?: string[]; reviewClosed?: string[]; reviewEdits?: Record<string, ReviewEdit> };
+export type WorkspaceView = { selected: string; newOpen: boolean; filesOpen: boolean; filesPinned: boolean; tasksOpen: boolean; tasksPinned: boolean; fileQuery: string; task: TaskView; agentsOpen?: boolean; agents?: TaskView; width?: number; changesOpen?: boolean; libraryOpen?: boolean; reviewOpen?: string[]; reviewClosed?: string[]; reviewEdits?: Record<string, ReviewEdit> };
 export const emptyWorkspace = (): WorkspaceView => ({ selected: 'new', newOpen: false, filesOpen: false, filesPinned: false, tasksOpen: false, tasksPinned: false, fileQuery: '', task: { section: 'calls' } });
 type Props = {
   conversation: Conversation; value: WorkspaceView; change: (value: Partial<WorkspaceView>) => void;
@@ -57,6 +57,16 @@ export default function Workspace(props: Props) {
   }, []);
   const selectedTab = tabs.find(tab => 'workbench:' + tab.id === value.selected);
   const showTasks = value.selected === 'tasks' && value.tasksPinned;
+  const showAgents = value.selected === 'agents' && value.agentsOpen;
+  useEffect(() => {
+    if (value.task.drafts || value.task.agentId || value.task.section === 'agents') {
+      const {agentId,drafts,...task}=value.task;
+      const showingAgents=task.section==='agents';
+      change({agents:{section:'agents',agentId,...value.agents,drafts:{...drafts,...value.agents?.drafts},scroll:{...task.scroll,...value.agents?.scroll},open:{...task.open,...value.agents?.open}},
+        ...(showingAgents ? {agentsOpen:value.tasksPinned,...(value.selected==='tasks' ? {selected:'agents'} : {})} : {}),
+        task:{...task,section:showingAgents ? 'calls' : task.section}});
+    }
+  }, [value.task,value.agents]);
   const openReviews = reviews.filter(item => !(value.reviewClosed || []).includes(item.id) || (value.reviewOpen || []).includes(item.id));
   const selectedReview = openReviews.find(item=>'review:'+item.id===value.selected)?.id || '';
   const floating = value.filesOpen && !value.filesPinned;
@@ -84,7 +94,7 @@ export default function Workspace(props: Props) {
     };
     reveal();const observer=new ResizeObserver(reveal);observer.observe(list);
     return()=>observer.disconnect();
-  },[value.selected,expanded,editors.length,tabs.length,value.tasksPinned,value.newOpen]);
+  },[value.selected,expanded,editors.length,tabs.length,value.tasksPinned,value.agentsOpen,value.newOpen]);
   async function openNative(kind: 'web' | 'terminal') {
     setBusy(true);
     try {
@@ -117,6 +127,7 @@ export default function Workspace(props: Props) {
   const returnToWorkspace = {selected:'new',newOpen:false};
   const contentTabs: TabItem[] = [
     ...(value.tasksPinned ? [{id:'tasks',name:'任务',icon:<ListChecks size={14}/>,select:()=>change({selected:'tasks'}),close:()=>change({tasksPinned:false,...(showTasks ? returnToWorkspace : {})})}] : []),
+    ...(value.agentsOpen ? [{id:'agents',name:'子任务',icon:<Users size={14}/>,select:()=>change({selected:'agents'}),close:()=>change({agentsOpen:false,...(showAgents ? returnToWorkspace : {})})}] : []),
     ...(value.changesOpen ? [{id:'changes',name:'变更',icon:<FileDiff size={14}/>,select:props.openChanges,close:()=>change({changesOpen:false,...(value.selected==='changes'?returnToWorkspace:{})})}] : []),
     ...(value.libraryOpen ? [{id:'library',name:'资料库',icon:<BookOpen size={14}/>,select:()=>change({selected:'library'}),close:()=>change({libraryOpen:false,...(value.selected==='library'?returnToWorkspace:{})})}] : []),
     ...openReviews.map(item=>({id:'review:'+item.id,name:reviewTitle(item),icon:<FileText size={14}/>,select:()=>props.openReview(item.id),close:()=>change({reviewOpen:(value.reviewOpen||[]).filter(id=>id!==item.id),reviewClosed:[...new Set([...(value.reviewClosed||[]),item.id])],...(selectedReview===item.id?returnToWorkspace:{})})})),
@@ -135,7 +146,9 @@ export default function Workspace(props: Props) {
     ...(showNew ? [{id:'new',name:'新标签页',icon:<Plus size={14}/>,select:()=>change({selected:'new',newOpen:!!fallbackTab}),close:fallbackTab ? () => {change({newOpen:false});fallbackTab.select();} : undefined}] : []),
   ];
   const matchingTabs=tabItems.filter(tab=>(tab.name+' '+(tab.detail||'')).toLocaleLowerCase().includes(tabQuery.trim().toLocaleLowerCase()));
-  const taskContent = <PluginSlot kind="panel" target="tasks" scope={{conversationId:cid}}><TaskWorkspace cid={cid} conversation={conversation} value={value.task} change={task => change({task: {...value.task, ...task}})} error={error} openReview={props.openReview}/></PluginSlot>;
+  const taskContent = <PluginSlot kind="panel" target="tasks" scope={{conversationId:cid}}><TaskWorkspace key={cid+':tasks'} cid={cid} conversation={conversation} value={value.task} change={task => change({task: {...value.task, ...task}})} error={error} openReview={props.openReview} openFile={props.openFile}/></PluginSlot>;
+  const agentView = value.agents || {section:'agents' as const};
+  const agentContent = <TaskWorkspace key={cid+':agents'} cid={cid} conversation={conversation} value={agentView} change={patch=>change({agents:{...agentView,...patch}})} error={error} openFile={props.openFile}/>;
   return <section className="workspace" ref={root} aria-label="工作区">
     <div className="workspace-bar">
       <button data-workspace-toggle className={'icon-button ' + (value.filesOpen ? 'selected' : '')} title="工作区文件" aria-label="工作区文件" aria-expanded={value.filesOpen} onClick={() => { change({filesOpen: !value.filesOpen, tasksOpen: false}); void props.refreshFiles(); }}><Folder size={17}/></button>
@@ -144,6 +157,7 @@ export default function Workspace(props: Props) {
         change({selected: 'tasks', tasksPinned: true, tasksOpen: false, ...(!value.filesPinned ? {filesOpen: false} : {})});
         requestAnimationFrame(() => root.current?.querySelector<HTMLButtonElement>('[role="tab"][title="任务"]')?.focus());
       })}><ListChecks size={17}/></button>}
+      {!value.agentsOpen && <button className="icon-button" title="子任务" aria-label="打开子任务" onClick={()=>void navigate(()=>change({selected:'agents',agentsOpen:true,...(!value.filesPinned ? {filesOpen:false} : {})}))}><Users size={17}/></button>}
       <div className="workspace-tabs" role="tablist" aria-label="工作区标签">
         {tabItems.map(tab=>tabButton(tab.id,tab.name,tab.icon,tab.select,tab.close))}
       </div>
@@ -170,7 +184,7 @@ export default function Workspace(props: Props) {
       </aside></PluginSlot>}
       <div className="workspace-content" hidden={expanded && value.selected === 'conversation'}>
         {loadError && <div className="inline-error" role="alert">{loadError}<button onClick={() => void refresh()}>重试</button></div>}
-        {selectedReview ? <ReviewWorkspace key={cid + ':' + selectedReview} cid={cid} id={selectedReview} conversation={conversation} edit={value.reviewEdits?.[selectedReview]} change={edit=>change({reviewEdits:{...value.reviewEdits,[selectedReview]:edit}})} openReview={props.openReview} openFile={props.openFile} register={props.registerEditorFlush} confirm={props.confirm} saved={()=>void props.refreshFiles()}/> : value.selected === 'library'  && value.libraryOpen ? <div className="workspace-library">{props.libraryContent}</div> : showTasks ? taskContent : value.selected === 'changes' && value.changesOpen ? props.changesContent : fileSelected ? props.fileContent : selectedTab?.kind === 'terminal' ? <PluginSlot kind="panel" target="terminal" scope={{conversationId:cid,tabId:selectedTab.id}}><TerminalWorkspace key={selectedTab.id} cid={cid} tab={selectedTab} dark={props.dark} error={error} refresh={refresh}/></PluginSlot> : selectedTab?.kind === 'web' ? <PluginSlot kind="panel" target="browser" scope={{conversationId:cid,tabId:selectedTab.id}}><BrowserWorkspace key={selectedTab.id} cid={cid} tab={selectedTab} obscured={props.obscured || floating || tabsOpen} error={error} refresh={refresh}/></PluginSlot> : <div className="workspace-start">
+        {selectedReview ? <ReviewWorkspace key={cid + ':' + selectedReview} cid={cid} id={selectedReview} conversation={conversation} edit={value.reviewEdits?.[selectedReview]} change={edit=>change({reviewEdits:{...value.reviewEdits,[selectedReview]:edit}})} openReview={props.openReview} openFile={props.openFile} register={props.registerEditorFlush} confirm={props.confirm} saved={()=>void props.refreshFiles()}/> : value.selected === 'library'  && value.libraryOpen ? <div className="workspace-library">{props.libraryContent}</div> : showAgents ? agentContent : showTasks ? taskContent : value.selected === 'changes' && value.changesOpen ? props.changesContent : fileSelected ? props.fileContent : selectedTab?.kind === 'terminal' ? <PluginSlot kind="panel" target="terminal" scope={{conversationId:cid,tabId:selectedTab.id}}><TerminalWorkspace key={selectedTab.id} cid={cid} tab={selectedTab} dark={props.dark} error={error} refresh={refresh}/></PluginSlot> : selectedTab?.kind === 'web' ? <PluginSlot kind="panel" target="browser" scope={{conversationId:cid,tabId:selectedTab.id}}><BrowserWorkspace key={selectedTab.id} cid={cid} tab={selectedTab} obscured={props.obscured || floating || tabsOpen} error={error} refresh={refresh}/></PluginSlot> : <div className="workspace-start">
           <h2>新标签页</h2>
           <section><label htmlFor={'address-' + cid}><Globe size={17}/>打开网页</label><form className="new-page-address" onSubmit={event => {event.preventDefault(); void openNative('web');}}><input id={'address-' + cid} aria-label="新网页地址" placeholder="输入网址" value={address} onChange={event => setAddress(event.target.value)}/><button className="icon-button" title="打开网页" disabled={!address.trim() || busy}><ChevronRight size={17}/></button></form></section>
           <section className="workspace-start-row"><div><FileText size={18}/><span>页面<small>记录想法或撰写内容</small></span></div><button className="secondary" onClick={() => void props.createDocument()}>新增页面</button></section>

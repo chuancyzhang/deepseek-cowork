@@ -217,13 +217,31 @@ export function useWorkbenchController() {
     host.set(host.sessionKey('workspaceOpen', cid), true);
   }
   const messageActionRef = useRef<(action: string, message: Message) => Promise<void>>(async () => {});
+  const agentNavigationSequence = useRef(0);
   const fileActionRef = useRef<(path: string) => Promise<void>>(async () => {});
   const onMessageAction = useCallback((action: string, message: Message) => { void messageActionRef.current(action, message); }, []);
   const onMessageFile = useCallback((path: string) => { void fileActionRef.current(path); }, []);
   messageActionRef.current = async (action, message) => {
     const id = selectedId.current;
+    const navigationSequence = ++agentNavigationSequence.current;
     if (action === 'tool' && reviewId(message.result_obj || message.content)) {openReview(reviewId(message.result_obj || message.content)!); return;}
     if (action === 'tool') { setWorkspaceOpen(true); changeWorkspace({selected: 'tasks', tasksPinned: true, tasksOpen: false, task: {...stateRef.current.workspaceView.task, section: 'calls', callId: message.tool_call_id, runId: message.meta?.turn_id || message.meta?.ui_turn_id, agentId: undefined}}); return; }
+    if (action === 'agent') {
+      try {
+        const target = message.meta?.ui_agent_target;
+        let agentId: string | undefined;
+        if (target) {
+          const agents = await call<any[]>('agent.list', {conversation_id:id});
+          const matches = agents.filter(agent=>agent.id === target || agent.name === target);
+          const agent = matches.find(agent=>agent.id === target) || (matches.length === 1 ? matches[0] : undefined);
+          if (!agent) throw Error('无法定位这个子任务，请从子任务列表查看。');
+          agentId = agent.id;
+        }
+        if (selectedId.current !== id || agentNavigationSequence.current !== navigationSequence) return;
+        setWorkspaceOpen(true); changeWorkspace({selected:'agents',agentsOpen:true,agents:{...stateRef.current.workspaceView.agents,section:'agents',agentId,callId:undefined,runId:undefined}});
+      } catch (failure) {if (selectedId.current === id && agentNavigationSequence.current === navigationSequence) error((failure as Error).message);}
+      return;
+    }
     try {
       if (action === 'office' || action === 'skill') {
         await saveView(id);

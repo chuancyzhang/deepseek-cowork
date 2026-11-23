@@ -111,6 +111,8 @@ flowchart TB
 
 ## Electron 工作台
 
+“任务”与“子任务”分别保存工作区视图。主对话的协作分组由既有工具调用投影而来，目标由所属会话中的 agent ID（或唯一名称）解析。子任务详情复用 `AssistantTurn`，将 `agent.get` 返回的工具活动与对应运行的保存消息组合为显示记录；折叠和路由不改写模型历史。补充、停止、恢复仍走 `SubagentControl`，发送失败沿用原消息 ID；迟到读取不覆盖已切换的任务，关闭视图不停止后台工作。
+
 `desktop/` 包含稳定宿主、内置 React 界面插件和 Electron 原生边界。`App.tsx` 只挂载宿主、工作台插件与独立恢复入口。`core/desktop_service.py` 负责装配、协议分发和生命周期，领域操作由 `desktop_conversations`、`desktop_workbench`、`desktop_settings` 等模块处理。桌面与计划任务进程内调用 `RuntimeCoordinator`；消息渠道保留认证的跨进程适配，转交同一个核心。JSONL RPC 与渠道协议均为版本 2。运行路径不加载 Qt，PyInstaller 仅构建 `cowork-service`。
 
 ```mermaid

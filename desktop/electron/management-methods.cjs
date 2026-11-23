@@ -13,6 +13,8 @@ module.exports = [
   "skillhub.install",
   "skillhub.refresh",
   "enterprise.bind",
+  "enterprise.capabilities",
+  "enterprise.capabilityCredential",
   "enterprise.login",
   "enterprise.logout",
   "enterprise.providers",

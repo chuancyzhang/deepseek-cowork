@@ -6,20 +6,26 @@ import { skillInMode, skillMatches, skillScenes } from '../skills';
 import { sameFormValue } from '../host/forms';
 import SkillHub from './SkillHub';
 import {useHostField} from '../host/context';
+import {enterpriseSource, useEnterpriseCapabilities, type EnterpriseCapability, type EnterpriseCapabilityKind} from '../enterpriseCapabilities';
 const Multimedia = lazy(()=>import('../plugins/multimedia/Multimedia'));
 
 type Props = { kind: string; onError: (message: string) => void; onDirty: (value: boolean) => void;
-  confirm: (title: string, detail: string, choices: string[]) => Promise<number>; openConversation: (id: string) => void; returnToChat:()=>void };
+  confirm: (title: string, detail: string, choices: string[]) => Promise<number>; openConversation: (id: string) => void; returnToChat:()=>void;
+  openEnterpriseAccount: () => void; useEnterpriseCapability: (item: EnterpriseCapability) => Promise<void> };
 const titles: Record<string, string> = { skills: '技能', mcp: 'MCP 服务', experts: '专家', favorites: '常用任务', schedule_history: '运行记录' };
 const descriptions: Record<string, string> = { skills: '按任务选择能力，也可以安装自己的技能。', mcp: '连接已有工具与服务，让 DeepSeek Cowork 在你的工作环境中完成任务。', experts: '保存角色、工作方法与可用技能，在对话中随时选择。', favorites: '把经常做的事保存下来，一键运行或安排时间。', schedule_history: '查看任务结果、错过的计划和需要恢复的操作。' };
+const enterpriseKinds: Partial<Record<string, EnterpriseCapabilityKind>> = {skills: 'skill', mcp: 'mcp', experts: 'expert'};
+const capabilityScopes = ['personal', 'enterprise'] as const;
 
 export default function Capabilities(props: Props) {
   const { kind, onError, confirm, openConversation } = props;
   const [items, setItems] = useState<any[]>([]), [selected, setSelected] = useState<any>(null);
   const [query, setQuery] = useState(''), [failure, setFailure] = useState(''), [busy, setBusy] = useState(false), [job, setJob] = useState<any>(null);
   const [mode, setMode] = useState('library'), [scene, setScene] = useState('');
+  const [scope, setScope] = useState<typeof capabilityScopes[number]>('personal');
+  const enterpriseKind = enterpriseKinds[kind];
   const [requestedSkill,setRequestedSkill]=useHostField('management:skill','');
-  useEffect(()=>{if(kind==='skills'&&requestedSkill){setSelected({name:requestedSkill});setRequestedSkill('');}},[kind,requestedSkill]);
+  useEffect(()=>{if(kind==='skills'&&requestedSkill){setScope('personal');setSelected({name:requestedSkill});setRequestedSkill('');}},[kind,requestedSkill]);
   const reload = useCallback(async () => {
     setBusy(true); setFailure('');
     try { setItems(await rpc(kind === 'skills' ? 'skills.inventory' : kind === 'schedule_history' ? 'favorites.history' : kind + '.list')); }
@@ -48,10 +54,23 @@ export default function Capabilities(props: Props) {
   if(selected?.name==='multimedia'&&kind==='skills')return <Multimedia {...props} back={()=>{setSelected(null);void reload();}} saved={reload}/>;
   if (selected) return kind === 'skills' ? <SkillEditor key={selected.name} {...props} item={selected} back={() => setSelected(null)} saved={reload}/>
     : <ItemEditor key={selected.id || 'new'} {...props} item={selected} refresh={setSelected} back={() => { setSelected(null); void reload(); }}/ >;
-  if (kind === 'skills' && mode === 'hub') return <SkillHub back={() => setMode('library')} mine={() => {setMode('mine'); void reload();}} onError={onError}/>;
+  const scopeTabs = enterpriseKind && <div className="segmented" role="tablist" aria-label={titles[kind] + '来源'}>{capabilityScopes.map(tab => <button
+    key={tab} type="button" role="tab" id={`capability-${kind}-${tab}`} aria-controls={`capability-${kind}-panel`}
+    aria-selected={scope === tab} className={scope === tab ? 'selected' : ''} tabIndex={scope === tab ? 0 : -1} onClick={() => setScope(tab)}
+    onKeyDown={event => {
+      const next = event.key === 'Home' ? 'personal' : event.key === 'End' ? 'enterprise'
+        : ['ArrowLeft', 'ArrowRight'].includes(event.key) ? (tab === 'personal' ? 'enterprise' : 'personal') : null;
+      if (!next) return;
+      event.preventDefault(); setScope(next); document.getElementById(`capability-${kind}-${next}`)?.focus();
+    }}>{tab === 'personal' ? '个人' : '企业'}</button>)}</div>;
+  function renderPanel(content: React.ReactNode) {
+    return enterpriseKind ? <>{scopeTabs}<section id={`capability-${kind}-panel`} role="tabpanel" aria-labelledby={`capability-${kind}-${scope}`}>{content}</section></> : content;
+  }
+  if (enterpriseKind && scope === 'enterprise') return renderPanel(<EnterpriseCapabilityList title={titles[kind]} kind={enterpriseKind} openAccount={props.openEnterpriseAccount} useCapability={props.useEnterpriseCapability}/>);
+  if (kind === 'skills' && mode === 'hub') return renderPanel(<SkillHub back={() => setMode('library')} mine={() => {setMode('mine'); void reload();}} onError={onError}/>);
   const candidates = kind === 'skills' ? items.filter(item => skillInMode(item, mode) && skillMatches(item, query)) : items.filter(item => [item.name, item.display_name, item.description, item.user_description, item.favorite_name].some(value => String(value || '').toLowerCase().includes(query.toLowerCase())));
   const rows = candidates.filter(item => kind !== 'skills' || mode !== 'library' || !scene || item.presentation?.category === scene);
-  return <>
+  return renderPanel(<>
     {kind === 'skills' && <div className="skill-modes"><div className="segmented">{[['library','发现技能'],['mine','我的能力']].map(([key,label]) => <button key={key} className={mode === key ? 'selected' : ''} onClick={() => setMode(key)}>{label}<small>{items.filter(item => skillInMode(item,key)).length}</small></button>)}</div><button className={mode === 'builtin' ? 'selected' : ''} onClick={() => setMode('builtin')}>内置技能</button></div>}
     <PageToolbar title={titles[kind]}><div className="page-search"><Search size={17}/><input aria-label={'搜索' + titles[kind]} placeholder={kind === 'skills' ? '搜索想完成的任务，例如：读 PDF、查资料、分析股票' : '搜索名称或用途'} value={query} onChange={e => setQuery(e.target.value)}/></div>{kind !== 'schedule_history' && <button className="primary" disabled={busy} onClick={async () => {
       if (kind !== 'skills') { setSelected({}); return; }
@@ -79,7 +98,64 @@ export default function Capabilities(props: Props) {
         }}><Trash2 size={16}/></button>}
       </div></article>)}</div>}
     {kind === 'skills' && mode !== 'builtin' && <button className="skillhub-entry" onClick={() => setMode('hub')}>没有找到合适的？　去 SkillHub 查找更多 <ExternalLink size={15}/></button>}
+  </>);
+}
+
+function EnterpriseCapabilityList({title, kind, openAccount, useCapability}: {title: string; kind: EnterpriseCapabilityKind; openAccount: () => void; useCapability: (item: EnterpriseCapability) => Promise<void>}) {
+  const {catalog, failure, loading, reload} = useEnterpriseCapabilities(true);
+  const [query, setQuery] = useState(''), [using, setUsing] = useState(false), [useFailure, setUseFailure] = useState('');
+  if (loading) return <div className="loading" role="status"><LoaderCircle className="spin"/>正在读取企业{title}…</div>;
+  if (failure) return <ErrorState message={failure} retry={reload}/>;
+  if (catalog?.status === 'signed_out' || catalog?.status === 'expired') return <Empty title={catalog.status === 'expired' ? '企业登录已过期' : '登录后使用企业能力'} detail={'登录后可以查看企业已分配给你的' + title + '。'}><button className="primary" onClick={openAccount}>打开企业账号设置</button></Empty>;
+  if (catalog?.status === 'unsupported') return <Empty title={'当前企业平台不支持企业' + title} detail="请联系企业管理员查看平台版本。"/>;
+  const items = (catalog?.items || []).filter(item => item.kind === kind);
+  if (!items.length) return <Empty title={'暂无企业' + title} detail={'请联系企业管理员分配' + title + '。'}><button className="secondary" onClick={reload}>刷新</button></Empty>;
+  const matching = items.filter(item => `${item.name}\n${item.description}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  const Icon = kind === 'skill' ? Sparkles : FileCode2;
+  return <>
+    <PageToolbar title={'企业' + title}><label className="page-search"><Search size={17}/><input aria-label={'搜索企业' + title} placeholder="搜索名称或用途" value={query} onChange={event => setQuery(event.target.value)}/></label><button className="secondary" onClick={reload}>刷新</button></PageToolbar>
+    {useFailure && <ErrorState message={useFailure}/>}
+    {matching.length ? <div className={kind === 'skill' ? 'capability-grid' : 'resource-list'}>{matching.map(item => {
+      const usable = item.available !== false && Boolean(item.selection_key);
+      return <article className={'resource-card' + (item.requires_credential ? ' enterprise-mcp-card' : '')} key={item.id}>
+        <div className="resource-symbol"><Icon size={20}/></div>
+        <div className="resource-body"><div className="resource-title">{item.name}</div>
+          {item.description && <p title={item.description}>{item.description}</p>}
+          <small>{enterpriseSource(catalog?.platform_name, item)} · {usable ? '可用' : '不可用'}</small>
+          {!usable && item.reason && <p>{item.reason}</p>}
+        </div>
+        <div className="resource-actions"><button className="secondary" disabled={using || !usable} aria-label={'在聊天中使用 ' + item.name} onClick={async () => {
+          setUsing(true); setUseFailure('');
+          try { await useCapability(item); } catch (error) {setUseFailure((error as Error).message);} finally {setUsing(false);}
+        }}>在聊天中使用</button></div>
+        {kind === 'mcp' && item.requires_credential && <EnterpriseMcpCredential item={item} saved={reload}/>}
+      </article>;
+    })}</div> : <Empty title="没有匹配的内容" detail="换一个名称或用途试试。"/>}
   </>;
+}
+
+function EnterpriseMcpCredential({item, saved}: {item: EnterpriseCapability; saved: () => void}) {
+  const [open, setOpen] = useState(false), [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false), [failure, setFailure] = useState('');
+  async function save(next: string) {
+    setBusy(true); setFailure('');
+    try {
+      await rpc('enterprise.capabilityCredential', {selection_key: item.selection_key, value: next});
+      setValue(''); setOpen(false); saved();
+    } catch (error) {setFailure((error as Error).message);} finally {setBusy(false);}
+  }
+  return <div className="enterprise-mcp-credential">
+    {!open ? <button className="text-link" onClick={() => setOpen(true)}>{item.credential_configured ? '管理凭据' : '配置凭据'}</button> :
+      <form onSubmit={event => {event.preventDefault(); if (value.trim()) void save(value);}}>
+        <Field label={item.endpoint_host ? item.endpoint_host + ' 的访问令牌' : 'MCP 访问令牌'}><input type="password" autoComplete="off" value={value} onChange={event => setValue(event.target.value)} disabled={busy}/></Field>
+        {failure && <ErrorState message={failure}/>}
+        <div className="button-row">
+          <button type="button" className="secondary" disabled={busy} onClick={() => {setValue(''); setOpen(false); setFailure('');}}>取消</button>
+          {item.credential_configured && <button type="button" className="secondary" disabled={busy} onClick={() => void save('')}>清除凭据</button>}
+          <button className="primary" disabled={busy || !value.trim()}>{busy ? '正在保存…' : '保存凭据'}</button>
+        </div>
+      </form>}
+  </div>;
 }
 
 function AutomationRow({item, busy, edit, act, onError, openConversation, confirm}: Props & {item: any; busy: boolean; edit: () => void; act: (method: string, params: any) => Promise<any>}) {

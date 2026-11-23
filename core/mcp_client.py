@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 
 TRANSPORT_STDIO = "stdio"
@@ -430,7 +431,7 @@ def _tool_to_payload(tool):
 
 
 @asynccontextmanager
-async def _open_streamable_http_transport(url, headers, timeout_seconds):
+async def _open_streamable_http_transport(url, headers, timeout_seconds, *, follow_redirects=True):
     try:
         from mcp.client.streamable_http import streamable_http_client
     except ImportError:
@@ -440,16 +441,29 @@ async def _open_streamable_http_transport(url, headers, timeout_seconds):
     if streamable_http_client is not None:
         import httpx
 
-        async with httpx.AsyncClient(headers=headers or None, follow_redirects=True, timeout=timeout_seconds) as http_client:
+        loopback = urlsplit(url).hostname in {"127.0.0.1", "localhost", "::1"}
+        async with httpx.AsyncClient(headers=headers or None, follow_redirects=follow_redirects, timeout=timeout_seconds,
+                                     trust_env=follow_redirects or not loopback) as http_client:
             async with streamable_http_client(url, http_client=http_client) as streams:
                 yield streams
         return
 
+    options = {}
+    if not follow_redirects:
+        import httpx
+
+        def create_http_client(*, headers=None, timeout=None, auth=None):
+            loopback = urlsplit(url).hostname in {"127.0.0.1", "localhost", "::1"}
+            return httpx.AsyncClient(headers=headers, timeout=timeout, auth=auth, follow_redirects=False,
+                                     trust_env=not loopback)
+
+        options["httpx_client_factory"] = create_http_client
     async with streamablehttp_client(
         url,
         headers=headers or None,
         timeout=timeout_seconds,
         sse_read_timeout=timeout_seconds,
+        **options,
     ) as streams:
         yield streams
 
@@ -500,7 +514,8 @@ async def _open_mcp_session(server_config):
     url = str(server_config.get("url") or "").strip()
     headers = _stringify_mapping(server_config.get("headers"))
     try:
-        async with _open_streamable_http_transport(url, headers, timeout_seconds) as (
+        async with _open_streamable_http_transport(url, headers, timeout_seconds,
+                **({"follow_redirects": False} if server_config.get("follow_redirects") is False else {})) as (
             read_stream,
             write_stream,
             _get_session_id,
@@ -651,7 +666,21 @@ def _ensure_runtime_skill_dependencies(server_config, skill_manager=None):
     return result
 
 
-def list_mcp_server_tools(server_config, config_manager=None, skill_manager=None, *, reconfiguration_test=False):
+def _redact_mcp_response(value, token):
+    if isinstance(value, str):
+        return value.replace(token, "[已隐藏]")
+    if isinstance(value, list):
+        return [_redact_mcp_response(item, token) for item in value]
+    if isinstance(value, dict):
+        return {key.replace(token, "[已隐藏]"): _redact_mcp_response(item, token) for key, item in value.items()}
+    return value
+
+
+def _enterprise_bearer(prepared):
+    return str((prepared.get("headers") or {}).get("Authorization") or "").removeprefix("Bearer ")
+
+
+def list_mcp_server_tools(server_config, config_manager=None, skill_manager=None, *, reconfiguration_test=False, prepare=None):
     from .connection_retirement import mcp_issue
     issue = mcp_issue(server_config, config_manager, testing=reconfiguration_test)
     if issue:
@@ -674,10 +703,18 @@ def list_mcp_server_tools(server_config, config_manager=None, skill_manager=None
             logger.error("mcp_tools.list.error server=%s error=%s", server_name, error)
             return {"ok": False, "error": error, "tools": [], "dependency_status": dependency_status}
         try:
-            prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
+            prepared = prepare() if prepare else prepare_mcp_server_config(server_config, config_manager=config_manager)
         except Exception as exc:
             raise McpOperationError("认证", exc) from exc
         tools = _run_async(_list_mcp_server_tools_async(prepared))
+        if prepare:
+            names = set(prepared.get("allowed_tools") or ())
+            bearer = _enterprise_bearer(prepared)
+            tools = [tool for tool in tools if (not names or tool["name"] in names)
+                     and (not bearer or bearer not in tool["name"])]
+            tools.sort(key=lambda tool: tool["name"])
+            if bearer:
+                tools = _redact_mcp_response(tools, bearer)
         from .data_security import inspect_capability
         inspect_capability(config_manager, "mcp", server_config.get("id", server_name),
                            {"transport": server_config.get("transport"), "tools": tools})
@@ -714,7 +751,7 @@ def test_mcp_server_connection(server_config, config_manager=None, skill_manager
     }
 
 
-def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None, skill_manager=None, *, context=None):
+def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None, skill_manager=None, *, context=None, prepare=None):
     from .connection_retirement import mcp_issue
     issue = mcp_issue(server_config, config_manager)
     if issue:
@@ -744,10 +781,17 @@ def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None,
                 "dependency_status": dependency_status,
             }
         try:
-            prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
+            prepared = prepare() if prepare else prepare_mcp_server_config(server_config, config_manager=config_manager)
         except Exception as exc:
             raise McpOperationError("认证", exc) from exc
+        allowed_tools = prepared.get("allowed_tools") if prepare else None
+        if allowed_tools and tool_name not in allowed_tools:
+            return {"ok": False, "status": "denied", "executed": False, "error": "该工具不在企业 MCP 的允许列表中。"}
         payload = _run_cancellable_mcp(lambda: _call_mcp_tool_async(prepared, tool_name, arguments or {}), context)
+        if prepare:
+            bearer = _enterprise_bearer(prepared)
+            if bearer:
+                payload = _redact_mcp_response(payload, bearer)
     except McpCallCancelled as exc:
         return {"ok": False, "status": "cancelled", "server": server_name,
                 "tool": str(tool_name or ""), "error": str(exc)}

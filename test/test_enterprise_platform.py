@@ -103,6 +103,103 @@ class PlatformTests(unittest.TestCase):
     def headers(self):
         return {"X-CSRF-Token": self.client.cookies.get("cowork_csrf", "")}
 
+    def test_enterprise_capabilities_publish_and_check_versioned_member_grants(self):
+        admin_path = "/api/v1/admin/capabilities"
+        catalog_path = "/api/v1/capabilities"
+        self.assertEqual(self.client.get(catalog_path).status_code, 401)
+        self.web_login()
+        with self.db.transaction() as db:
+            alice = Member(provider_id="company", subject="alice", name="张晨")
+            bob = Member(provider_id="company", subject="bob", name="李阳")
+            db.add_all([alice, bob])
+        alice_header = {"Authorization": "Bearer " + self.auth.session(alice.id, "desktop")["access_token"]}
+        bob_header = {"Authorization": "Bearer " + self.auth.session(bob.id, "desktop")["access_token"]}
+
+        def create(kind, name, config):
+            response = self.client.post(admin_path, headers=self.headers(),
+                                        json={"kind": kind, "name": name, "description": "经营分析", "config": config})
+            self.assertEqual(response.status_code, 201, response.text)
+            return response.json()
+
+        def change(item, action, status=200, **values):
+            response = self.client.post(f"{admin_path}/{item['id']}/{action}", headers=self.headers(),
+                                        json={"revision": item["revision"], **values})
+            self.assertEqual(response.status_code, status, response.text)
+            return response.json()
+
+        def ref(item, version=None):
+            return {"id": item["id"], "kind": item["kind"], "version": version or item["version"]}
+
+        self.assertEqual(self.client.get(admin_path, headers=alice_header).status_code, 403)
+        skill = create("skill", "经营分析", {"instructions": "按月汇总销售。",
+                       "files": {"references/input.md": "首行是标题。", "scripts/report.py": "total = sum([1, 2])"}})
+        expert = create("expert", "经营顾问", {"instructions": "生成经营报告。", "skill_ids": [skill["id"]]})
+        change(expert, "test", status=400)
+        change(skill, "publish", status=400)
+        skill = change(change(skill, "test"), "publish")
+        self.assertEqual(self.client.get(catalog_path, headers=alice_header).json(), {"items": []})
+        skill = change(skill, "grant", all_members=False, member_ids=[alice.id])
+        expert = change(change(expert, "test"), "publish")
+        expert = change(expert, "grant", all_members=True, member_ids=[])
+        self.assertEqual({item["name"] for item in self.client.get(catalog_path, headers=alice_header).json()["items"]},
+                         {"经营分析", "经营顾问"})
+        bob_items = self.client.get(catalog_path, headers=bob_header).json()["items"]
+        self.assertEqual([item["id"] for item in bob_items], [expert["id"]])
+        self.assertFalse(bob_items[0]["available"])
+        self.assertEqual(bob_items[0]["config"], {})
+        self.assertEqual(self.client.post(catalog_path + "/check", headers=bob_header,
+                                         json={"items": [ref(expert)]}).status_code, 403)
+
+        path = f"{admin_path}/{skill['id']}"
+        update = {"name": "季度经营分析", "description": "新版", "config": {"instructions": "按季度汇总销售。"}}
+        stale = self.client.put(path, headers=self.headers(), json={**update, "revision": skill["revision"] - 1})
+        self.assertEqual(stale.status_code, 409)
+        saved = self.client.put(path, headers=self.headers(), json={**update, "revision": skill["revision"]})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertIn("经营分析", {item["name"] for item in self.client.get(catalog_path, headers=alice_header).json()["items"]})
+        skill = change(change(saved.json(), "test"), "publish")
+        self.assertEqual(skill["version"], 2)
+        self.assertEqual([entry["version"] for entry in self.client.get(path).json()["versions"]], [2, 1])
+        checked = self.client.post(catalog_path + "/check", headers=alice_header,
+                                   json={"items": [ref(skill, 1), ref(expert)], "include_config": True})
+        self.assertEqual(checked.status_code, 200, checked.text)
+        self.assertEqual({item["name"] for item in checked.json()["items"]}, {"经营分析", "经营顾问"})
+        self.assertEqual(next(item for item in checked.json()["items"] if item["kind"] == "skill")["config"]["instructions"],
+                         "按月汇总销售。")
+        change(skill, "disable")
+        after_disable = self.client.get(catalog_path, headers=alice_header).json()["items"]
+        self.assertEqual([item["id"] for item in after_disable], [expert["id"]])
+        self.assertFalse(after_disable[0]["available"])
+        self.assertEqual(self.client.post(catalog_path + "/check", headers=alice_header,
+                                         json={"items": [ref(skill, 1)]}).status_code, 403)
+
+    def test_enterprise_capability_configuration_checks_do_not_execute_scripts_or_probe_mcp(self):
+        self.web_login()
+        route = "/api/v1/admin/capabilities"
+        for kind, config in (
+            ("skill", {"files": {"scripts/../../outside.py": "print(1)"}}),
+            ("skill", {"files": {"scripts/Case.py": "print(1)", "scripts/case.py": "print(2)"}}),
+            ("mcp", {"url": "https://member:password@mcp.example.invalid/mcp"}),
+            ("mcp", {"url": "https://mcp.example.invalid/mcp?token=test"}),
+            ("mcp", {"url": "https://mcp.example.invalid/mcp", "transport": "stdio"}),
+            ("mcp", {"url": "http://localhost/mcp", "auth_type": "bearer", "credential_variable": "测试凭据"}),
+        ):
+            with self.subTest(kind=kind, config=config):
+                self.assertEqual(self.client.post(route, headers=self.headers(),
+                    json={"kind": kind, "name": "测试配置", "config": config}).status_code, 400)
+
+        for kind, config in (
+            ("skill", {"instructions": "尝试执行以下脚本。", "files": {"scripts/fail.py": "raise RuntimeError('must not execute')"}}),
+            ("mcp", {"url": "https://mcp.example.invalid/mcp", "auth_type": "bearer", "credential_variable": "QA_TOKEN"}),
+        ):
+            draft = self.client.post(route, headers=self.headers(), json={"kind": kind, "name": "配置检查", "config": config})
+            self.assertEqual(draft.status_code, 201, draft.text)
+            item = draft.json()
+            result = self.client.post(f"{route}/{item['id']}/test", headers=self.headers(), json={"revision": item["revision"]})
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertTrue(result.json()["tested"])
+        self.assertEqual(self.requests, [])
+
     def model(self, member_id):
         response = self.client.post("/api/v1/admin/models", headers=self.headers(), json={
             "name": "企业测试模型", "provider": "openai", "protocol": "chat_completions", "model_name": "test-model",
@@ -130,6 +227,88 @@ class PlatformTests(unittest.TestCase):
                         "questions": [{"id": submission_id, "text": text, "sent_at": time.time()}]}}
         result.update(changes)
         return result
+
+    def test_chat_audit_keeps_latest_per_member_and_filters_contents(self):
+        from web.platform.server.chat_audit import ChatAuditRequest, RETENTION, EVENT_RETENTION
+        from web.platform.server.database import AuditEvent
+
+        administrator = self.web_login()["member"]["id"]
+        model_id = self.model(administrator)
+        endpoint = "/api/v1/chat-audit/latest"
+        admin_endpoint = "/api/v1/admin/chat-audit"
+        when = time.time_ns() // 1_000
+        payload = {"conversation_id": "chat-a", "request_id": "request-a", "run_id": "run-1", "captured_us": when,
+                   "protocol": "chat_completions", "model_name": "test-model", "model_source": "enterprise", "model_id": model_id,
+                   "parameters": {"model": "test-model", "extra_headers": {"Authorization": "Bearer FAKE_AUTH_TOKEN"}, "messages": [
+                       {"role": "user", "content": "原有文字"},
+                       {"role": "user", "content": [{"type": "input_file", "filename": "private.pdf", "file_data": "BASE64_DO_NOT_KEEP"},
+                                                    {"type": "text", "text": "前文 password=FAKE_SECRET"}]}]}}
+        self.assertEqual(self.client.put(endpoint, headers=self.headers(), json=payload).status_code, 200)
+        advanced = {**payload, "request_id": "request-b", "captured_us": when + 1}
+        self.assertEqual(self.client.put(endpoint, headers=self.headers(), json=advanced).status_code, 200)
+        self.assertEqual(self.client.put(endpoint, headers=self.headers(), json=payload).status_code, 200)
+        listed = self.client.get(admin_endpoint, params={"member_id": administrator, "keyword": "chat-a"}).json()
+        self.assertEqual(listed["total"], 1)
+        self.assertNotIn("parameters", listed["items"][0])
+        record_id = listed["items"][0]["id"]
+        result = self.client.get(admin_endpoint + "/" + record_id)
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["request_id"], "request-b")
+        self.assertIn("原有文字", result.text)
+        for secret in ("FAKE_AUTH_TOKEN", "FAKE_SECRET", "BASE64_DO_NOT_KEEP", "private.pdf"):
+            self.assertNotIn(secret, result.text)
+        saved = result.json()
+        self.assertAlmostEqual(saved["expires_at"] - saved["captured_at"], RETENTION)
+        self.assertIn("chat_audit.read", [event["action"] for event in self.client.get(admin_endpoint + "/events").json()["items"]])
+
+        gateway = self.submission()
+        gateway["_cowork"]["chat_audit_version"] = 1
+        response = self.client.post(f"/api/v1/gateway/models/{model_id}/chat/completions", headers=self.headers(), json=gateway)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.get("/api/v1/admin/questions").json()["total"], 0)
+        self.assertNotIn("_cowork", self.requests[-1][1])
+        self.assertEqual(self.requests[-1][1]["messages"], gateway["messages"])
+
+        now = time.time()
+        with self.db.transaction() as db:
+            db.get(ChatAuditRequest, record_id).expires_at = now - 1
+            db.add(AuditEvent(action="stale.test", created_at=now - EVENT_RETENTION - 1))
+        self.assertEqual(self.client.get(admin_endpoint + "/" + record_id).status_code, 404)
+        self.app.state.cleanup()
+        with self.db.transaction() as db:
+            self.assertIsNone(db.get(ChatAuditRequest, record_id))
+            self.assertIsNone(db.scalar(select(AuditEvent).where(AuditEvent.action == "stale.test")))
+
+    def test_personal_model_audit_is_opt_in_and_permit_is_scoped(self):
+        from unittest.mock import patch
+
+        self.web_login()
+        policy_url = "/api/v1/admin/chat-audit/policy"
+        client_url = "/api/v1/chat-audit/policy"
+        latest = "/api/v1/chat-audit/latest"
+        run = {"conversation_id": "chat-b", "run_id": "run-1", "space_id": "space-a"}
+        self.assertEqual(self.client.post(client_url, headers=self.headers(), json=run).json(), {"enabled": False})
+        policy = self.client.get(policy_url).json()
+        self.assertFalse(policy["personal_enabled"])
+        enabled = self.client.put(policy_url, headers=self.headers(), json={**policy, "personal_enabled": True})
+        self.assertEqual(enabled.status_code, 200, enabled.text)
+        self.assertEqual(self.client.post(client_url, headers=self.headers(), json={"conversation_id": "chat-b", "run_id": "run-1"}).status_code, 403)
+        with patch.object(self.app.state.team_spaces, "policy", return_value={"allowed": True}) as authorize:
+            permission = self.client.post(client_url, headers=self.headers(), json=run).json()
+            self.assertTrue(permission["enabled"])
+            self.assertEqual(authorize.call_args.args[1:], ("space-a", "personal"))
+            disabled = self.client.put(policy_url, headers=self.headers(), json={**enabled.json(), "personal_enabled": False})
+            self.assertEqual(disabled.status_code, 200, disabled.text)
+            self.assertEqual(self.client.post(client_url, headers=self.headers(), json=run).json(), {"enabled": False})
+        retained = {"conversation_id": run["conversation_id"], "run_id": run["run_id"], "request_id": "request-a",
+                    "model_source": "personal", "model_name": "a-self-model", "protocol": "responses",
+                    "captured_us": time.time_ns() // 1_000, "parameters": {"input": "安全的文本"}, "permit": permission["permit"]}
+        self.assertEqual(self.client.put(latest, headers=self.headers(), json={**retained, "run_id": "different-run"}).status_code, 403)
+        self.assertEqual(self.client.put(latest, headers=self.headers(), json=retained).status_code, 200)
+        self.client.post("/api/v1/auth/logout", headers=self.headers())
+        self.web_login("another-user")
+        self.assertEqual(self.client.put(latest, headers=self.headers(), json=retained).status_code, 403)
+        self.assertEqual(self.client.get("/api/v1/admin/chat-audit").status_code, 403)
 
     def test_guest_and_login_do_not_upload_history_or_grant_models(self):
         self.assertEqual(self.client.get("/api/v1/platform-info").json()["question_scope"], "enterprise_models_only")
@@ -599,7 +778,7 @@ class PlatformTests(unittest.TestCase):
         self.assertIsNone(self.client.get("/api/v1/client-releases/recommended").json()["release"])
         self.assertIsNone(self.client.get("/api/v1/client-releases/recommended?app_layout=electron").json()["release"])
         with self.db.transaction() as db:
-            self.assertEqual(db.get(Platform, 1).schema_version, 4)
+            self.assertEqual(db.get(Platform, 1).schema_version, 5)
             self.assertEqual(db.get(Platform, 1).catalog_revision, 1)
             self.assertIsNotNone(db.get(Member, actor))
             record = db.get(ClientRelease, release["id"])
@@ -629,6 +808,28 @@ class PlatformTests(unittest.TestCase):
             self.assertEqual(db.get(Member, actor).role, "admin")
             self.assertFalse(db.get(ClientRelease, old_id).recommended)
             self.assertEqual(db.get(Platform, 1).catalog_revision, 1)
+
+    def test_v4_migration_creates_capability_tables_without_retiring_releases_again(self):
+        from web.platform.server.capabilities import Capability, CapabilityVersion
+        from web.platform.server.database import Platform
+        actor = self.web_login()["member"]["id"]
+        with self.db.transaction() as db:
+            old = ClientRelease(app_version="1.0.0", app_layout="qt", state="withdrawn",
+                                recommended=False, stage="retired", created_by=actor, revision=3)
+            db.add(old)
+            db.flush()
+            old_id = old.id
+            platform = db.get(Platform, 1)
+            platform.schema_version, platform.catalog_revision = 4, 2
+        with self.db.engine.begin() as connection:
+            CapabilityVersion.__table__.drop(connection)
+            Capability.__table__.drop(connection)
+        self.db.migrate(self.settings)
+        self.assertEqual(self.client.get("/healthz").json()["schema_version"], 5)
+        self.assertEqual(self.client.get("/api/v1/admin/capabilities").json()["items"], [])
+        with self.db.transaction() as db:
+            self.assertEqual(db.get(Platform, 1).catalog_revision, 2)
+            self.assertEqual(db.get(ClientRelease, old_id).revision, 3)
 
     def test_cancelled_github_import_cannot_overwrite_a_new_upload(self):
         from unittest.mock import patch

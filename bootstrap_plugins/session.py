@@ -44,7 +44,7 @@ class BootstrapSession:
                 or any(run_context.get(key) for key in (
                     "allowed_skill_names", "agent_profile_id", "agent_system_prompt",
                     "workflow_mode", "ppt_agent_mode", "im_provider",
-                    "office_source_files", "office_template_file",
+                    "office_source_files", "office_template_file", "enterprise_capabilities",
                 ))
                 or run_context.get("office_output_profile") not in (None, "", "free")
                 or knowledge.get("refs")

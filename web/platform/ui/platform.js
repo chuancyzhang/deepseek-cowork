@@ -38,7 +38,7 @@ function updateChrome(){
   identity.replaceChildren();
   if(me){const label=document.createElement("span");label.textContent=me.member.name;identity.append(label,button("退出",async()=>{await api("/auth/logout",{method:"POST"});me=null;dirty=false;updateChrome();navigate("/app");}));}
   nav.hidden=!me;
-  if(me){const active=location.pathname.slice(base.length).split("/")[2]||(me.member.role==="admin"?"members":"team-spaces");const links=me.member.role==="admin"?[["members","成员"],["models","模型"],["questions","提问记录"],["settings","设置"]]:[];if(spaceEnabled())links.unshift(["team-spaces","团队空间"]);nav.innerHTML=links.map(([key,label])=>`<a data-route class="${active===key||(key==="settings"&&["releases","sources"].includes(active))?"active":""}" href="${base}/app/${key}">${label}</a>`).join("");}
+  if(me){const active=location.pathname.slice(base.length).split("/")[2]||(me.member.role==="admin"?"members":"team-spaces");const links=me.member.role==="admin"?[["members","成员"],["models","模型"],["capabilities","企业能力"],["audit","审计"],["settings","设置"]]:[];if(spaceEnabled())links.unshift(["team-spaces","团队空间"]);nav.innerHTML=links.map(([key,label])=>`<a data-route class="${active===key||(key==="audit"&&active==="questions")||(key==="settings"&&["releases","sources"].includes(active))?"active":""}" href="${base}/app/${key}">${label}</a>`).join("");}
 }
 async function login(){
   const setup=await api("/setup");
@@ -46,7 +46,7 @@ async function login(){
   if(location.pathname.endsWith("/administrator")&&setup.administrator_login)return administratorForm(false);
   const data=await api("/auth/providers");
   if(!data.items.length&&setup.administrator_login)return administratorForm(false);
-  content.innerHTML=`<section class="login"><h1>登录${esc(platform.platform_name)}</h1><p class="muted">连接企业账号，使用管理员分配的模型。</p><div class="note">使用企业模型提交的问题正文供管理员查看，中心保留 30 天。完整对话留在本机，不跨电脑同步。</div><form id="login-form" class="form"><label>认证方式<select name="provider_id">${data.items.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}${s.verified?"":" · 待管理员验证"}</option>`).join("")}</select></label><div id="ldap-fields" hidden><label>账号<input name="username" autocomplete="username"></label><label>密码<input type="password" name="password" autocomplete="current-password"></label></div><button class="primary" ${data.items.length?"":"disabled"}>登录</button>${data.items.length?"":'<p class="muted">管理员尚未配置认证来源，请联系平台管理员。</p>'}<a href="${base}/downloads" data-route>下载 Cowork 客户端</a></form></section>`;
+  content.innerHTML=`<section class="login"><h1>登录${esc(platform.platform_name)}</h1><p class="muted">连接企业账号，使用管理员分配的模型和能力。</p><div class="note">企业审计按聊天保留最近一次符合规则的模型请求 30 天。请求可能包含此前的对话文字。使用自配模型的企业任务按企业设置记录。</div><form id="login-form" class="form"><label>认证方式<select name="provider_id">${data.items.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}${s.verified?"":" · 待管理员验证"}</option>`).join("")}</select></label><div id="ldap-fields" hidden><label>账号<input name="username" autocomplete="username"></label><label>密码<input type="password" name="password" autocomplete="current-password"></label></div><button class="primary" ${data.items.length?"":"disabled"}>登录</button>${data.items.length?"":'<p class="muted">管理员尚未配置认证来源，请联系平台管理员。</p>'}<a href="${base}/downloads" data-route>下载 Cowork 客户端</a></form></section>`;
   if(setup.administrator_login){const link=document.createElement("a");link.href=base+"/app/administrator";link.dataset.route="";link.textContent="平台管理员登录";content.querySelector(".login").append(link);}
   const form=document.getElementById("login-form"),select=form.elements.provider_id;
   const toggle=()=>{document.getElementById("ldap-fields").hidden=data.items.find(x=>x.id===select.value)?.mode!=="ldap";}; select.onchange=toggle;toggle();
@@ -88,11 +88,87 @@ function editModel(model){
   document.getElementById("toggle-model").onclick=()=>action(async()=>{if(dirty)throw new Error("请先保存修改。");model=await api("/admin/models/"+model.id,{method:"PUT",body:payload(!model.enabled)});dirty=false;editModel(model);message(model.enabled?"模型已启用，可到成员页面分配。":"模型已停用。","success");});
 }
 async function questions(){
-  const members=await api("/admin/members");heading("提问记录","仅保留企业模型的用户问题正文。30 天后自动删除，不影响本机历史。");
+  const members=await api("/admin/members");heading("旧版提问记录","旧版客户端提交的企业模型问题正文保留 30 天。","/app/audit");
   content.insertAdjacentHTML("beforeend",`<form id="filters" class="toolbar"><label>成员<select name="member_id"><option value="">所有成员</option>${members.items.map(m=>`<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("")}</select></label><label>开始日期<input type="date" name="since"></label><label>结束日期<input type="date" name="until"></label><label>问题关键词<input name="keyword" maxlength="200" placeholder="搜索问题正文"></label><button class="primary">查询</button></form><div id="question-list"></div><div id="question-pager" class="pager"></div>`);
   const form=document.getElementById("filters");let offset=0,queryGeneration=0;
   const load=async()=>{const query=++queryGeneration;const filters=formData(form),params=new URLSearchParams({member_id:filters.member_id,keyword:filters.keyword,offset:String(offset)});if(filters.since)params.set("since",String(new Date(filters.since+"T00:00:00").getTime()/1000));if(filters.until)params.set("until",String(new Date(filters.until+"T00:00:00").getTime()/1000+86400));const result=await api("/admin/questions?"+params);if(query!==queryGeneration)return;const list=document.getElementById("question-list");if(!list)return;list.innerHTML=result.items.length?`<div class="table-wrap"><table><thead><tr><th>成员 / 时间</th><th>企业模型</th><th>问题正文</th><th>操作</th></tr></thead><tbody>${result.items.map(q=>`<tr><td>${esc(q.member_name)}<span class="secondary-line">${date(q.received_at)}</span></td><td>${esc(q.model_name)}</td><td class="excerpt">${esc(q.text?q.text.slice(0,160):"本次未输入文字")}${q.text.length>160?"…":""}</td><td><button data-question="${esc(q.id)}">查看全文</button></td></tr>`).join("")}</tbody></table></div>`:empty(Object.values(filters).some(Boolean)?"筛选条件下没有记录。":"尚无企业模型提问记录。");list.querySelectorAll("[data-question]").forEach(b=>b.onclick=()=>action(async()=>{const q=await api("/admin/questions/"+b.dataset.question);detail("问题正文 · "+date(q.received_at),q.text||"本次未输入文字");}));const pager=document.getElementById("question-pager");pager.replaceChildren();const prev=button("上一页",async()=>{offset=Math.max(0,offset-50);await load();}),next=button("下一页",async()=>{offset+=50;await load();});prev.disabled=offset===0;next.disabled=offset+50>=result.total;const label=document.createElement("span");label.textContent=`共 ${result.total} 条`;pager.append(prev,label,next);};form.onsubmit=e=>{e.preventDefault();offset=0;action(load);};await load();
 }
+const auditSections = [["", "聊天请求"], ["/events", "平台操作"], ["/settings", "审计设置"]];
+
+function auditHeader(section, title, description) {
+  heading(title, description);
+  const links = document.createElement("div");
+  links.className = "space-tabs";
+  links.innerHTML = auditSections.map(([path, label]) => `<a ${section===path?'aria-current="page"':""} href="${base}/app/audit${path}" data-route>${label}</a>`).join("");
+  content.append(links);
+}
+
+async function auditSettingsPage() {
+  const [policy, platformSettings] = await Promise.all([api("/admin/chat-audit/policy"), api("/admin/settings")]);
+  auditHeader("/settings", "审计设置", "聊天请求保留 30 天，平台操作保留 90 天。");
+  const cleanup = platformSettings.cleanup;
+  content.insertAdjacentHTML("beforeend", `<form id="audit-policy" class="form section"><label class="check"><input type="checkbox" name="personal_enabled" ${policy.personal_enabled?"checked":""}>记录使用自配模型的企业任务请求</label><p class="help">默认关闭。保存后对后续任务生效，普通个人任务仍不记录。</p><div><button class="primary">保存设置</button></div></form><p class="muted">最近自动清理 ${date(cleanup.last_success_at)}，删除 ${cleanup.chats_deleted||0} 条聊天请求及 ${cleanup.deleted||0} 条旧版提问。</p>${cleanup.error?`<p class="danger">${esc(cleanup.error)}</p>`:""}`);
+  const form = document.getElementById("audit-policy");
+  watchForm(form);
+  form.onsubmit = event => {
+    event.preventDefault();
+    action(async () => {
+      const save = form.querySelector("button");
+      save.disabled = true;
+      try {
+        const result = await api("/admin/chat-audit/policy", {method:"PUT", body:{revision:policy.revision, personal_enabled:form.elements.personal_enabled.checked}});
+        policy.revision = result.revision;
+        dirty = false;
+        message("审计设置已保存。", "success");
+      } finally {
+        save.disabled = false;
+      }
+    });
+  };
+}
+
+async function chatAuditPage() {
+  const route = location.pathname.slice((base + "/app/audit").length);
+  if (route === "/settings") return auditSettingsPage();
+  const events = route === "/events";
+  const members = await api("/admin/members");
+  auditHeader(events?"/events":"", events?"平台操作":"聊天请求记录", events?"查看平台操作及审计访问，记录保留 90 天。":"每个聊天保留最后一次符合规则的请求，30 天后清理。详情中的模型请求未包含文件内容或认证信息。");
+  if (!events) content.querySelector(".space-tabs").insertAdjacentHTML("beforeend", `<a href="${base}/app/questions" data-route>旧版提问</a>`);
+  content.insertAdjacentHTML("beforeend", `<form id="audit-filters" class="toolbar"><label>成员<select name="member_id"><option value="">所有成员</option>${members.items.map(member=>`<option value="${esc(member.id)}">${esc(member.name)}</option>`).join("")}</select></label>${events?"":'<label>开始日期<input name="since" type="date"></label><label>结束日期<input name="until" type="date"></label>'}<label>${events?"操作名称":"聊天标识或模型"}<input name="keyword" maxlength="${events?80:240}"></label><button class="primary">查询</button></form><div id="audit-items" aria-live="polite"></div><div id="audit-pager" class="pager"></div>`);
+  const form = document.getElementById("audit-filters"), list = document.getElementById("audit-items"), pager = document.getElementById("audit-pager");
+  let offset = 0, revision = 0;
+  const load = async () => {
+    const pending = ++revision;
+    const filters = formData(form);
+    const params = new URLSearchParams({member_id:filters.member_id, keyword:filters.keyword, offset:String(offset)});
+    if (filters.since) params.set("since", String(new Date(filters.since + "T00:00:00").getTime() / 1000));
+    if (filters.until) {
+      const end = new Date(filters.until + "T00:00:00");
+      end.setDate(end.getDate() + 1);
+      params.set("until", String(end.getTime() / 1000));
+    }
+    const result = await api("/admin/chat-audit" + (events?"/events":"") + "?" + params);
+    if (pending !== revision) return;
+    if (!result.items.length) list.innerHTML = empty("没有符合条件的记录。");
+    else if (events) list.innerHTML = `<div class="table-wrap"><table><thead><tr><th>成员 / 时间</th><th>操作</th><th>对象</th><th>结果</th></tr></thead><tbody>${result.items.map(item=>`<tr><td>${esc(item.member_name||"系统")}<span class="secondary-line">${date(item.created_at)}</span></td><td>${esc(item.action)}</td><td class="code">${esc(item.target)}</td><td>${esc(item.outcome)}</td></tr>`).join("")}</tbody></table></div>`;
+    else list.innerHTML = `<div class="table-wrap"><table><thead><tr><th>成员 / 时间</th><th>聊天</th><th>模型</th><th>操作</th></tr></thead><tbody>${result.items.map(item=>`<tr><td>${esc(item.member_name)}<span class="secondary-line">${date(item.captured_at)}</span></td><td class="code">${esc(item.conversation_id)}</td><td>${esc(item.model_name)}<span class="secondary-line">${item.model_source==="personal"?"自配模型":"企业模型"}${item.omitted?" · 请求过大，仅保留信息":""}</span></td><td><button data-audit-request="${esc(item.id)}">查看请求</button></td></tr>`).join("")}</tbody></table></div>`;
+    list.querySelectorAll("[data-audit-request]").forEach(control=>control.onclick=()=>action(async () => {
+      const item = await api("/admin/chat-audit/" + control.dataset.auditRequest);
+      const body = item.omitted ? "请求内容超过大小限制，仅保留请求信息。" : JSON.stringify(item.parameters, null, 2);
+      detail("模型请求 · " + date(item.captured_at), body);
+    }));
+    const previous = button("上一页", async () => { offset = Math.max(0, offset - 50); await load(); });
+    const next = button("下一页", async () => { offset += 50; await load(); });
+    previous.disabled = offset === 0;
+    next.disabled = offset + 50 >= result.total;
+    const count = document.createElement("span");
+    count.textContent = `共 ${result.total} 条`;
+    pager.replaceChildren(previous, count, next);
+  };
+  form.onsubmit = event => { event.preventDefault(); offset = 0; action(load); };
+  await load();
+}
+
 async function settingsPage(){
   const data=await api("/admin/settings");heading("设置","管理企业认证、客户端下载与运行状态。");
   content.insertAdjacentHTML("beforeend",`<section><h2>账号认证</h2><div id="sources">${data.sources.length?data.sources.map(s=>`<div class="source-row"><div class="summary"><strong>${esc(s.name)}</strong><div class="muted">${esc(authNames[s.mode]||s.mode)} · ${s.enabled?"已启用":"草稿"} · ${s.mode==="database"?"无需测试":s.verified?"已验证":"待验证"}</div></div><button data-source="${esc(s.id)}">配置</button><button class="danger" data-delete-source="${esc(s.id)}" aria-label="删除 ${esc(s.name)}">删除</button></div>`).join(""):empty("尚未配置企业认证。添加认证来源，为员工开通登录。")}</div><div class="toolbar" id="source-actions"></div></section><section class="section"><h2>客户端分发</h2><p>上传标准包，校验后生成企业包，再发布给员工。</p><a class="button" data-route href="${base}/app/releases">管理客户端版本</a> <a href="${base}/downloads" target="_blank" rel="noopener">打开下载页</a></section><section class="section"><h2>提问自动清理</h2><p>最近成功：${date(data.cleanup.last_success_at)} · 删除 ${data.cleanup.deleted} 条</p><p class="${data.cleanup.error?"danger":"muted"}">${esc(data.cleanup.error||"后台自动清理到期正文；客户端历史不受影响。")}</p></section><details><summary>平台信息与最近操作</summary><p class="code">${esc(data.platform_id)} · ${esc(data.public_url)}</p><p class="muted">会话期限 ${Math.round(data.session_seconds/3600)} 小时；上游刷新与全局退出未启用。</p><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作</th><th>结果</th></tr></thead><tbody>${data.events.map(e=>`<tr><td>${date(e.created_at)}</td><td>${esc(e.action)}</td><td>${esc(e.outcome)}</td></tr>`).join("")}</tbody></table></div></details>`);
@@ -176,11 +252,12 @@ async function render(){
   if(me.member.role!=="admin"){heading("已连接企业平台",`你好，${me.member.name}。`);content.insertAdjacentHTML("beforeend",`<p>${me.models.length?"已分配模型："+esc(me.models.map(x=>x.name).join("、")):"尚未分配企业模型，请联系管理员。"}</p><p>请在 Cowork 客户端执行任务；本机历史不会同步到这里。</p><a class="button primary" href="${base}/downloads" data-route>下载客户端</a>`);return;}
   if(route==="/app/releases/new")return newRelease();
   if(route.startsWith("/app/releases/"))return releaseDetail(route.split("/").pop());
+  if(route==="/app/capabilities"||route.startsWith("/app/capabilities/"))return capabilityRoute(route);
   if(route.startsWith("/app/models/")){const id=route.split("/").pop(),data=await api("/admin/models");const item=data.items.find(m=>m.id===id);if(id!=="new"&&!item)throw new Error("模型不存在，请返回列表。");return editModel(item||null);}
   if(/^\/app\/sources\/[^/]+\/accounts(?:\/[^/]+)?$/.test(route)){const parts=route.split("/");return databaseAccountsPage(parts[3],parts[5]);}
   if(route.startsWith("/app/sources/")){const id=route.split("/").pop(),data=await api("/admin/settings");const item=data.sources.find(m=>m.id===id);if(id!=="new"&&!item)throw new Error("认证来源不存在，请返回设置。");return editSource(item||null);}
   if(route.startsWith("/app/members/")){const id=route.split("/").pop(),[data,models]=await Promise.all([api("/admin/members"),api("/admin/models")]);const member=data.items.find(m=>m.id===id);if(!member)throw new Error("成员不存在，请返回列表。");return editMember(member,models.items);}
   const page=route.split("/")[2]||"members";
-  await ({members,models,questions,settings:settingsPage,releases}[page]||members)();
+  await ({members,models,questions,audit:chatAuditPage,settings:settingsPage,releases}[page]||members)();
 }
 (async()=>{try{platform=await api("/platform-info");try{me=await api("/me");}catch(e){if(e.status!==401)throw e;}await render();}catch(error){message(error.message,"error");content.innerHTML=empty("页面未完成加载。请检查连接后重试。");content.append(button("重试",()=>location.reload()));}})();

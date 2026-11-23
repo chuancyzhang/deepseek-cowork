@@ -56,6 +56,7 @@ from .tool_registry import (
     ToolRegistry,
 )
 from .clarify_mode import normalize_selected_skill_names
+from .enterprise_capability_runtime import REFERENCE_SCHEME
 from .im_gateway_registry import ARTIFACT_DELIVERY_NONE, provider_artifact_delivery_mode
 
 
@@ -354,6 +355,10 @@ class SkillManager:
         for name, record in self.tool_registry.records.items():
             skill_name = str(record.skill_name or "")
             if not skill_name.startswith("mcp-") or name in refreshed.tools:
+                continue
+            prior_skill = self.skill_records.get(skill_name) or {}
+            if "enterprise_version" in prior_skill and skill_name in refreshed.skill_records:
+                # The run overlay will reject a local Skill that claims the same identity.
                 continue
             handler = self.tools.get(name)
             if not callable(handler):
@@ -974,6 +979,13 @@ class SkillManager:
                 ref_content = self._safe_read_reference(self.loaded_skill_sources.get(skill_name, ""), ref)
                 if ref_content:
                     sections.append(f"## Reference: {ref}\n{ref_content}")
+        elif spec.get("references") and spec.get("source_format") == "enterprise":
+            from urllib.parse import quote
+            references = [f"{REFERENCE_SCHEME}{skill_name}/{quote(ref.replace(os.sep, '/'))}"
+                          for ref in spec["references"] if ref.replace(os.sep, '/').startswith(("references/", "assets/"))]
+            if references:
+                sections.append("## References\nUse text_file_read for the required references.\n"
+                                + "\n".join(f"- `{ref}`" for ref in references))
         elif spec.get("references"):
             reference_root = self.loaded_skill_sources.get(skill_name, "")
             sections.append(
@@ -1530,7 +1542,7 @@ class SkillManager:
         preferred_script_name = spec.get("preferred_script_name") or self._infer_preferred_script_name(spec)
         prompt_disclosure = spec.get("prompt_disclosure") or self._infer_prompt_disclosure(spec)
         script_entries = list(spec.get("script_entries") or [])
-        return {
+        payload = {
             "name": record.get("name") or "",
             "display_name": meta.get("display_name") or meta.get("name") or record.get("name") or "",
             "description": spec.get("description") or meta.get("description") or "",
@@ -1551,6 +1563,10 @@ class SkillManager:
             "execution_hint": self._script_execution_hint(spec),
             "score": round(float(score), 3),
         }
+        status = record.get("dependency_status") or {}
+        if "enterprise_version" in record and not status.get("ok", True):
+            payload["error"] = status.get("message", "企业 MCP 当前不可用。")
+        return payload
 
     def get_skill_config_fields(self, skill_name):
         record = self._record_for_skill_name(skill_name) or {}
@@ -1912,6 +1928,8 @@ class SkillManager:
                 "Call the discovered MCP tools directly from the agent loop.",
             ],
         }
+        if server_config.get("enterprise"):
+            spec["tags"].extend(server_config.get("allowed_tools") or [])
         prompt = self._build_skill_prompt(skill_name, meta, body, spec, tool_refs, experience_entries=[], include_references=False)
         return {
             "name": skill_name,
@@ -1935,15 +1953,23 @@ class SkillManager:
         self.skill_source_kinds[skill_name] = TOOL_SOURCE_MCP
         tool_refs = []
         used_names = set(self.tools)
+        enterprise_runtime = getattr(self, "enterprise_capability_runtime", None)
+        prepare = enterprise_runtime.mcp_request(skill_name) if enterprise_runtime else None
+        server_id = server_config.get("id")
+        if prepare:
+            server_id = "enterprise_" + hashlib.sha256(server_id.encode("ascii")).hexdigest()[:16]
         for tool in tools_payload or []:
             remote_name = str(tool.get("name") or "").strip()
             if not remote_name:
                 continue
-            local_name = build_mcp_tool_name(server_config.get("id"), remote_name)
+            local_name = build_mcp_tool_name(server_id, remote_name)
+            if prepare and len(local_name) > 64:
+                local_name = local_name[:50] + "_" + hashlib.sha256(remote_name.encode("utf-8")).hexdigest()[:10]
             base_name = local_name
             suffix = 2
             while local_name in used_names:
-                local_name = f"{base_name}_{suffix}"
+                ending = f"_{suffix}"
+                local_name = (base_name[:64 - len(ending)] if prepare else base_name) + ending
                 suffix += 1
             used_names.add(local_name)
 
@@ -1957,6 +1983,7 @@ class SkillManager:
                     config_manager=self.config_manager,
                     skill_manager=self,
                     context=_context,
+                    **({"prepare": prepare} if prepare else {}),
                 )
 
             export = {
@@ -2068,10 +2095,13 @@ class SkillManager:
         if not mcp_package_available():
             record["dependency_status"] = {"ok": False, "message": "Python package 'mcp' is not installed."}
             return False
+        enterprise_runtime = getattr(self, "enterprise_capability_runtime", None)
+        prepare = enterprise_runtime.mcp_request(skill_name) if enterprise_runtime else None
         result = list_mcp_server_tools(
             server_config,
             config_manager=self.config_manager,
             skill_manager=self,
+            **({"prepare": prepare} if prepare else {}),
         )
         if not result.get("ok"):
             record["dependency_status"] = {
@@ -2089,11 +2119,25 @@ class SkillManager:
                 "message": f"Loaded {len(tool_refs)} MCP tools.",
             },
         )
+        if prepare:
+            updated["enterprise_version"] = record["enterprise_version"]
+            updated["mcp_tools_loaded"] = True
+            if not tool_refs:
+                updated["dependency_status"] = {"ok": False, "message": "企业 MCP 未返回允许使用的工具，请核对已发布的工具允许列表。"}
         self.loaded_skills_meta[skill_name] = updated["meta"]
         self.skill_prompts_full[skill_name] = updated["prompt"]
         self.skill_records[skill_name] = updated
         self.skill_to_tools[skill_name] = list(tool_refs)
         return True
+
+    def _remember_run_skill(self, record):
+        name = record["name"]
+        self.loaded_skills_meta[name] = record["meta"]
+        self.skill_source_kinds[name] = record["source_kind"]
+        self.skill_prompts_brief.append(record["brief"])
+        self.skill_prompts_full[name] = record["prompt"]
+        self.skill_records[name] = record
+        self.skill_to_tools.setdefault(name, list(record["tool_refs"]))
 
     def _ensure_mcp_tools_for_skill_results(self, skill_results):
         for item in skill_results or []:
@@ -3759,12 +3803,23 @@ class SkillManager:
         func = self.tools[resolved_name]
         sig = inspect.signature(func)
         args = dict(args or {})
+        if resolved_name == "text_file_read" and str(args.get("path") or "").startswith(REFERENCE_SCHEME):
+            runtime = getattr(self, "enterprise_capability_runtime", None)
+            if runtime is None:
+                return {"ok": False, "error": "当前任务未加载此企业 Skill。"}
+            try:
+                effective_context["workspace_dir"], args["path"] = runtime.reference(args["path"])
+            except (ValueError, RuntimeError, OSError) as exc:
+                return {"ok": False, "error": str(exc)}
         if "workspace_dir" in sig.parameters:
             args["workspace_dir"] = effective_context.get("workspace_dir") or self.workspace_dir
         if "_context" in sig.parameters:
             effective_context.setdefault("skill_change_publisher", self.change_publisher)
             args["_context"] = effective_context
         try:
+            runtime = getattr(self, "enterprise_capability_runtime", None)
+            if resolved_name == "run_skill_script" and runtime and args.get("skill_name") in runtime.skills:
+                runtime.check()
             return func(**args)
         except Exception as e:
             return f"Error executing {name}: {str(e)}"

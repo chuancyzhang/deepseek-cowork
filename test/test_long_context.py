@@ -269,6 +269,42 @@ class TestContextManager(ContextFixture):
         self.assertEqual(again[:len(projected)], projected)
         self.assertEqual(messages[-1], result)
 
+    def test_enterprise_checkpoint_and_model_history_stay_with_their_capability_scope(self):
+        from core.long_context import history_read, history_search
+
+        manager = self.make_manager()
+        self.worker._enterprise_capability_scope = "enterprise-version-a"
+        instructions = {"id": "company-skill", "role": "system", "content": "example exclusive company instruction",
+                        "meta": {"kind": "skill_context", "skill_name": "company-skill", "hidden": True,
+                                 "enterprise_prompt_scope": self.worker._enterprise_capability_scope}}
+        current = [{"role": "system", "content": "stable system"}, *self.messages, instructions,
+                   {"id": "old-evidence", "role": "assistant", "content": "old " * 30000},
+                   {"id": "recent", "role": "assistant", "content": "recent result"}]
+        scoped, changed = manager.prepare(current, current[2:], [], None)
+        self.assertTrue(changed)
+        old_window = manager.window["id"]
+        self.assertTrue(any(m.get("id") == "company-skill" for m in scoped))
+        self.assertEqual(manager._project(current), scoped)
+        tool_context = {"context_window_manager": manager}
+        self.assertEqual(history_search("exclusive", _context=tool_context)["matches"][0]["id"], "company-skill")
+        self.assertEqual(history_read("company-skill", _context=tool_context)["content"], instructions["content"])
+
+        self.worker._enterprise_capability_scope = ""
+        personal = manager._project(current)
+        self.assertEqual(personal, [message for message in current if message is not instructions])
+        self.assertEqual(history_search("exclusive", _context=tool_context), {"matches": [], "next_cursor": None})
+        with self.assertRaisesRegex(ValueError, "没有这条历史消息"):
+            history_read("company-skill", _context=tool_context)
+        self.assertEqual(self.storage.context_history_read("s", "company-skill")["content"], instructions["content"])
+
+        self.summary_requests.clear()
+        rebuilt, changed = manager.prepare(current, [], [], None)
+        self.assertTrue(changed)
+        self.assertEqual(manager.window["previous_id"], old_window)
+        self.assertNotIn("company-skill", manager.window["covered_ids"])
+        self.assertIsNone(json.loads(self.summary_requests[0][1]["content"])["previous_checkpoint"])
+        self.assertNotIn(instructions["content"], str([rebuilt, self.summary_requests]))
+
     def test_invalid_checkpoint_stops_after_three_repairs_without_commit(self):
         manager = self.make_manager()
         requests = []

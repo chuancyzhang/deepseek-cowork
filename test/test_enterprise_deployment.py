@@ -21,14 +21,14 @@ def test_platform_folder_runs_on_its_own(tmp_path):
     migrated = subprocess.run([sys.executable, "-m", "server", "migrate"], cwd=deployment, env=env,
                               capture_output=True, text=True, encoding="utf-8", timeout=20)
     assert migrated.returncode == 0, migrated.stdout + migrated.stderr
-    assert "数据库结构版本 4 已就绪" in migrated.stdout
+    assert "数据库结构版本 5 已就绪" in migrated.stdout
     assert not (deployment / ".env.local").exists()
     code = """
 from fastapi.testclient import TestClient
 from server.app import create_app
 with TestClient(create_app(), base_url='http://localhost:8789') as client:
     assert client.get('/healthz').json()['status'] == 'ok'
-    assert client.get('/healthz').json()['schema_version'] == 4
+    assert client.get('/healthz').json()['schema_version'] == 5
     assert client.get('/api/v1/platform-info').json()['platform_id'] == 'isolated-deployment'
     assert client.get('/api/v1/platform-info').json()['client_distribution']['app_layouts'] == ['electron']
     assert client.get('/api/v1/client-releases/recommended?app_layout=qt').status_code == 410
@@ -74,7 +74,7 @@ def test_offline_start_verifies_bundle_before_import_and_never_creates_credentia
     hashes = copy_source(Path(__file__).resolve().parents[1] / "web/platform", package)
     (package / "images.tar").write_bytes(b"test image archive")
     hashes["images.tar"] = sha256(package / "images.tar")
-    manifest = {"schema_version": 1, "target": "linux-amd64", "database_schema": 4, "version": "test",
+    manifest = {"schema_version": 1, "target": "linux-amd64", "database_schema": 5, "version": "test",
         "platform_image": "qa-platform", "platform_image_id": "sha256:platform",
         "database_image": "qa-database", "database_image_id": "sha256:database", "files": hashes}
     (package / "deployment.json").write_text(json.dumps(manifest), encoding="utf-8")

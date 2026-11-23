@@ -10,7 +10,7 @@ from sqlalchemy import Boolean, Float, Integer, JSON, String, Text, UniqueConstr
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 log = logging.getLogger(__name__)
 
 
@@ -225,6 +225,8 @@ class Database:
             yield session
 
     def migrate(self, settings):
+        from . import capabilities  # Register capability tables for the standalone migration command.
+        from . import chat_audit  # Register audit tables for the standalone migration command.
         from .team_space_tables import SPACE_TABLES
         # Validate ownership before DDL. Legacy releases are retained for audit,
         # but V4 removes them from distribution without touching business data.
@@ -234,7 +236,7 @@ class Database:
                 platform = connection.execute(select(Platform.__table__).where(Platform.id == 1)).mappings().first()
             if platform and platform["platform_id"] != settings.platform_id:
                 raise ValueError("数据库属于其他 platform_id；不得复用为新企业实例。")
-            if platform and platform["schema_version"] not in {1, 2, 3, SCHEMA_VERSION}:
+            if platform and platform["schema_version"] not in {1, 2, 3, 4, SCHEMA_VERSION}:
                 raise ValueError("数据库结构版本不兼容，需执行对应版本迁移。")
             Base.metadata.create_all(connection, tables=[t for t in Base.metadata.sorted_tables if t not in SPACE_TABLES])
             if platform is None:
@@ -246,15 +248,17 @@ class Database:
             # Existing releases are Qt packages; never expose them to Electron clients.
             if "app_layout" not in {column["name"] for column in inspect(connection).get_columns("client_releases")}:
                 connection.execute(text("ALTER TABLE client_releases ADD COLUMN app_layout VARCHAR(16) NOT NULL DEFAULT 'qt'"))
-            if platform and platform["schema_version"] < SCHEMA_VERSION:
+            if platform and platform["schema_version"] < 4:
                 retired = connection.execute(update(ClientRelease).where(ClientRelease.app_layout != "electron").values(
                     state="withdrawn", recommended=False, stage="retired",
                     error="旧版 Qt 客户端已停止分发，请使用 Electron 企业客户端。",
                     revision=ClientRelease.revision + 1)).rowcount
                 if retired:
                     connection.execute(update(Platform).where(Platform.id == 1).values(catalog_revision=Platform.catalog_revision + 1))
-                log.info("schema_migrated from_schema=%s to_schema=%s retired_releases=%s",
-                         platform["schema_version"], SCHEMA_VERSION, retired)
+                log.info("schema_migrated from_schema=%s to_schema=4 retired_releases=%s",
+                         platform["schema_version"], retired)
+            if platform and platform["schema_version"] < SCHEMA_VERSION:
+                log.info("schema_migrated from_schema=%s to_schema=%s", platform["schema_version"], SCHEMA_VERSION)
             connection.execute(update(Platform).where(Platform.id == 1).values(schema_version=SCHEMA_VERSION))
             if platform and (platform["name"], platform["public_url"]) != (settings.platform_name, settings.public_url):
                 connection.execute(update(Platform).where(Platform.id == 1).values(name=settings.platform_name,

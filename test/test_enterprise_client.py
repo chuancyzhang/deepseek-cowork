@@ -33,12 +33,228 @@ def ready_store(tmp_path, *, protocol="chat_completions", provider="openai"):
 
 
 def test_guest_discovery_is_local_and_does_not_create_state(tmp_path):
+    from core.enterprise_capabilities import EnterpriseCapabilities
     store = EnterpriseStore(tmp_path)
     with patch("httpx.Client", side_effect=AssertionError("guest made a network call")):
         assert store.read() == {}
         assert store.profiles() == []
         assert read_connection(tmp_path) is None
+        assert EnterpriseCapabilities(EnterpriseClient(store)).inventory()["status"] == "signed_out"
     assert list(tmp_path.iterdir()) == []
+
+
+def test_enterprise_capability_keys_and_member_bearer_stay_scoped(tmp_path):
+    from core.enterprise_capabilities import EnterpriseCapabilities, identity, selection_key
+    store = ready_store(tmp_path)
+    capability_id, expert_id = "1" * 32, "2" * 32
+    server = {"id": capability_id, "kind": "mcp", "name": "经营数据", "description": "查询数据", "version": 1,
+              "config": {"auth_type": "bearer", "url": "https://data.example/mcp"}}
+    expert = {"id": expert_id, "kind": "expert", "name": "经营分析", "description": "分析数据", "version": 2,
+              "config": {"default_model_id": "model-one", "mcp_ids": [capability_id]}}
+
+    def endpoint(request):
+        assert request.headers["Authorization"] in {"Bearer platform-session-token", "Bearer second-member-token"}
+        if request.url.path.endswith("platform-info"):
+            return httpx.Response(200, json={"platform_id": "company", "enterprise_capabilities": {"version": 1}})
+        assert request.url.path.endswith("capabilities")
+        return httpx.Response(200, json={"items": [server, expert]})
+
+    capabilities = EnterpriseCapabilities(EnterpriseClient(store, transport=httpx.MockTransport(endpoint)))
+    old_identity = identity(store.read())
+    key = selection_key("mcp", capability_id, old_identity)
+    expert_key = selection_key("expert", expert_id, old_identity)
+    before = capabilities.inventory()["items"]
+    assert not before[0]["available"] and not before[1]["available"]
+    assert before[1]["default_model_id"] == "enterprise:company:model-one"
+    capabilities.set_credential(key, "member-only-credential")
+    assert b"member-only-credential" not in store.path.read_bytes()
+    after = capabilities.inventory()["items"]
+    assert after[0]["available"] and after[1]["available"]
+    assert "member-only-credential" not in str(after)
+    manifest, selected_expert, dependencies = capabilities.selection([], expert_key)
+    assert dependencies == [key] and selected_expert["id"] == expert_id
+    assert manifest["items"] == [{"id": capability_id, "kind": "mcp", "version": 1},
+                                 {"id": expert_id, "kind": "expert", "version": 2}]
+    assert capabilities.credential(old_identity, server) == "member-only-credential"
+    server["config"]["url"] = "https://another.example/mcp"
+    assert not capabilities.inventory()["items"][0]["credential_configured"]
+    state = store.read()
+    state.update(member={"id": "other-member"}, generation="other-generation")
+    store.write(state, "second-member-token")
+    with pytest.raises(EnterpriseError, match="身份"):
+        capabilities.credential(old_identity, server)
+    with pytest.raises(EnterpriseError, match="不可用"):
+        capabilities.selection([key], None)
+
+
+def test_desktop_submission_uses_pinned_enterprise_expert_and_dependencies(tmp_path):
+    from types import SimpleNamespace
+
+    from core.conversation_agents import agent_role_context
+    from core.desktop_submission import run_context
+    from core.enterprise_capabilities import EnterpriseCapabilities, identity, selection_key
+
+    store = ready_store(tmp_path)
+    binding = identity(store.read())
+    skill_id, mcp_id, expert_id = "a" * 32, "b" * 32, "c" * 32
+    releases = [
+        {"id": skill_id, "kind": "skill", "name": "经营口径", "description": "各项经营指标的口径", "version": 3,
+         "config": {"instructions": "计算经营利润"}},
+        {"id": mcp_id, "kind": "mcp", "name": "经营数据", "description": "连接经营数据库", "version": 5,
+         "config": {"auth_type": "none", "url": "https://data.example/mcp"}},
+        {"id": expert_id, "kind": "expert", "name": "经营分析", "description": "分析经营数据", "version": 2,
+         "config": {"instructions": "核实企业数据后出报告", "skill_ids": [skill_id], "mcp_ids": [mcp_id]}},
+    ]
+    expected_items = [{k: item[k] for k in ("id", "kind", "version")} for item in releases]
+    personal_expert = {"id": "personal-expert", "name": "本地专家", "system_prompt": "普通工作指引"}
+    config = SimpleNamespace(data_dir=tmp_path, get={}.get, get_agent_profiles=lambda: [personal_expert])
+    storage = SimpleNamespace(get_conversation_meta=lambda _: {}, get_team_space_binding=lambda _: None)
+    service = SimpleNamespace(config=config, storage=storage, workspace=lambda _: tmp_path)
+    profile = {"id": "personal-model"}
+    personal_preferences = {"conversation_agent": {"id": personal_expert["id"], "name": personal_expert["name"]}}
+    expert_key = selection_key("expert", expert_id, binding)
+    expert_preferences = {"conversation_agent": {"id": expert_key, "name": "经营分析"}}
+    skill_key = selection_key("skill", skill_id, binding)
+    mcp_key = selection_key("mcp", mcp_id, binding)
+    revoked = False
+    requests = []
+
+    def center(client, connection, method, path, *, token, payload=None):
+        assert connection == CONNECTION and token == "platform-session-token"
+        requests.append((method, path, payload))
+        if path == "/api/v1/capabilities":
+            return {"items": list(reversed(releases))}
+        assert path == "/api/v1/capabilities/check"
+        assert payload["items"] == expected_items
+        if revoked:
+            return {"allowed": False}
+        return {"allowed": True, "items": list(reversed(releases))} if payload["include_config"] else {"allowed": True}
+
+    with patch("core.enterprise_client.EnterpriseStore", return_value=store), \
+            patch.object(EnterpriseClient, "request", center), \
+            patch("core.knowledge_sources.MultiSourceKnowledgeService.snapshot", return_value=None):
+        personal = run_context(service, "chat", {"message_id": "m-1", "preferences": personal_preferences}, profile)
+        role = agent_role_context(personal_preferences["conversation_agent"], personal_expert)
+        assert personal["agent_system_prompt"] == role["agent_system_prompt"]
+        assert "enterprise_capabilities" not in personal and requests == []
+
+        context = run_context(service, "chat", {"message_id": "m-2", "preferences": expert_preferences,
+                                               "skills": ["local-skill", skill_key]}, profile)
+        assert context["agent_system_prompt"].endswith(releases[2]["config"]["instructions"])
+        assert context["selected_model_id"] == profile["id"]
+        assert context["selected_skill_names"] == ["local-skill", skill_key, mcp_key]
+        assert context["enterprise_capabilities"] == {"binding": {**binding, "data_dir": str(tmp_path)},
+                                                      "items": expected_items}
+
+        pin = context["enterprise_capabilities"]
+        capability_client = EnterpriseCapabilities(EnterpriseClient(store))
+        resolved = capability_client.check(pin["binding"], pin["items"], include_config=True)
+        assert {item["version"] for item in resolved} == {2, 3, 5}
+        revoked = True
+        with pytest.raises(EnterpriseError, match="撤销授权"):
+            capability_client.check(pin["binding"], pin["items"])
+
+        state = store.read()
+        store.write({**state, "generation": "generation-two"}, "another-session-token")
+        count = len(requests)
+        with pytest.raises(EnterpriseError, match="身份已改变"):
+            capability_client.check(pin["binding"], pin["items"])
+        assert len(requests) == count
+
+
+def test_enterprise_prompt_scope_reuses_only_same_member_and_version_set(tmp_path):
+    from core.enterprise_capabilities import identity, prompt_scope, scope_prompt_messages
+
+    manifest = {"binding": {**identity(ready_store(tmp_path).read()), "data_dir": str(tmp_path)}, "items": [
+        {"id": "1" * 32, "kind": "skill", "version": 1}, {"id": "2" * 32, "kind": "mcp", "version": 1},
+    ]}
+    original = prompt_scope(manifest)
+    relogin = {"binding": {**manifest["binding"], "generation": "fresh"}, "items": list(reversed(manifest["items"]))}
+    assert prompt_scope(relogin) == original
+    assert prompt_scope({**manifest, "binding": {**manifest["binding"], "member_id": "other"}}) != original
+    updated = {**manifest, "items": [{**manifest["items"][0], "version": 2}, manifest["items"][1]]}
+    assert prompt_scope(updated) != original
+    assert prompt_scope(None) == ""
+    for invalid in ({}, {**manifest, "items": []}, {**manifest, "items": [*manifest["items"], manifest["items"][0]]}):
+        with pytest.raises(EnterpriseError, match="运行信息"):
+            prompt_scope(invalid)
+
+    chat = {"role": "user", "content": "业务问题", "meta": {"enterprise_context_identity": manifest["binding"]}}
+    instructions = {"role": "system", "content": "企业指引", "meta": {"enterprise_prompt_scope": original, "hidden": True}}
+    messages = [chat, instructions]
+    assert scope_prompt_messages(messages, original) == messages
+    assert scope_prompt_messages(messages, prompt_scope(updated)) == [chat]
+    assert scope_prompt_messages(messages, "") == [chat]
+
+
+def test_chat_audit_queue_preserves_actual_latest_and_never_uses_next_identity(tmp_path):
+    from types import SimpleNamespace
+
+    from core import enterprise_chat_audit as audit
+
+    store = ready_store(tmp_path)
+    state = store.read(secret=True)
+    store.write({**state, "chat_audit_version": 1}, state["access_token"])
+    provider = SimpleNamespace(enterprise_audit_binding=store.profiles()[0]["enterprise"])
+    worker = SimpleNamespace(is_subagent=False, conversation_id="chat-a", request_id="run-1", run_context={},
+                             api_key="FAKE_MODEL_KEY")
+    outgoing = {"model": "test-model", "messages": [{"content": "first"}, {"type": "input_file", "file_data": "a-file"}],
+                "text": "password=secret-value FAKE_MODEL_KEY and platform-session-token"}
+    uploaded = []
+
+    def send(state, method, path, payload):
+        assert state["member"]["id"] == "member-one"
+        uploaded.append((method, path, payload))
+        return httpx.Response(200)
+
+    with patch.object(audit, "EnterpriseStore", return_value=store):
+        capture = audit.ChatAuditCapture(worker, provider, None)
+    assert capture.enterprise_negotiated
+    capture.capture("chat_completions", outgoing, "request-a")
+    newer = {**outgoing, "messages": [{"content": "newer"}]}
+    capture.capture("chat_completions", newer, "request-b")
+    with patch.object(audit, "request", side_effect=send):
+        assert audit._drain_once(store) == 0
+        assert audit._drain_once(store) is None
+    assert len(uploaded) == 1
+    method, url, payload = uploaded[0]
+    assert (method, url, payload["request_id"]) == ("PUT", "/chat-audit/latest", "request-b")
+    assert payload["parameters"]["messages"] == newer["messages"]
+    for secret in ("secret-value", "FAKE_MODEL_KEY", "platform-session-token"):
+        assert secret not in json.dumps(payload, ensure_ascii=False)
+    assert "a-file" in json.dumps(outgoing)
+    capture.capture("chat_completions", newer, "request-c")
+
+    store.write({**state, "generation": "generation-two", "member": {"id": "member-two"}}, "new-member-token")
+    capture.capture("chat_completions", newer, "request-d")
+    with patch.object(audit, "request", side_effect=AssertionError("old data must not use the new user's token")):
+        assert audit._drain_once(store) is None
+    with store.db() as db:
+        assert db.execute("SELECT request_id FROM chat_audit_pending").fetchall() == []
+
+
+def test_chat_audit_skips_foreign_tagged_history_without_reverting_to_legacy(tmp_path):
+    from types import SimpleNamespace
+
+    from core import enterprise_chat_audit as audit
+
+    store = ready_store(tmp_path)
+    state = store.read(secret=True)
+    store.write({**state, "chat_audit_version": 1}, state["access_token"])
+    provider = SimpleNamespace(enterprise_audit_binding=store.profiles()[0]["enterprise"])
+    observed = []
+    marker = {"platform_id": "company", "member_id": "another-member", "generation": "old-generation"}
+    message = {"role": "user", "content": "历史", "meta": {"enterprise_context_identity": marker}}
+    worker = SimpleNamespace(is_subagent=False, conversation_id="chat-a", request_id="run-1", run_context={},
+                             messages=[message], observability_signal=SimpleNamespace(emit=observed.append),
+                             step_signal=SimpleNamespace(emit=lambda _: None))
+    with patch.object(audit, "EnterpriseStore", return_value=store):
+        capture = audit.ChatAuditCapture(worker, provider, None)
+    assert capture.enterprise_negotiated
+    assert capture.store is None
+    assert observed[0]["reason"] == "foreign_enterprise_history"
+    assert not audit.contains_foreign_history([{**message, "meta": {"enterprise_submission": {"identity": {
+        **marker, "member_id": "member-one"}}}}], ("company", "member-one", "new-generation"))
 
 
 def test_connection_schema_and_update_channel(tmp_path):

@@ -134,10 +134,10 @@ def _exception_status_code(error):
 def is_transient_model_api_error(error):
     """Return whether an API transport/upstream failure is safe to retry."""
 
+    from core.enterprise_client import EnterpriseError
     from core.team_space_storage import TeamSpaceError
-    if isinstance(error, TeamSpaceError):
-        # Center outage/revocation is an explicit pause, even when caused by a
-        # network exception. Reconnection never resumes a space task by itself.
+    if isinstance(error, (TeamSpaceError, EnterpriseError)):
+        # Account changes and loss of authorization require the user to resume.
         return False
 
     status_code = _exception_status_code(error)
@@ -156,6 +156,14 @@ def is_transient_model_api_error(error):
         return True
     cause = getattr(error, "__cause__", None) or getattr(error, "__context__", None)
     return bool(cause is not None and cause is not error and is_transient_model_api_error(cause))
+
+
+def _guard_provider_request(provider):
+    from core.team_spaces import guard_space_request
+    guard_space_request(provider)
+    guard = getattr(provider, "enterprise_capability_guard", None)
+    if guard is not None:
+        guard()
 
 
 def _retry_after_seconds(error):
@@ -671,9 +679,8 @@ class OpenAIProvider(LLMProvider):
                 else "max_tokens"
             )
             params[output_parameter] = int(request_context["max_output_tokens"])
+        _guard_provider_request(self)
         capture_provider_request(params, "chat_completions", request_context)
-        from core.team_spaces import guard_space_request
-        guard_space_request(self)
         stream = self._create_chat_completion_stream(params)
         if not _register_provider_stream(request_context, stream):
             return
@@ -892,9 +899,8 @@ class OpenAIProvider(LLMProvider):
         params = project_provider_request(self, params, "responses", request_context)
         if request_context.get("max_output_tokens"):
             params["max_output_tokens"] = int(request_context["max_output_tokens"])
+        _guard_provider_request(self)
         capture_provider_request(params, "responses", request_context)
-        from core.team_spaces import guard_space_request
-        guard_space_request(self)
         stream = self.client.responses.create(**params)
         if not _register_provider_stream(request_context, stream):
             return
@@ -1655,9 +1661,8 @@ class AnthropicProvider(LLMProvider):
         kwargs = project_provider_request(self, kwargs, "anthropic", request_context)
         if (request_context or {}).get("max_output_tokens"):
             kwargs["max_tokens"] = int(request_context["max_output_tokens"])
+        _guard_provider_request(self)
         capture_provider_request(kwargs, "anthropic", request_context)
-        from core.team_spaces import guard_space_request
-        guard_space_request(self)
         with self.client.messages.stream(**kwargs) as stream:
             if not _register_provider_stream(request_context, stream):
                 return

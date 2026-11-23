@@ -79,6 +79,13 @@ class EnterpriseStore:
                 raise EnterpriseError("企业连接已改变，请重新操作。")
             db.execute("INSERT OR REPLACE INTO connection VALUES(1,?,?)",
                        (json.dumps(value, ensure_ascii=False), encrypted))
+            if row and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat_audit_pending'").fetchone():
+                identity = ((value.get("connection") or {}).get("platform_id"), (value.get("member") or {}).get("id"),
+                            value.get("generation"))
+                if not token or not all(identity):
+                    db.execute("DELETE FROM chat_audit_pending")
+                else:
+                    db.execute("DELETE FROM chat_audit_pending WHERE (platform_id,member_id,generation) != (?,?,?)", identity)
 
     def connection(self):
         return self.read().get("connection") or read_connection()
@@ -203,7 +210,8 @@ class EnterpriseClient:
         me = self.request(connection, "GET", "/api/v1/me", token=token)
         if me.get("platform_id") != connection["platform_id"]:
             raise EnterpriseError("企业身份校验失败。")
-        state.update(member=me["member"], models=me["models"], expires_at=result["expires_at"], generation=uuid.uuid4().hex)
+        state.update(member=me["member"], models=me["models"], expires_at=result["expires_at"], generation=uuid.uuid4().hex,
+                     chat_audit_version=me.get("chat_audit_version", 0))
         try:
             self.store.write(state, token, expected_generation=generation)
         except Exception:
@@ -216,7 +224,7 @@ class EnterpriseClient:
         state = self.store.read(secret=True)
         token = state.get("access_token", "")
         me = self.request(state["connection"], "GET", "/api/v1/me", token=token)
-        state.update(member=me["member"], models=me["models"])
+        state.update(member=me["member"], models=me["models"], chat_audit_version=me.get("chat_audit_version", 0))
         self.store.write(state, token, expected_generation=state["generation"])
         return state
 

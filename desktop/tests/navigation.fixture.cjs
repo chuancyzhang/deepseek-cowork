@@ -19,12 +19,29 @@ app.commandLine.appendSwitch('disable-gpu');
 const {Backend}=require('../electron/backend.cjs'),originalCall=Backend.prototype.call;
 let window,backend,slowSearch,fastSearch,searchFailure=false,taskReadRelease,stopFailure=false,browserHost;
 let preparingSearch=false, retryRequested=false;
+let enterpriseSignedIn=false, enterpriseCredential=false, deferEnterpriseCatalog=false, staleEnterpriseCatalog;
+const businessCapabilities=[
+  {id:'analysis',kind:'skill',name:'经营数据分析规范',description:'按销售、成本与利润三项指标完成经营分析。',version:2,selection_key:'enterprise.demo.analysis'},
+  {id:'sales',kind:'mcp',name:'经营数据服务',description:'读取销售、成本和费用明细。',version:1,selection_key:'mcp-server-enterprise_demo_sales',requires_credential:true,endpoint_host:'data.example.test'},
+  {id:'analyst',kind:'expert',name:'经营分析专家',description:'整理核心指标，编写经营分析报告。',version:3,selection_key:'enterprise.demo.analyst'},
+];
 const preparedTerms=[];
 const errors=[],runs=new Map(),stops=[],snapshots=new Map();
 const {BrowserHost}=require('../electron/browser.cjs'),originalShow=BrowserHost.prototype.show;
 BrowserHost.prototype.show=function(params){browserHost=this;return originalShow.call(this,params);};
 Backend.prototype.call=async function(method,p={}){
   backend=this;
+  if(method==='enterprise.capabilities') {
+    const catalog={status:enterpriseSignedIn?'ready':'signed_out',platform_name:'示例企业',items:enterpriseSignedIn?businessCapabilities.map(item=>({...item,
+      available:!item.requires_credential||enterpriseCredential,credential_configured:enterpriseCredential})):[]};
+    if(deferEnterpriseCatalog){deferEnterpriseCatalog=false;return new Promise(resolve=>{staleEnterpriseCatalog=()=>resolve(catalog);});}
+    return catalog;
+  }
+  if(method==='enterprise.capabilityCredential') {
+    assert.equal(p.selection_key,'mcp-server-enterprise_demo_sales');
+    assert.ok(p.value === 'test-credential' || p.value === '');
+    enterpriseCredential=Boolean(p.value);return {saved:true};
+  }
   if(method==='conversation.search'){
     if(p.defer_index&&preparingSearch){preparedTerms.push(p.query);return {status:'preparing'};}
     if(p.query==='旧查询')return new Promise(resolve=>slowSearch=resolve);
@@ -371,6 +388,71 @@ async function checkUsagePersistence(report) {
   assert.equal(await read('!!document.querySelector(".usage-popover")'),false);
 }
 
+async function checkEnterpriseCapabilities() {
+  command('new-chat');
+  await until('document.activeElement===document.querySelector("[aria-label=消息输入]")');
+  await fill('[aria-label="消息输入"]','保留经营分析草稿');
+  const openCapabilities=async()=>{
+    await clickText('.sidebar-destinations button','能力');
+    await until('!!document.querySelector(".capabilities-layout [role=tablist]")');
+  };
+  const scope=key=>clickText('[role=tablist] [role=tab]',key);
+  const tab=async value=>{
+    await clickText('.capabilities-layout .management-nav button',value);
+    await until('document.querySelector(".capabilities-layout .management-nav [aria-current=page]")?.textContent.trim()==='+JSON.stringify(value)+'&&!!document.querySelector("[role=tablist]")');
+  };
+  await openCapabilities();
+  await until('document.querySelector("[role=tab][aria-selected=true]")?.textContent==="个人"');
+  await scope('企业');
+  await until('document.querySelector("[role=tabpanel]")?.textContent.includes("登录后使用企业能力")');
+  enterpriseSignedIn=true;
+  window.webContents.send('cowork:events',[{event:'enterprise_changed'}]);
+  await until('document.querySelector("[role=tabpanel]")?.textContent.includes("经营数据分析规范")');
+  assert.match(await read('document.querySelector("[role=tabpanel]").textContent'),/示例企业 · 版本 2 · 可用/);
+  await snap('enterprise-capability-skill-dark-scaled');
+  await tab('MCP 服务');
+  await scope('企业');
+  await until('document.querySelector("[role=tabpanel]")?.textContent.includes("配置凭据")');
+  assert.equal(await read('document.querySelector("[aria-label=\\"在聊天中使用 经营数据服务\\"]").disabled'),true);
+  await clickText('.enterprise-mcp-credential button','配置凭据');
+  await fill('.enterprise-mcp-credential input','test-credential');
+  await clickText('.enterprise-mcp-credential button','保存凭据');
+  await until('document.querySelector("[aria-label=\\"在聊天中使用 经营数据服务\\"]")?.disabled===false');
+  assert.equal(await read('document.querySelector("[role=tabpanel]").textContent.includes("test-credential")'),false);
+  await tab('专家');
+  await scope('企业');
+  await until('document.querySelector("[role=tabpanel]")?.textContent.includes("经营分析专家")');
+  window.setSize(1280,800);window.webContents.setZoomFactor(1);
+  await rpc('settings.theme',{theme:'light'});await until('document.documentElement.dataset.theme==="light"');
+  await snap('enterprise-capability-expert');
+  await read('document.querySelector("[aria-label=\\"在聊天中使用 经营分析专家\\"]").click()');
+  await until('document.querySelector(".composer-toolbar")?.textContent.includes("经营分析专家")');
+  assert.equal(await read('document.querySelector("[aria-label=消息输入]").value'),'保留经营分析草稿');
+  await read('document.querySelector("[aria-label=添加上下文]").click()');
+  await clickText('.composer-menu-nav button','技能');
+  await until('document.querySelector(".composer-submenu")?.textContent.includes("经营数据分析规范")');
+  await read('[...document.querySelectorAll(".composer-menu .picker-row")].find(item=>item.textContent.includes("经营数据分析规范")).click()');
+  await until('document.querySelector(".composer-contexts")?.textContent.includes("企业技能 经营数据分析规范")');
+  const chat=await rpc('conversation.get',{conversation_id:(await rpc('app.bootstrap')).last_conversation});
+  assert.equal(chat.meta.conversation_agent.id,'enterprise.demo.analyst');
+  assert.ok(chat.meta.selected_skill_names.includes('enterprise.demo.analysis'));
+  await openCapabilities();
+  await tab('技能');
+  await scope('企业');
+  await until('document.querySelector("[role=tabpanel]")?.textContent.includes("经营数据分析规范")');
+  deferEnterpriseCatalog=true;
+  await clickText('[role=tabpanel] button','刷新');
+  await wait(()=>staleEnterpriseCatalog);
+  enterpriseSignedIn=false;
+  window.webContents.send('cowork:events',[{event:'enterprise_changed'}]);
+  await until('document.querySelector("[role=tabpanel]")?.textContent.includes("登录后使用企业能力")');
+  staleEnterpriseCatalog();
+  await delay(100);
+  assert.equal(await read('document.querySelector("[role=tabpanel]").textContent.includes("经营数据分析规范")'),false);
+  await scope('个人');
+  await until('document.querySelector("[role=tabpanel]")?.textContent.includes("BrowserSkill")');
+}
+
 async function checkSidebar() {
   await until('document.querySelectorAll(".brand .navigation-tools button").length===2');
   command('sidebar');await until('document.querySelectorAll(".app-navigation .navigation-tools button").length===2');
@@ -651,6 +733,7 @@ async function run(){
   await read('document.querySelector(".settings-section input[type=checkbox]").click()');
   await until('!document.querySelector(".settings-section input[type=checkbox]").checked&&!document.querySelector(".settings-section input[type=checkbox]").disabled');
   await checkUsagePersistence(report);
+  await checkEnterpriseCapabilities();
   assert.deepEqual(errors,[]);
   console.log('NAVIGATION_OK '+JSON.stringify({native:Boolean(process.env.COWORK_NAVIGATION_NATIVE),scale:screen.getPrimaryDisplay().scaleFactor,zoom:window.webContents.getZoomFactor(),size:window.getSize()}));
 }

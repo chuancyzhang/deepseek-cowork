@@ -245,14 +245,16 @@ def history_search(query, cursor=0, limit=10, _context=None):
     manager = (_context or {}).get("context_window_manager")
     if manager is None or (_context or {}).get("is_subagent"):
         return {"status": "denied", "error": "当前任务未启用超长上下文。"}
-    return manager.storage.context_history_search(manager.session_id, query, cursor, limit)
+    return manager.storage.context_history_search(manager.session_id, query, cursor, limit,
+                                                  enterprise_prompt_scope=manager.enterprise_prompt_scope)
 
 
 def history_read(message_id, offset=0, length=6000, _context=None):
     manager = (_context or {}).get("context_window_manager")
     if manager is None or (_context or {}).get("is_subagent"):
         return {"status": "denied", "error": "当前任务未启用超长上下文。"}
-    return manager.storage.context_history_read(manager.session_id, message_id, offset, length)
+    return manager.storage.context_history_read(manager.session_id, message_id, offset, length,
+                                                enterprise_prompt_scope=manager.enterprise_prompt_scope)
 
 
 def register_history_tools(skill_manager):

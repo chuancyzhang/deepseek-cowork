@@ -34,6 +34,8 @@ class EnterpriseTransport(httpx.BaseTransport):
         body["_cowork"] = {"client_id": state["client_id"], "run_id": context.get("run_id") or uuid.uuid4().hex,
                            "model_revision": self.binding.get("model_revision", 1),
                            "questions": questions}
+        if context.get("chat_audit_version") == 1:
+            body["_cowork"].update(chat_audit_version=1, questions=[])
         if "team_space" in context:
             body["_cowork"]["team_space"] = context["team_space"]
         # The SDK still sees the original vendor endpoint for protocol/cache behavior.
@@ -55,6 +57,7 @@ class EnterpriseTransport(httpx.BaseTransport):
 def bind_provider(provider, profile):
     transport = EnterpriseTransport(profile)
     binding = profile["enterprise"]
+    provider.enterprise_audit_binding = dict(binding)
     provider.enterprise_replay_scope = json.dumps([binding["platform_id"], binding["member_id"], binding["model_id"], binding.get("model_revision", 1)], separators=(",", ":"))
     original_client = provider.client
     provider.client = original_client.with_options(http_client=httpx.Client(

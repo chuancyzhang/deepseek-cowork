@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from web.platform.server.app import create_app
 from web.platform.server.config import Settings
-from web.platform.server.database import Member, Model, ModelGrant, Platform, Question
+from web.platform.server.database import SCHEMA_VERSION, Member, Model, ModelGrant, Platform, Question
 from web.platform.server.team_space_tables import SpaceActivity, SpaceInvite, SpaceSnapshot, SpaceUpload
 
 
@@ -288,12 +288,13 @@ class TeamSpaceTests(unittest.TestCase):
 
     def test_migration_and_capability_advertisement(self):
         with self.db.transaction() as db:
-            self.assertEqual(db.get(Platform, 1).schema_version, 3)
+            self.assertEqual(db.get(Platform, 1).schema_version, SCHEMA_VERSION)
             db.get(Platform, 1).schema_version = 1
         self.db.migrate(self.settings)
         self.assertEqual(self.get()["name"], "方案")
         self.assertEqual(self.client.get("/api/v1/platform-info").json()["team_spaces"]["version"], 1)
         with self.db.transaction() as db:
+            self.assertEqual(db.get(Platform, 1).schema_version, SCHEMA_VERSION)
             db.get(Platform, 1).schema_version = 99
         with self.assertRaisesRegex(ValueError, "结构版本"):
             self.db.migrate(self.settings)

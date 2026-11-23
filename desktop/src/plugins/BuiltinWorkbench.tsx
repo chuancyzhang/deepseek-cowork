@@ -21,6 +21,8 @@ import Composer from '../Composer';
 import HomeComposerFooter from '../HomeComposerFooter';
 import { themeStyle } from '../theme';
 import ThemePreview from '../ThemePreview';
+import {enterpriseExpertModel, type EnterpriseCapability} from '../enterpriseCapabilities';
+import {conversationAt} from '../host/conversations';
 const Library = lazy(() => import('../management/Library'));
 const Management = lazy(() => import('../Management'));
 const ChatMediaTasks = lazy(() => import('./multimedia/ChatTasks'));
@@ -141,6 +143,22 @@ export default function BuiltinWorkbench() {
     (message.meta?.turn_id || message.meta?.ui_turn_id) === current?.run?.id)) : undefined;
   const layout = useRef<HTMLDivElement>(null);
   const [, setSettingsTab] = useHostField('management:tab:settings', 'appearance');
+  async function useEnterpriseCapability(item: EnterpriseCapability) {
+    const cid = await ensureConversation();
+    if (selectedId.current !== cid) return;
+    const chat = conversationAt(host, cid);
+    if (item.kind === 'expert') {
+      const model = enterpriseExpertModel(item, chat, settings);
+      await preferences({conversation_agent: {id: item.selection_key, name: item.name}, ...(model ? {selected_model_id: model} : {})}, cid);
+    } else {
+      const skills = chat?.meta.selected_skill_names ?? chat?.view?.selectedSkills ?? [];
+      await preferences({selected_skill_names: [...new Set([...skills, item.selection_key])]}, cid);
+    }
+    if (selectedId.current === cid) {
+      await goRoute('chat');
+      requestAnimationFrame(() => {if (selectedId.current === cid) composer.current?.focus();});
+    }
+  }
   function finishInteraction(conversationId: string, requestId: string) {
     host.set<{request_id: string} | null>(host.sessionKey('interaction', conversationId),
       pending => pending?.request_id === requestId ? null : pending);
@@ -331,7 +349,7 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
         </>}/></PluginSlot>}
 
       </div> : <Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在载入…</div>}><Management returnToChat={()=>void goRoute('chat')} key={route} route={route} settings={settings} updateSettings={setSettings} openConversation={id => void switchConversation(id)} onError={error} confirm={confirm} registerLeave={registerLeave}
-        onReference={addLibraryReference}/></Suspense>}
+        onReference={addLibraryReference} useEnterpriseCapability={useEnterpriseCapability} openEnterpriseAccount={() => {setSettingsTab('enterprise'); void goRoute('settings');}}/></Suspense>}
       </PluginSlot>
     </main>
 

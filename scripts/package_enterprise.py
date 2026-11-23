@@ -79,14 +79,15 @@ actual={name:hashlib.sha256(pathlib.Path('/app',name).read_bytes()).hexdigest() 
 assert actual==expected, '镜像源码与打包快照不一致'
 from server.database import SCHEMA_VERSION
 from server.releases import DESKTOP_REQUIRED_FILES
-assert SCHEMA_VERSION==4 and 'desktop-release.json' in DESKTOP_REQUIRED_FILES
-print('ENTERPRISE_IMAGE_AUDIT_OK')
+assert 'desktop-release.json' in DESKTOP_REQUIRED_FILES
+print(f'ENTERPRISE_IMAGE_AUDIT_OK:{SCHEMA_VERSION}')
 """
     output = docker("run", "--rm", "--network", "none", tag, "python", "-c", code,
                     json.dumps(inputs), capture=True)
-    if output != "ENTERPRISE_IMAGE_AUDIT_OK":
+    marker, _, schema = output.partition(":")
+    if marker != "ENTERPRISE_IMAGE_AUDIT_OK" or not schema.isdecimal():
         raise ValueError("企业镜像校验未完成。")
-    return value["Id"]
+    return value["Id"], int(schema)
 
 
 def validate_destination(destination):
@@ -127,7 +128,7 @@ def package(destination, archive):
         docker("build", "--platform", "linux/amd64", "--tag", tag,
                "--build-arg", f"COWORK_BUILD_VERSION={APP_VERSION}",
                "--build-arg", f"COWORK_BUILD_SOURCE={digest}", str(bundle))
-        image_id = audit_image(tag, hashes, digest)
+        image_id, database_schema = audit_image(tag, hashes, digest)
         # An existing database image is deliberately reused; packaging never upgrades PostgreSQL.
         database = inspect_image("postgres:17")
         database_tag = "cowork-postgres:17-" + database["Id"].split(":")[1][:12]
@@ -161,7 +162,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\\start-local.ps1
         hashes["DEPLOYMENT.md"] = sha256(bundle / "DEPLOYMENT.md")
         hashes["images.tar"] = sha256(bundle / "images.tar")
         manifest = {"schema_version": 1, "version": APP_VERSION, "source_sha256": digest,
-                    "target": "linux-amd64", "database_schema": 4,
+                    "target": "linux-amd64", "database_schema": database_schema,
                     "platform_image": tag, "platform_image_id": image_id,
                     "database_image": database_tag, "database_image_id": database["Id"], "files": hashes}
         (bundle / "deployment.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

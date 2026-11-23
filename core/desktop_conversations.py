@@ -605,6 +605,12 @@ class ConversationRuntime:
             if payload["rewrite"]:
                 self.conversations.idle(cid)
             payload["runtime_context"] = run_context(self, cid, payload, profile)
+            context = payload["runtime_context"]
+            origin = ((context.get("enterprise_capabilities") or {}).get("binding") or profile.get("enterprise")
+                      or context.get("team_space"))
+            if origin:
+                message_meta["enterprise_context_identity"] = {
+                    key: origin[key] for key in ("platform_id", "member_id", "generation") if key in origin}
             # Display-only snapshot; provider projection ignores message metadata.
             message_meta["ui_context"] = {
                 "skills": list(payload["runtime_context"].get("selected_skill_names") or []),
@@ -641,6 +647,13 @@ class ConversationRuntime:
             if not run or run["conversation_id"] != cid:
                 raise ValueError("任务不属于当前对话。补充内容已保留。")
             accepted = json.loads(run["payload"])
+            origin = (accepted.get("message_meta") or {}).get("enterprise_context_identity")
+            if origin:
+                from core.enterprise_capabilities import identity
+                from core.enterprise_client import EnterpriseStore
+                current = identity(EnterpriseStore(self.config.data_dir).read())
+                if any(current.get(key) != value for key, value in origin.items()):
+                    raise ValueError("本轮企业账号已改变。补充内容已保留，请在原账号下重新发起任务。")
             profile = self.config.get_model_profile(accepted["model_id"])
             if not profile or profile["id"] != accepted["model_id"]:
                 raise ValueError("本轮模型配置已不可用，请停止后重新选择模型。补充内容已保留。")
@@ -658,6 +671,9 @@ class ConversationRuntime:
             question = submission(profile, text)
             if question:
                 message["meta"]["enterprise_submission"] = question
+            message["meta"].pop("enterprise_context_identity", None)
+            if origin:
+                message["meta"]["enterprise_context_identity"] = origin
             return self.request_agent({"action": "steer_message", "session_id": cid, "expected_turn_id": p["run_id"], "message": message})
         if method == "interaction.respond":
             # The shared interaction service also checks the request identity.

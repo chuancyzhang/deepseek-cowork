@@ -6,6 +6,7 @@ import sqlite3
 import time
 
 from .conversation_integrity import canonical_ledger_message
+from .enterprise_capabilities import scope_prompt_messages
 
 
 def message_fingerprint(message):
@@ -173,7 +174,7 @@ class ContextStorage:
         if invalid and last_valid:
             conn.execute("UPDATE context_windows SET status = 'active' WHERE id = ?", (last_valid,))
 
-    def context_history_search(self, conversation_id, query, cursor=0, limit=10):
+    def context_history_search(self, conversation_id, query, cursor=0, limit=10, *, enterprise_prompt_scope=None):
         query = str(query or "").strip()
         if not query or len(query) > 200:
             raise ValueError("请输入 1–200 个字符的检索内容。")
@@ -187,10 +188,15 @@ class ContextStorage:
                 rows = conn.execute("""
                     SELECT id, role, position, created_at, substr(content, 1, 600) AS excerpt
                     FROM messages WHERE conversation_id = ? AND position >= ?
+                    AND (? IS NULL OR CASE WHEN json_valid(meta) THEN
+                        json_type(meta, '$.enterprise_prompt_scope') IS NULL OR
+                        (? <> '' AND json_extract(meta, '$.enterprise_prompt_scope') = ?)
+                        ELSE 1 END)
                     AND (instr(lower(content), lower(?)) > 0 OR rowid IN
                          (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?))
                     ORDER BY position LIMIT ?
-                """, (conversation_id, cursor, query, phrase, limit + 1)).fetchall()
+                """, (conversation_id, cursor, enterprise_prompt_scope, enterprise_prompt_scope,
+                      enterprise_prompt_scope, query, phrase, limit + 1)).fetchall()
             except sqlite3.OperationalError as exc:
                 if "interrupt" in str(exc).lower():
                     raise ValueError("历史检索超过 2 秒，请使用更具体的关键词。") from exc
@@ -198,14 +204,15 @@ class ContextStorage:
         return {"matches": [dict(row) for row in rows[:limit]],
                 "next_cursor": rows[limit]["position"] if len(rows) > limit else None}
 
-    def context_history_read(self, conversation_id, message_id, offset=0, length=6000):
+    def context_history_read(self, conversation_id, message_id, offset=0, length=6000, *, enterprise_prompt_scope=None):
         offset, length = max(0, int(offset or 0)), min(12000, max(1, int(length)))
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM messages WHERE conversation_id = ? AND id = ?",
                                (conversation_id, str(message_id))).fetchone()
-        if row is None:
+        message = self._message_row_to_dict(row) if row else None
+        if (message is None or (enterprise_prompt_scope is not None
+                and not scope_prompt_messages([message], enterprise_prompt_scope))):
             raise ValueError("当前会话中没有这条历史消息，或该消息已被用户修改。")
-        message = self._message_row_to_dict(row)
         content = message.get("content") or ""
         if not isinstance(content, str):
             content = json.dumps(content, ensure_ascii=False)

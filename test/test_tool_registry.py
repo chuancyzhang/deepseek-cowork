@@ -495,6 +495,99 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         self.assertNotIn(local_name, sm.tools)
         list_tools.assert_not_called()
 
+    def test_enterprise_skill_references_are_stable_and_confined_to_the_run(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+        from urllib.parse import quote
+        from core.enterprise_capabilities import selection_key
+        from core.enterprise_capability_runtime import EnterpriseCapabilityRuntime, REFERENCE_SCHEME
+        from core.enterprise_client import EnterpriseError
+        from core.execution_authorization import ExecutionAuthorization, bind_authorization
+
+        base = SkillManager(workspace_dir=self.temp_dir, auto_load=False)
+        implementation = Path(__file__).resolve().parents[1] / "skills/file-system/impl.py"
+        base._load_legacy_implementation("file-system", str(implementation))
+        binding = {"platform_id": "enterprise-test", "member_id": "member-1", "generation": "login-1",
+                   "data_dir": self.temp_dir}
+        ref = {"id": "a" * 32, "kind": "skill", "version": 3}
+        item = {**ref, "name": "运营流程", "description": "读取运营记录",
+                "config": {"instructions": "先读取参数", "files": {"references/参数 中文.txt": "经营参数",
+                            "scripts/example.py": "print('example')"}}}
+        name = selection_key("skill", ref["id"], binding)
+        uri = REFERENCE_SCHEME + name + "/" + quote("references/参数 中文.txt")
+        manifest = {"binding": binding, "items": [ref]}
+        with patch("core.enterprise_capability_runtime.EnterpriseCapabilities.check",
+                   side_effect=lambda *args, include_config=False: [item] if include_config else None) as check:
+            runtime = EnterpriseCapabilityRuntime(manifest, SimpleNamespace(data_dir=self.temp_dir))
+            other = EnterpriseCapabilityRuntime(manifest, SimpleNamespace(data_dir=self.temp_dir))
+            self.addCleanup(runtime.close)
+            self.addCleanup(other.close)
+            manager = base.clone_for_runtime(self.temp_dir)
+            runtime.install(manager)
+            next_manager = base.clone_for_runtime(self.temp_dir)
+            other.install(next_manager)
+            self.assertNotIn(name, base.skill_records)
+            self.assertIn(uri, manager.get_full_skill_prompt(name))
+            self.assertEqual(manager.get_full_skill_prompt(name), next_manager.get_full_skill_prompt(name))
+            self.assertEqual(manager.skill_records[name]["spec"]["script_entries"][0]["name"], "example")
+            root = Path(runtime.skills[name][0])
+            self.assertTrue(root.is_dir())
+            with bind_authorization(ExecutionAuthorization("discovery-test", "run", False, self.temp_dir)):
+                context = {"run_context": {"allowed_skill_names": [name]}}
+                self.assertEqual(manager.call_tool("text_file_read", {"path": uri}, context)["content"], "经营参数")
+            self.assertFalse(manager.call_tool("text_file_read", {"path": REFERENCE_SCHEME + name + "/references/../skill.json"})["ok"])
+            check.side_effect = EnterpriseError("能力已撤销")
+            self.assertFalse(manager.call_tool("text_file_read", {"path": uri})["ok"])
+            runtime.close()
+            self.assertFalse(root.exists())
+
+    def test_enterprise_mcp_allowlist_guard_and_credentials_do_not_enter_tools(self):
+        from types import SimpleNamespace
+        from core.enterprise_capabilities import selection_key
+        from core.enterprise_capability_runtime import EnterpriseCapabilityRuntime
+        from core.enterprise_client import EnterpriseError
+
+        binding = {"platform_id": "enterprise-test", "member_id": "member-1", "generation": "login-1",
+                   "data_dir": self.temp_dir}
+        token = "fixture-private-bearer"
+        tool_name = "search-" + "x" * 100
+        ref = {"id": "b" * 32, "kind": "mcp", "version": 3}
+        item = {**ref, "name": "Test DB", "description": "Read business figures",
+                "config": {"url": "https://mcp.example.com/mcp", "transport": "streamable_http",
+                           "auth_type": "bearer", "allowed_tools": [tool_name]}}
+        manifest = {"binding": binding, "items": [ref]}
+        key = selection_key("mcp", ref["id"], binding)
+
+        async def discover(server):
+            self.assertEqual(server["headers"]["Authorization"], f"Bearer {token}")
+            self.assertFalse(server["follow_redirects"])
+            return [{"name": tool_name, "description": f"search {token}"},
+                    {"name": tool_name + " "}, {"name": "other-tool"}]
+
+        async def call(server, name, arguments):
+            self.assertEqual(server["headers"]["Authorization"], f"Bearer {token}")
+            self.assertEqual(name, tool_name)
+            return {"is_error": False, "text": f"Rows with {token}"}
+
+        with patch("core.enterprise_capability_runtime.EnterpriseCapabilities.check",
+                   side_effect=lambda *args, include_config=False: [item] if include_config else None) as check, \
+             patch("core.enterprise_capability_runtime.EnterpriseCapabilities.session"), \
+             patch("core.enterprise_capability_runtime.EnterpriseCapabilities.credential", return_value=token), \
+             patch("core.mcp_client._list_mcp_server_tools_async", side_effect=discover), \
+             patch("core.mcp_client._call_mcp_tool_async", side_effect=call) as remote:
+            manager = self._build_manager()
+            runtime = EnterpriseCapabilityRuntime(manifest, SimpleNamespace(data_dir=self.temp_dir))
+            runtime.install(manager)
+            self.assertEqual(manager.get_tools_for_skill(key), [])
+            self.assertTrue(manager._ensure_mcp_tools_for_skill(key))
+            [alias] = manager.get_tools_for_skill(key)
+            self.assertLessEqual(len(alias), 64)
+            self.assertNotIn(token, json.dumps([manager.skill_records[key], manager.get_tool_record(alias)]))
+            self.assertEqual(manager.call_tool(alias, {})["text"], "Rows with [已隐藏]")
+            check.side_effect = EnterpriseError("能力已撤销")
+            self.assertEqual(manager.call_tool(alias, {})["status"], "error")
+            remote.assert_awaited_once()
+
     def test_parallel_tools_runs_read_only_calls_and_preserves_order(self):
         self._copy_repo_skill("meta-tools")
         skill_dir = os.path.join(self.skills_dir, "notes-tools")

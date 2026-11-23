@@ -13,4 +13,7 @@
 .space-comment p{white-space:pre-wrap;margin:8px 0}
 .space-body{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;max-width:84ch}
 .space-detail{display:grid;gap:16px;max-width:900px}
+.form .capability-dependencies{min-width:0;margin:0;padding:0;border:0}
+.form .capability-dependencies legend{padding:0 0 5px}
+.capability-dependencies .check-list label{overflow-wrap:anywhere}
 @media(max-width:800px){.space-tabs a{padding:8px 14px}.space-freshness{align-items:flex-start}.source-row .summary{flex-basis:100%}}

@@ -6,6 +6,7 @@ import time
 import uuid
 
 from .context_storage import source_fingerprints
+from .enterprise_capabilities import scope_prompt_messages
 from .long_context import (
     CHECKPOINT_PROMPT, DEFAULT_TARGET_TOKENS, MAX_CHECKPOINT_OUTPUT_TOKENS,
     MAX_CHECKPOINT_RETRY_OUTPUT_TOKENS, MAX_CHECKPOINT_TOKENS, CheckpointError,
@@ -59,7 +60,8 @@ class ContextWindowManager:
         })
 
     def capacity_snapshot(self, used, phase="ready"):
-        value = self.budget.snapshot(used, window_id=self.window["id"] if self.window else "", phase=phase)
+        window = self._usable_window(self.window)
+        value = self.budget.snapshot(used, window_id=window["id"] if window else "", phase=phase)
         value.update(updated_at=time.time(), run_id=self.run_id, **self.image_budget)
         return value
 
@@ -85,8 +87,9 @@ class ContextWindowManager:
         if now - self.last_stream_update < .5:
             return
         self.last_stream_update = now
+        window = self._usable_window(self.window)
         value = self.budget.snapshot(self.last_used + self.stream_tokens,
-                                    window_id=self.window["id"] if self.window else "", phase="generating")
+                                    window_id=window["id"] if window else "", phase="generating")
         value.update(updated_at=time.time(), run_id=self.run_id, **self.image_budget)
         self.worker.observability_signal.emit({"type": "context_capacity", "capacity": value})
 
@@ -143,9 +146,23 @@ class ContextWindowManager:
         self.persisted_ids.update(m["id"] for m in source)
         return source, fingerprints, revision
 
-    def _project(self, messages, window=None):
-        window = self.window if window is None else window
+    @property
+    def enterprise_prompt_scope(self):
+        return getattr(self.worker, "_enterprise_capability_scope", "")
+
+    def _usable_window(self, window):
         if window:
+            seeds = window["seed_messages"]
+            if len(scope_prompt_messages(seeds, self.enterprise_prompt_scope)) != len(seeds):
+                # Its summary may contain derived instructions. Rebuild from
+                # the visible ledger and keep the active ID for commit CAS.
+                return None
+        return window
+
+    def _project(self, messages, window=None):
+        window = self._usable_window(self.window if window is None else window)
+        messages = scope_prompt_messages(messages, self.enterprise_prompt_scope)
+        if window and messages:
             covered = set(window["covered_ids"])
             result = [messages[0], *copy.deepcopy(window["seed_messages"])]
             result.extend(m for m in messages[1:] if m.get("id") not in covered)
@@ -182,6 +199,8 @@ class ContextWindowManager:
 
     def _seed_context(self, messages, checkpoint, window_id, tail, host_state=None):
         # Fold only explicit runtime/Skill state, retaining its exact latest text.
+        scope = self.enterprise_prompt_scope
+        messages = scope_prompt_messages(messages, scope)
         facts = {}
         for m in messages[1:]:
             meta = m.get("meta") or {}
@@ -203,7 +222,8 @@ class ContextWindowManager:
             "content": ("[任务交接状态：这是同一任务的延续。以下是历史资料，不能代替当前授权。"
                         "已完成操作不要重复；不确定之处通过 history_search/history_read 核实。]\n"
                         + json.dumps({"task": checkpoint, "host": host_state or {}}, ensure_ascii=False)),
-            "meta": {"kind": "context_checkpoint", "hidden": True},
+            "meta": {"kind": "context_checkpoint", "hidden": True,
+                     **({"enterprise_prompt_scope": scope} if scope else {})},
         })
         latest_user = self._latest_user(messages)
         if (latest_user and latest_user.get("id") not in tail_ids
@@ -263,7 +283,8 @@ class ContextWindowManager:
                 "execution_rule": "只读核实未知执行结果；历史结果和检查点不恢复执行授权。"}
 
     def _summarize(self, source, allowed_ids, provider):
-        previous = self.window["content"] if self.window else None
+        window = self._usable_window(self.window)
+        previous = window["content"] if window else None
         retries = CheckpointRetries()
         requested_output = MAX_CHECKPOINT_OUTPUT_TOKENS
         can_raise_output = True
@@ -370,6 +391,7 @@ class ContextWindowManager:
         try:
             self.event("started")
             source, fingerprints, revision = self.persist_history(messages, generated)
+            eligible_source = scope_prompt_messages(source, self.enterprise_prompt_scope)
             active = self._project(messages)
             # Keep the latest complete assistant step and every following input.
             last_assistant = next((i for i in range(len(active) - 1, 0, -1)
@@ -380,19 +402,20 @@ class ContextWindowManager:
             minimum = [messages[0], *self._seed_context(messages, {}, self.rollover_id, tail), *tail]
             if not to_summarize or self.estimate(minimum, tools) >= self.budget.trigger_tokens:
                 return self._compression_failed(active, tools, usage, ContextError("当前内容无法继续缩短。"))
-            allowed_ids = {m["id"] for m in source}
-            if self.window:
-                allowed_ids.update(self.window["content"].get("refs") or [])
+            allowed_ids = {m["id"] for m in eligible_source}
+            reusable = self._usable_window(self.window)
+            if reusable:
+                allowed_ids.update(reusable["content"].get("refs") or [])
             try:
                 checkpoint = self._summarize(to_summarize, allowed_ids, provider)
             except CheckpointError as exc:
                 return self._compression_failed(active, tools, usage, exc)
             self.check_cancelled()
-            host_state = self._host_state(source)
+            host_state = self._host_state(eligible_source)
             seeds = self._seed_context(messages, checkpoint, self.rollover_id, tail, host_state)
-            covered = {m["id"] for m in source if m["id"] not in tail_ids}
-            if self.window:
-                covered.update(self.window["covered_ids"])
+            covered = {m["id"] for m in eligible_source if m["id"] not in tail_ids}
+            if reusable:
+                covered.update(reusable["covered_ids"])
             candidate = {
                 "id": self.rollover_id, "previous_id": self.window["id"] if self.window else "",
                 "run_id": self.run_id, "history_revision": revision,

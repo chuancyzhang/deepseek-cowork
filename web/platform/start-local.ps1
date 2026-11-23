@@ -8,7 +8,7 @@ if (Test-Path -LiteralPath 'images.tar') {
         throw 'Legacy offline package: rebuild it with scripts/package_enterprise.py.'
     }
     $deployment = Get-Content -LiteralPath 'deployment.json' -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($deployment.schema_version -ne 1 -or $deployment.target -ne 'linux-amd64' -or $deployment.database_schema -ne 4) {
+    if ($deployment.schema_version -ne 1 -or $deployment.target -ne 'linux-amd64' -or $deployment.database_schema -ne 5) {
         throw 'Unsupported deployment manifest.'
     }
     foreach ($required in @('images.tar', 'compose.local.yaml', 'start-local.ps1', 'server/releases.py', 'server/database.py')) {
@@ -40,7 +40,7 @@ if (Test-Path -LiteralPath 'images.tar') {
     Write-Host "Enterprise deployment $($deployment.version), source $($deployment.source_sha256)"
 }
 $platformImage = if ($env:COWORK_PLATFORM_IMAGE) { $env:COWORK_PLATFORM_IMAGE } else { 'cowork-enterprise:local' }
-docker run --rm --network none $platformImage python -c "from server.database import SCHEMA_VERSION; from server.releases import DESKTOP_REQUIRED_FILES; assert SCHEMA_VERSION == 4 and 'desktop-release.json' in DESKTOP_REQUIRED_FILES"
+docker run --rm --network none $platformImage python -c "from server.database import SCHEMA_VERSION; from server.releases import DESKTOP_REQUIRED_FILES; assert SCHEMA_VERSION == 5 and 'desktop-release.json' in DESKTOP_REQUIRED_FILES"
 if ($LASTEXITCODE -ne 0) { throw 'Build the current platform image first; this image does not support the current enterprise distribution.' }
 if ($VerifyOnly) { Write-Host 'Deployment files and images verified; no services or business data changed.'; return }
 if (-not (Test-Path -LiteralPath '.env.local')) {

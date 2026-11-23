@@ -5,6 +5,7 @@ import type { Settings } from './types';
 import {useHostField} from './host/context';
 import {prepareFormDraft, publicFormDraft, restoreFormRecovery, sameFormValue, type FormDraft} from './host/forms';
 import type { LibrarySelection } from './management/libraryCatalog';
+import type {EnterpriseCapability} from './enterpriseCapabilities';
 const Capabilities = lazy(() => import('./management/Capabilities'));
 const Preferences = lazy(() => import('./management/Preferences'));
 const Library = lazy(() => import('./management/Library'));
@@ -24,10 +25,11 @@ const groups: Record<string, [string, string, any][]> = {
   library: [['library', '资料库', BookOpen]], team: [['team', '团队空间', Users]],
 };
 
-export default function Management({ returnToChat, route, settings, updateSettings, openConversation, onReference, onError, confirm, registerLeave }: {
+export default function Management({ returnToChat, route, settings, updateSettings, openConversation, onReference, onError, confirm, registerLeave, openEnterpriseAccount, useEnterpriseCapability }: {
   returnToChat:()=>void; route: string; settings: Settings | null; updateSettings: (value: Settings) => void; openConversation: (id: string) => void;
   onReference: (source: string, items: LibrarySelection[]) => Promise<void>; onError: (message: string) => void;
   confirm: (title: string, detail: string, choices: string[]) => Promise<number>; registerLeave: (callback: () => Promise<boolean>) => void;
+  openEnterpriseAccount: () => void; useEnterpriseCapability: (item: EnterpriseCapability) => Promise<void>;
 }) {
   const tabs = groups[route] || groups.settings;
   const [selectedTab, setTab] = useHostField('management:tab:' + route, tabs[0][0]);
@@ -47,7 +49,8 @@ export default function Management({ returnToChat, route, settings, updateSettin
   return <div className={'management-layout ' + (route === 'capabilities' ? 'capabilities-layout' : route === 'library' ? 'library-layout' : '')}>
     {tabs.length > 1 && <nav className="management-nav" aria-label={managementNames[route]}>{route === 'settings' && <label className="management-nav-search"><Search size={14}/><input aria-label="搜索设置" placeholder="搜索设置" value={query} onChange={event => setQuery(event.target.value)}/></label>}{tabs.filter(([,label]) => label.includes(query)).map(([id, label, Icon]) => <button key={id} aria-current={tab === id ? 'page' : undefined} className={tab === id ? 'selected' : ''} onClick={async () => { if (tab !== id && await leave()) { setDirty(false); setTab(id); } }}><Icon size={17}/><span>{label}</span></button>)}</nav>}
     <div className="management-content"><Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在打开…</div>}>
-      {['skills', 'mcp', 'experts', 'favorites', 'schedule_history'].includes(tab) ? <Capabilities key={tab} kind={tab} {...common} openConversation={openConversation} returnToChat={returnToChat}/>
+      {['skills', 'mcp', 'experts', 'favorites', 'schedule_history'].includes(tab) ? <Capabilities key={tab} kind={tab} {...common} openConversation={openConversation} returnToChat={returnToChat}
+        openEnterpriseAccount={openEnterpriseAccount} useEnterpriseCapability={useEnterpriseCapability}/>
         : tab === 'plugins' ? <PluginManager/>
         : tab === 'library' ? <Library onError={onError} confirm={confirm} registerLeave={registerLibraryLeave} onReference={onReference} projectsKey={JSON.stringify(settings?.projects || [])}/>
         : ['enterprise', 'team'].includes(tab) ? <Enterprise kind={tab} {...common} openConversation={openConversation}/>

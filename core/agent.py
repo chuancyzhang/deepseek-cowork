@@ -8,6 +8,7 @@ import uuid
 import threading
 import hashlib
 import inspect
+import logging
 from datetime import datetime
 from core.runtime_tasks import EventSource, TaskWorker
 from core.skill_manager import SkillManager
@@ -820,6 +821,9 @@ class LLMWorker(TaskWorker):
             return
         event, snapshot = pending
         self.skill_manager.apply_snapshot(snapshot)
+        runtime = getattr(self, "_enterprise_capability_runtime", None)
+        if runtime is not None:
+            runtime.install(self.skill_manager)
         self.skill_manager.browser_run_context = self.run_context
         self._refresh_tool_definitions()
         payload = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
@@ -1400,6 +1404,14 @@ class LLMWorker(TaskWorker):
         except (TypeError, ValueError):
             return 0
 
+    def _tag_enterprise_skill_context(self, meta):
+        scope = getattr(self, "_enterprise_capability_scope", "")
+        if scope:
+            from core.enterprise_capabilities import is_enterprise_selection
+            if is_enterprise_selection(meta.get("skill_name")):
+                meta["enterprise_prompt_scope"] = scope
+        return meta
+
     def _build_skill_context_message(
         self,
         skill_name,
@@ -1431,7 +1443,7 @@ class LLMWorker(TaskWorker):
             "id": uuid.uuid4().hex,
             "role": "system",
             "content": rendered_content,
-            "meta": meta,
+            "meta": self._tag_enterprise_skill_context(meta),
         }
 
     def _build_skill_state_message(
@@ -1457,7 +1469,7 @@ class LLMWorker(TaskWorker):
             "id": uuid.uuid4().hex,
             "role": "system",
             "content": content,
-            "meta": {
+            "meta": self._tag_enterprise_skill_context({
                 "kind": "skill_state_update",
                 "hidden": True,
                 "skill_name": str(skill_name or ""),
@@ -1466,7 +1478,7 @@ class LLMWorker(TaskWorker):
                 "content_hash": str(content_hash or ""),
                 "catalog_revision": self._skill_catalog_revision(),
                 "selection_scoped": bool(selection_scoped),
-            },
+            }),
         }
 
     def _append_skill_state_message(
@@ -2043,6 +2055,9 @@ class LLMWorker(TaskWorker):
             "content_hash": content_hash,
             "tools_hash": _stable_json_hash(self.tools or []),
         }
+        scope = getattr(self, "_enterprise_capability_scope", "")
+        if scope:
+            meta["enterprise_prompt_scope"] = scope
         if previous_hash:
             meta["supersedes_hash"] = previous_hash
         message = {
@@ -2380,6 +2395,15 @@ class LLMWorker(TaskWorker):
             raise RuntimeError(f"provider attempt journal write failed: {exc}") from exc
 
     def _capture_request_snapshot(self, protocol, params, attempt_id):
+        audit = getattr(self, "_enterprise_chat_audit", None)
+        if audit is not None:
+            try:
+                audit.capture(protocol, params, attempt_id)
+            except Exception as exc:
+                logger = logging.getLogger(__name__)
+                logger.error("enterprise.chat_audit_capture_failed request=%s reason=%s", attempt_id, type(exc).__name__)
+                self.observability_signal.emit({"type": "enterprise_chat_audit", "status": "failed",
+                    "message": "企业聊天请求未能保存，当前任务继续运行。", "request_id": attempt_id})
         if self.is_subagent or not self.session_id:
             return
         from core.request_snapshot import RequestSnapshotStore
@@ -2696,6 +2720,9 @@ class LLMWorker(TaskWorker):
         guard = getattr(self, "_team_space_guard", None)
         if guard is not None:
             guard()
+        runtime = getattr(self, "_enterprise_capability_runtime", None)
+        if runtime is not None:
+            runtime.check()
         from core.execution_authorization import invoke
         invoker = context.get("_frozen_tool_invoker")
         if invoker is not None:
@@ -3110,7 +3137,20 @@ class LLMWorker(TaskWorker):
         try:
             self._run_main()
         finally:
+            audit = getattr(self, "_enterprise_chat_audit", None)
+            if audit is not None:
+                try:
+                    audit.finish()
+                except Exception as exc:
+                    logging.getLogger(__name__).error("enterprise.chat_audit_schedule_failed reason=%s", type(exc).__name__)
             self._close_tool_tasks()
+            runtime = getattr(self, "_enterprise_capability_runtime", None)
+            if runtime is not None:
+                try:
+                    runtime.close()
+                except OSError as exc:
+                    logging.getLogger(__name__).warning("enterprise.capability_cleanup_failed run=%s reason=%s",
+                        self.request_id, type(exc).__name__)
             self._close_data_security()
             try:
                 from core.browser_backend import finish_run
@@ -3162,6 +3202,7 @@ class LLMWorker(TaskWorker):
         # Invalid/missing scope is a visible failure before any bootstrap or
         # context append. An unhandled worker exception alone would leave the UI running.
         try:
+            from core.enterprise_capabilities import prompt_scope, scope_prompt_messages
             from core.team_spaces import resolve_run_binding
             space_binding = resolve_run_binding(self.chat_storage, self.conversation_id, self.run_context)
             if space_binding:
@@ -3170,7 +3211,19 @@ class LLMWorker(TaskWorker):
                 self._team_space_client = TeamSpaceClient(EnterpriseStore(space_binding["data_dir"]),
                     identity={"platform_id": space_binding["platform_id"], "member_id": space_binding["member_id"]})
                 self._team_space_client.session()
+            if "enterprise_capabilities" in self.run_context:
+                from core.enterprise_capability_runtime import EnterpriseCapabilityRuntime
+                manifest = self.run_context["enterprise_capabilities"]
+                self._enterprise_capability_scope = prompt_scope(manifest)
+                self._enterprise_capability_runtime = EnterpriseCapabilityRuntime(manifest, self.config_manager)
+                self._enterprise_capability_runtime.install(self.skill_manager)
+                logging.getLogger(__name__).info("enterprise.capability_run_ready session=%s run=%s count=%d",
+                    self.conversation_id, self.request_id, len(manifest["items"]))
+            current_messages = scope_prompt_messages(current_messages, getattr(self, "_enterprise_capability_scope", ""))
         except Exception as exc:
+            if "enterprise_capabilities" in self.run_context:
+                logging.getLogger(__name__).warning("enterprise.capability_run_unavailable session=%s run=%s reason=%s",
+                    self.conversation_id, self.request_id, type(exc).__name__)
             self.finished_signal.emit({"error": str(exc), "error_type": type(exc).__name__,
                 "generated_messages": [], "turn_id": self.turn_id, "request_id": self.request_id})
             return
@@ -3223,11 +3276,17 @@ class LLMWorker(TaskWorker):
                 grill_checkpoint_prompt_attempts = 0
                 self._grill_prompt_reset = False
             # Catalog changes are applied only between model requests.
-            if not self.bootstrap.active:
-                self._apply_pending_skill_snapshot(current_messages, generated_messages)
+            try:
+                if not self.bootstrap.active:
+                    self._apply_pending_skill_snapshot(current_messages, generated_messages)
+                self._refresh_tool_definitions()
+            except Exception as exc:
+                self._append_pending_guidance(current_messages, generated_messages, close=True)
+                self.finished_signal.emit({"error": f"能力目录更新失败：{exc}", "error_type": type(exc).__name__,
+                    "generated_messages": generated_messages, "turn_id": self.turn_id, "request_id": self.request_id})
+                return
 
             turn_count += 1
-            self._refresh_tool_definitions()
             self.step_signal.emit(f"Turn {turn_count}: Requesting LLM...")
 
             if self.bootstrap.active:
@@ -3299,6 +3358,16 @@ class LLMWorker(TaskWorker):
                             self.run_context.get("selected_model_profile") or self.config_manager.get_model_profile(self.run_context.get("selected_model_id")),
                             client=self._team_space_client)
                         self._team_space_guard = provider.team_space_guard
+                    capability_runtime = getattr(self, "_enterprise_capability_runtime", None)
+                    if capability_runtime is not None:
+                        provider.enterprise_capability_guard = capability_runtime.check
+                        # All retry attempts must pass through the scoped authorization guard.
+                        provider.client = provider.client.with_options(max_retries=0)
+                        provider.enterprise_replay_scope = (getattr(provider, "enterprise_replay_scope", "")
+                            + ":capabilities:" + self._enterprise_capability_scope)
+                    if not hasattr(self, "_enterprise_chat_audit"):
+                        from core.enterprise_chat_audit import ChatAuditCapture
+                        self._enterprise_chat_audit = ChatAuditCapture(self, provider, space_binding)
                     if self.long_context_policy["enabled"] and not self.bootstrap.active:
                         from core.context_window import ContextWindowManager
                         if self.context_window_manager is None:
@@ -3483,6 +3552,7 @@ class LLMWorker(TaskWorker):
                             request_context={
                                 "enterprise_questions": list(self._enterprise_questions),
                                 "enterprise_accepted": lambda ids: setattr(self, "_enterprise_questions", [q for q in self._enterprise_questions if q["id"] not in ids]),
+                                "chat_audit_version": 1 if self._enterprise_chat_audit.enterprise_negotiated else 0,
                                 "client_request_id": attempt_id,
                                 "run_id": self.request_id or self.turn_id or self.session_id,
                                 "turn_id": self.turn_id,

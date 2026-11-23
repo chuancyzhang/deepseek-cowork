@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowUp, BookOpen, Check, ChevronDown, ChevronRight, FileTex
 import type { Attachment, Conversation, Settings, ModePlugin } from './types';
 import { receiveAttachments } from './attachments';
 import ImageAttachments, {isImageAttachment} from './ImageAttachment';
+import {enterpriseExpertModel, enterpriseSource, useEnterpriseCapabilities, type EnterpriseCapabilityKind} from './enterpriseCapabilities';
 
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 type Props = {
@@ -19,11 +20,13 @@ type Props = {
   modes?: ModePlugin[]; creation?: boolean; enterCreation?: () => Promise<void>; exitCreation?: () => Promise<void>;
 };
 const categories = [['mode', '模式', SlidersHorizontal], ['experts', '专家', UserRound], ['skills', '技能', Puzzle], ['connectors', '连接器', Link], ['conversations', '对话', MessageSquare], ['variables', '插入变量', FileText]] as const;
+const enterpriseKinds: Partial<Record<string, EnterpriseCapabilityKind>> = {skills: 'skill', connectors: 'mcp', experts: 'expert'};
+const enterpriseSelection = (key: string) => key.startsWith('enterprise.') || key.startsWith('mcp-server-enterprise_');
 
 export default function Composer(props: Props) {
   const { conversation, conversations, settings, text, setText, attachments, setAttachments, skills, active, sending, textarea, error } = props;
   const [menu, setMenu] = useState(''), [section, setSection] = useState(''), [query, setQuery] = useState(''), [items, setItems] = useState<any[]>([]), [busy, setBusy] = useState(false), [failure, setFailure] = useState('');
-  const [pending, setPending] = useState<{skills: string[]; expert: any; references: string[]} | null>(null), [mentionStart, setMentionStart] = useState(-1), [dragging, setDragging] = useState(false);
+  const [pending, setPending] = useState<{skills: string[]; expert: any; references: string[]; defaultModel?: string} | null>(null), [mentionStart, setMentionStart] = useState(-1), [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState<string[]>([]);
   const [placement, setPlacement] = useState({above:true, height:420});
@@ -32,6 +35,9 @@ export default function Composer(props: Props) {
   const previousId = useRef(conversation?.id), hover = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const lists = useRef(new Map<string, Promise<any[]>>());
   const prefs = conversation?.meta || {}, refs: any[] = prefs.conversation_refs || [], knowledge: any[] = prefs.knowledge_refs || [];
+  const enterpriseKind = enterpriseKinds[section];
+  const enterprise = useEnterpriseCapabilities(Boolean(menu && enterpriseKind) || skills.some(enterpriseSelection));
+  const enterpriseItems = enterprise.catalog?.items || [];
   const chatModels = settings?.models.filter(item => item.chat_supported !== false) || [];
   const model = settings?.models.find(model => model.id === (prefs.selected_model_id || settings.selected_model_id));
   const modes = [{mode:'execution',name:'直接推进',description:'讨论、执行并完成任务',scope:'run'},...(props.modes || []).filter(item=>item.enabled)];
@@ -45,6 +51,10 @@ export default function Composer(props: Props) {
     return () => { clearTimeout(hover.current); document.removeEventListener('pointerdown', outside); window.removeEventListener('blur', blur); };
   }, []);
   useEffect(() => { if (previousId.current) close(); previousId.current = conversation?.id; }, [conversation?.id]);
+  useEffect(() => {
+    if (!menu || !enterpriseKind) return;
+    return window.cowork.onEvents(events => {if (events.some(event => event.event === 'enterprise_changed')) close();});
+  }, [menu, enterpriseKind]);
   useLayoutEffect(() => { if (textarea.current) { textarea.current.style.height = 'auto'; textarea.current.style.height = Math.min(180, Math.max(70, textarea.current.scrollHeight)) + 'px'; } }, [text, textarea]);
   useLayoutEffect(() => {
     if (!menu || menu === 'model' || !root.current) return;
@@ -124,7 +134,12 @@ export default function Composer(props: Props) {
     await props.preferences({conversation_refs: [...refs.filter(item => item.session_id !== sourceId), ref]}, cid);
   }
   async function select(item: any) {
-    if (section === 'experts') { const expert = item.id ? {id: item.id, name: item.name} : {}; if (pending) setPending({...pending, expert}); else await applyPreference({conversation_agent: expert}, true); }
+    if (section === 'experts') {
+      const expert = item.id ? {id: item.id, name: item.name} : {};
+      const defaultModel = item.enterprise ? enterpriseExpertModel(item.enterprise, conversation, settings) : undefined;
+      if (pending) setPending({...pending, expert, defaultModel});
+      else await applyPreference({conversation_agent: expert, ...(defaultModel ? {selected_model_id: defaultModel} : {})}, true);
+    }
     if (['skills', 'connectors'].includes(section)) {
       const selected = pending?.skills || skills, next = selected.includes(item.name) ? selected.filter(name => name !== item.name) : [...selected, item.name];
       if (pending) setPending({...pending, skills: next}); else await applyPreference({selected_skill_names: next});
@@ -141,7 +156,8 @@ export default function Composer(props: Props) {
     try {
       const cid = await props.ensureConversation(), nextRefs = refs.filter(ref => pending.references.includes(ref.session_id));
       for (const source of pending.references.filter(id => !nextRefs.some(ref => ref.session_id === id))) nextRefs.push(await call('conversation.reference', {conversation_id: cid, source_id: source}));
-      await props.preferences({conversation_agent: pending.expert, selected_skill_names: pending.skills, conversation_refs: nextRefs}, cid);
+      await props.preferences({conversation_agent: pending.expert, selected_skill_names: pending.skills, conversation_refs: nextRefs,
+        ...(pending.defaultModel ? {selected_model_id: pending.defaultModel} : {})}, cid);
       if (mentionStart >= 0 && latest.current.conversation?.id === cid) setText(text.slice(0, mentionStart) + text.slice(textarea.current?.selectionStart || mentionStart + 1));
       close(); textarea.current?.focus();
     } catch (failure) { setFailure((failure as Error).message); } finally { setBusy(false); }
@@ -151,9 +167,13 @@ export default function Composer(props: Props) {
     const added = await receiveAttachments(cid, files);
     if (latest.current.conversation?.id === cid) latest.current.setAttachments([...latest.current.attachments, ...added.filter(item => !latest.current.attachments.some(old => old.path === item.path))]);
   }
-  const list = section === 'conversations' ? conversations.filter(item => item.id !== conversation?.id && !item.meta.archived && item.has_messages)
+  const personal = section === 'conversations' ? conversations.filter(item => item.id !== conversation?.id && !item.meta.archived && item.has_messages)
     : section === 'experts' ? [{id: '', name: '默认助手', description: ''}, ...items.filter(item => item.enabled !== false)]
     : section === 'variables' ? items.filter(item => item.kind === 'text') : items.filter(item => item.enabled !== false && item.source_kind !== 'core_builtin' && item.name.startsWith('mcp-server-') === (section === 'connectors'));
+  const list = [...personal, ...enterpriseItems.filter(item => item.kind === enterpriseKind && item.selection_key).map(item => ({
+    ...(item.kind === 'expert' ? {id: item.selection_key, name: item.name} : {name: item.selection_key, display_name: item.name}),
+    description: item.description, enterprise: item,
+  }))];
   function selected(item: any) { return section === 'conversations' ? (pending?.references || refs.map(ref => ref.session_id)).includes(item.id) : section === 'experts' ? ((pending?.expert || prefs.conversation_agent)?.id || '') === item.id : (pending?.skills || skills).includes(item.name); }
   const matching = list.filter(item => [item.name,item.display_name,item.title,item.description].some(part => String(part || '').toLocaleLowerCase().includes(query.toLocaleLowerCase())));
   return <div ref={root} className={'composer-shell ' + (dragging ? 'dragging' : '')} onDragOver={event => {event.preventDefault(); setDragging(true);}} onDragLeave={event => {if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false);}} onDrop={event => {event.preventDefault(); setDragging(false); void importFiles([...event.dataTransfer.files]).catch(failure => error(failure.message));}} onKeyDown={event => {
@@ -168,7 +188,12 @@ export default function Composer(props: Props) {
         onRemove={path => setAttachments(attachments.filter(item => item.path !== path))}/>}
       {(skills.length > 0 || refs.length > 0 || knowledge.length > 0 || attachments.some(file => !isImageAttachment(file))) && <div className="composer-contexts">
         {refs.map(ref => <div className="context-chip conversation-chip" key={ref.id}><MessageSquare size={13}/><button title={'查看引用快照：' + ref.title} onClick={() => {open('add', 'conversations');}}><span>对话 {ref.title}</span></button><button aria-label={'移除引用 ' + ref.title} onClick={() => void applyPreference({conversation_refs: refs.filter(item => item.id !== ref.id)})}><X size={12}/></button></div>)}
-        {skills.map(name => {const connector = name.startsWith('mcp-server-'), category = connector ? 'connectors' : 'skills', label = connector ? '连接器' : '技能'; return <div className="context-chip skill-chip" key={name}>{connector ? <Link size={13}/> : <Puzzle size={13}/>}<button disabled={busy} title={'选择' + label + '：' + name} aria-label={'选择' + label + ' ' + name} aria-haspopup="dialog" aria-expanded={menu === 'add' && section === category} onClick={() => open('add', category)}><span>{label} {name}</span></button><button disabled={busy} aria-label={'移除能力 ' + name} onClick={() => void applyPreference({selected_skill_names: skills.filter(item => item !== name)})}><X size={12}/></button></div>;})}
+        {skills.map(name => {
+          const connector = name.startsWith('mcp-server-'), category = connector ? 'connectors' : 'skills';
+          const managed = enterpriseSelection(name), label = (managed ? '企业' : '') + (connector ? '连接器' : '技能');
+          const display = managed ? enterpriseItems.find(item => item.selection_key === name)?.name || (enterprise.loading ? '正在读取' : '当前不可用') : name;
+          return <div className="context-chip skill-chip" key={name}>{connector ? <Link size={13}/> : <Puzzle size={13}/>}<button disabled={busy} title={'选择' + label + '：' + display} aria-label={'选择' + label + ' ' + display} aria-haspopup="dialog" aria-expanded={menu === 'add' && section === category} onClick={() => open('add', category)}><span>{label} {display}</span></button><button disabled={busy} aria-label={'移除能力 ' + display} onClick={() => void applyPreference({selected_skill_names: skills.filter(item => item !== name)})}><X size={12}/></button></div>;
+        })}
         {knowledge.map((ref, index) => <div className="context-chip knowledge-chip" key={JSON.stringify(ref)}><BookOpen size={13}/><button title={ref.title || ref.name} onClick={() => void props.browseLibrary().catch(failure => error(failure.message))}><span>资料 {ref.title || ref.name}</span></button><button aria-label={'移除资料 ' + (ref.title || ref.name)} onClick={() => void applyPreference({knowledge_refs: knowledge.filter((_, i) => i !== index)})}><X size={12}/></button></div>)}
         {attachments.filter(file => !isImageAttachment(file)).map(file => <div className="context-chip" key={file.path}><Paperclip size={13}/><span title={file.path}>{file.name}</span><button aria-label={'移除附件 ' + file.name} onClick={() => setAttachments(attachments.filter(item => item.path !== file.path))}><X size={12}/></button></div>)}
       </div>}
@@ -185,7 +210,7 @@ export default function Composer(props: Props) {
       <div className="composer-toolbar"><div className="composer-left">
         <button className="icon-button" title="添加上下文" aria-label="添加上下文" aria-expanded={menu === 'add'} onClick={() => menu === 'add' ? close() : open('add')}><Plus size={18}/></button>
         <button className="text-tool" title={settings?.god_mode ? '完全访问' : '请求批准'} onClick={() => menu === 'permission' ? close() : open('permission')}><ShieldCheck size={14}/><span>{settings?.god_mode ? '完全访问' : '请求批准'}</span></button>
-        <button className="text-tool" title="选择专家" onClick={() => open('add','experts')}><UserRound size={14}/><span>{prefs.conversation_agent?.name || '专家'}</span></button>
+        <button className="text-tool" title={enterpriseSelection(prefs.conversation_agent?.id || '') ? '选择专家 · 当前为企业专家' : '选择专家'} onClick={() => open('add','experts')}><UserRound size={14}/><span>{prefs.conversation_agent?.name || '专家'}</span></button>
         {prefs.mode === 'grilling' && <div className="mode-chip">{!active && <button aria-label="取消拷问模式" onClick={() => void applyPreference({mode: 'execution', grill_execution_confirmed: false})}><X size={12}/></button>}<button onClick={() => open('add','mode')}>拷问模式</button></div>}
         {props.creation && <div className="mode-chip"><button onClick={()=>open('add','mode')}>创造模式</button></div>}
       </div><div className="composer-right"><button ref={modelTrigger} className="model-trigger" aria-expanded={menu === 'model'} aria-haspopup="dialog" title={model?.label || '选择对话模型'} onClick={() => menu === 'model' ? close() : open('model')}><span>{model?.label || '选择对话模型'}{prefs.reasoning_effort ? ' · ' + prefs.reasoning_effort : ''}</span><ChevronDown size={12}/></button><button className="send-button" title={active && !text.trim() && !attachments.length ? '停止任务' : '发送消息'} disabled={sending || conversation?.run?.status === 'stopping' || !active && !text.trim() && !attachments.length} onClick={() => void (active && !text.trim() && !attachments.length ? props.stop() : props.send()).catch(failure => error(failure.message))}>{sending ? <LoaderCircle className="spin" size={18}/> : active && !text.trim() && !attachments.length ? <Square size={15} fill="currentColor"/> : <ArrowUp size={20}/>}</button></div></div>
@@ -202,13 +227,15 @@ export default function Composer(props: Props) {
               const key = section + ':' + (item.id || item.name), isExpanded = expanded.includes(key), selectable = section !== 'variables';
               const label = item.display_name || item.title || item.name, description = String(item.description || '');
               return <div className={'context-option ' + (selected(item) ? 'checked' : '')} key={key}>
-                <button className="picker-row" aria-pressed={selectable ? selected(item) : undefined} disabled={busy} onClick={() => void select(item)}>
+                <button className="picker-row" aria-pressed={selectable ? selected(item) : undefined} disabled={busy || item.enterprise?.available === false} onClick={() => void select(item)}>
                   {selectable && <span className={'context-check ' + (section === 'experts' ? 'single' : '')}>{selected(item) && <Check size={12}/>}</span>}
-                  <span>{label}</span>
+                  <span>{label}{item.enterprise && <small>{enterpriseSource(enterprise.catalog?.platform_name, item.enterprise)}{item.enterprise.available === false && (' · ' + (item.enterprise.reason || '不可用'))}</small>}</span>
                 </button>
                 {description && <div className="context-description"><p className={isExpanded ? 'expanded' : ''}>{description}</p><button aria-expanded={isExpanded} aria-label={(isExpanded ? '收起' : '展开') + label + '说明'} onClick={() => setExpanded(previous => isExpanded ? previous.filter(id => id !== key) : [...previous, key])}>{isExpanded ? '收起说明' : '展开说明'}</button></div>}
               </div>;
-            })}{!matching.length && <p className="picker-empty">{query ? '没有匹配的内容' : '暂无可选内容'}</p>}</div>}
+            })}{enterpriseKind && enterprise.loading && <div className="picker-empty" role="status"><LoaderCircle size={14} className="spin"/>正在读取企业能力…</div>}
+            {enterpriseKind && enterprise.failure && <p role="alert" className="error-text">{enterprise.failure} <button className="text-link" onClick={enterprise.reload}>重试</button></p>}
+            {!matching.length && !(enterpriseKind && enterprise.loading) && <p className="picker-empty">{query ? '没有匹配的内容' : '暂无可选内容'}</p>}</div>}
           </>}{failure && <p role="alert" className="error-text">{failure}</p>}
         </section>}
         {pending && <div className="mention-actions"><button className="secondary" onClick={close}>取消</button><button className="primary" disabled={busy} onClick={() => void applyMention()}>应用选择</button></div>}

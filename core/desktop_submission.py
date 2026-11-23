@@ -1,7 +1,7 @@
 """Submission snapshots using the existing desktop conversation conventions.
 
-System prompts, tool schemas, and provider history projection are unchanged.
-Only the newly accepted message and its existing run-context fields are built.
+Enterprise selections are resolved here before the message is accepted, then
+the worker loads the pinned resources through the existing capability paths.
 """
 import logging
 import mimetypes
@@ -101,22 +101,38 @@ def run_context(service, cid, payload, profile):
     profiles = service.config.get_agent_profiles()
     profiles += builtin_agent_profiles(profiles)
     expert = next((item for item in profiles if item["id"] == (selection or {}).get("id")), None)
-    agent = agent_role_context(selection, expert, workspace=str(service.workspace(cid)), message_id=payload["message_id"])
     skills = normalize_selected_skill_names(payload.get("skills", preferences.get("selected_skill_names", [])))
+    binding = service.storage.get_team_space_binding(cid)
+    if meta.get("team_space_required") and not binding:
+        raise ValueError("空间会话归属不完整。历史已保留，请恢复原绑定后继续。")
+    enterprise = None
+    from core.enterprise_capabilities import is_enterprise_selection
+    expert_key = (selection or {}).get("id")
+    if is_enterprise_selection(expert_key) or any(is_enterprise_selection(key) for key in skills):
+        from core.enterprise_capabilities import EnterpriseCapabilities
+        from core.enterprise_client import EnterpriseClient, EnterpriseStore
+        capabilities = EnterpriseCapabilities(EnterpriseClient(EnterpriseStore(service.config.data_dir)))
+        enterprise, enterprise_expert, dependencies = capabilities.selection(
+            skills, expert_key, model_binding=profile.get("enterprise"), space_binding=binding)
+        if enterprise_expert:
+            expert = {"id": expert_key, "name": enterprise_expert["name"],
+                      "description": enterprise_expert["description"],
+                      "system_prompt": enterprise_expert["config"]["instructions"]}
+        skills = normalize_selected_skill_names(skills + dependencies)
+        log.info("enterprise.capability_selection session=%s count=%d", cid, len(enterprise["items"]))
+    agent = agent_role_context(selection, expert, workspace=str(service.workspace(cid)), message_id=payload["message_id"])
     if expert and expert.get("skill_names"):
         skills = normalize_selected_skill_names(skills + expert["skill_names"])
         agent["allowed_skill_names"] = [name for name in skills if name not in RETIRED_SKILLS]
     skills = [name for name in skills if name not in RETIRED_SKILLS]
-    binding = service.storage.get_team_space_binding(cid)
-    if meta.get("team_space_required") and not binding:
-        raise ValueError("空间会话归属不完整。历史已保留，请恢复原绑定后继续。")
     context = {**agent, "mode": preferences.get("mode", "execution"),
         "selected_skill_names": skills, "selected_model_id": profile["id"],
         "reasoning_effort": preferences.get("reasoning_effort", profile.get("reasoning_effort", "")),
         "workspace_mode": "project", "app_variable_access": True,
         "desktop_long_context": desktop_policy(service.config),
         "knowledge_context": MultiSourceKnowledgeService().snapshot(preferences.get("knowledge_refs"), cid),
-        **({"team_space": binding} if binding else {})}
+        **({"team_space": binding} if binding else {}),
+        **({"enterprise_capabilities": enterprise} if enterprise else {})}
     for key in ("clarify_mode_state", "pending_clarify_questions", "grill_round_count", "grill_cycle_count",
                 "grill_execution_confirmed", "workflow_mode", "office_output_profile", "office_conversion_target",
                 "office_source_files", "office_template_file"):

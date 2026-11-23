@@ -13,7 +13,7 @@ class Connections:
         "library.upload", "library.uploads", "library.check_upload", "library.tenant", "library.import", "library.mkdir", "library.folder",
         "library.rename", "library.trash", "library.trash_list", "library.restore", "library.locate",
         "library.create_file", "library.paste", "library.edit_open", "library.edit_save", "library.create_manual",
-        "enterprise.status", "enterprise.bind", "enterprise.providers", "enterprise.login", "enterprise.refresh", "enterprise.logout",
+        "enterprise.status", "enterprise.capabilities", "enterprise.capabilityCredential", "enterprise.bind", "enterprise.providers", "enterprise.login", "enterprise.refresh", "enterprise.logout",
         "team.list", "team.detail", "team.collection", "team.object", "team.execute", "team.upload", "team.download", "team.conversation"})
 
     def __init__(self, service):
@@ -22,6 +22,8 @@ class Connections:
         from core.local_library import LocalLibrary
         self.local = LocalLibrary(service)
         self.enterprise = EnterpriseClient(EnterpriseStore(service.config.data_dir))
+        from core.enterprise_chat_audit import start_sync
+        start_sync(self.enterprise.store)
 
     def dispatch(self, method, p):
         action = method.split(".")[1]
@@ -164,7 +166,17 @@ class Connections:
             return self.s.jobs.submit(label, operation)
         if method.startswith("enterprise."):
             if action == "status":
-                return self.enterprise.store.read()
+                from core.enterprise_chat_audit import pending_status
+                state = self.enterprise.store.read()
+                return {**state, "chat_audit_sync": pending_status(self.enterprise.store, state)} if state else state
+            if action == "capabilities":
+                from core.enterprise_capabilities import EnterpriseCapabilities
+                return EnterpriseCapabilities(self.enterprise).inventory()
+            if action == "capabilityCredential":
+                from core.enterprise_capabilities import EnterpriseCapabilities
+                result = EnterpriseCapabilities(self.enterprise).set_credential(p.get("selection_key"), p.get("value"))
+                self.s.publish({"event": "enterprise_changed"})
+                return result
             def operation(cancelled, progress):
                 if action == "bind":
                     self.enterprise.bind(p["connection"])
@@ -178,7 +190,14 @@ class Connections:
                 elif action == "refresh":
                     self.enterprise.refresh()
                 elif action == "logout":
-                    self.enterprise.logout()
+                    try:
+                        self.enterprise.logout()
+                    finally:
+                        self.s.publish({"event": "enterprise_changed"})
+                        self.s.publish({"event": "settings_changed"})
+                if action in {"bind", "login", "refresh"}:
+                    self.s.publish({"event": "enterprise_changed"})
+                    self.s.publish({"event": "settings_changed"})
                 return self.enterprise.store.read()  # never persist bearer tokens in job results
             return self.s.jobs.submit("企业连接", operation)
         client = TeamSpaceClient(self.enterprise.store)
@@ -199,7 +218,7 @@ class Connections:
             if action == "upload":
                 frozen = client.freeze_file(p["path"], cancel=cancelled)
                 return client.upload(space, frozen, operation_id=p["operation_id"], cancel=cancelled,
-                    progress=lambda amount: progress("正在上传…", transferred=amount))
+                    progress=lambda amount, total: progress("正在上传…", transferred=amount, total=total))
             if action == "download":
                 return client.download(space, p["revision_id"], Path(p["path"]), cancel=cancelled)
             if action == "conversation":

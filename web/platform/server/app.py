@@ -20,6 +20,8 @@ from sqlalchemy import delete, select, update
 
 from .auth import Authentication, oauth_compatibility_preset
 from .administrator import AdministratorAccess
+from .capabilities import Capabilities, capability_router
+from .chat_audit import ChatAudit, chat_audit_router
 from .config import Settings
 from .database import (AuditEvent, AuthSource, ClientRelease, Database, LoginSession, LoginTransaction,
                        LocalAdministrator, LoginEntry, Member, Model, Platform, Question)
@@ -58,6 +60,8 @@ def create_app(settings=None, *, transport=None):
     administrator = AdministratorAccess(settings, database)
     vault = Vault(settings.encryption_key)
     management = Management(settings, database, vault)
+    capabilities = Capabilities(settings, database)
+    chat_audit = ChatAudit(settings, database, vault, management)
     releases = Releases(settings, database)
     team_spaces = TeamSpaces(settings, database)
     cleanup_state = {"last_success_at": None, "deleted": 0, "error": ""}
@@ -67,12 +71,13 @@ def create_app(settings=None, *, transport=None):
         now = time.time()
         with database.transaction() as db:
             count = db.execute(delete(Question).where(Question.expires_at <= now)).rowcount
+            chat_count = chat_audit.cleanup(db, now)
             db.execute(delete(LoginSession).where(LoginSession.expires_at <= now))
             db.execute(delete(LoginTransaction).where(LoginTransaction.expires_at <= now))
             if count:
                 database.audit(db, "questions.expired", target=str(count))
         team_spaces.cleanup_uploads()
-        cleanup_state.update(last_success_at=now, deleted=count, error="")
+        cleanup_state.update(last_success_at=now, deleted=count, chats_deleted=chat_count, error="")
         return count
 
     async def cleanup_loop():
@@ -82,7 +87,7 @@ def create_app(settings=None, *, transport=None):
                 await asyncio.to_thread(cleanup)
             except Exception as exc:
                 cleanup_state["error"] = "到期清理未完成，后台将重试。"
-                log.error("questions.cleanup_failed reason=%s", type(exc).__name__)
+                log.error("audit.cleanup_failed reason=%s", type(exc).__name__)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -120,6 +125,7 @@ def create_app(settings=None, *, transport=None):
     app.state.settings, app.state.database, app.state.vault = settings, database, vault
     app.state.management, app.state.releases, app.state.cleanup = management, releases, cleanup
     app.state.team_spaces = team_spaces
+    app.state.capabilities = capabilities
 
     def principal(request, *, admin=False):
         authorization = request.headers.get("authorization", "")
@@ -139,6 +145,8 @@ def create_app(settings=None, *, transport=None):
         return response
 
     app.include_router(team_space_router(team_spaces, principal, read_json))
+    app.include_router(capability_router(capabilities, principal, read_json))
+    app.include_router(chat_audit_router(chat_audit, principal, read_json, team_spaces, lambda: app.state.capabilities))
 
     @app.exception_handler(PlatformError)
     async def platform_error(request, exc):
@@ -184,7 +192,9 @@ def create_app(settings=None, *, transport=None):
                     "build": {"version": os.environ.get("COWORK_BUILD_VERSION", "source"),
                               "source_sha256": os.environ.get("COWORK_BUILD_SOURCE", "")},
                     "team_spaces": {"version": 1, "minimum_client_version": 1},
-                    "question_retention_days": 30, "question_scope": "enterprise_models_only"}
+                    "enterprise_capabilities": {"version": 1},
+                    "question_retention_days": 30, "question_scope": "enterprise_models_only",
+                    "chat_audit": {"version": 1, "retention_days": 30, "platform_events_days": 90}}
 
     @app.get("/api/v1/auth/providers")
     def providers():
@@ -335,7 +345,7 @@ def create_app(settings=None, *, transport=None):
             can_assign_admin = user["role"] == "admin" and (not founder or founder.member_id == user["id"])
         return {"member": user, "models": management.models(user["id"]), "platform_id": settings.platform_id,
                 "can_assign_admin": can_assign_admin,
-                "can_use_team_spaces": not founder or founder.member_id != user["id"]}
+                "can_use_team_spaces": not founder or founder.member_id != user["id"], "chat_audit_version": 1}
 
     @app.post("/api/v1/auth/logout")
     def logout(request: Request):
@@ -452,7 +462,8 @@ def create_app(settings=None, *, transport=None):
             raise PlatformError("platform_busy", "企业模型当前繁忙，请稍后重试。", 429) from None
         upstream = None
         try:
-            await asyncio.to_thread(management.record_questions, actor["id"], model_id, metadata)
+            if metadata.get("chat_audit_version") != 1:
+                await asyncio.to_thread(management.record_questions, actor["id"], model_id, metadata)
             address, headers = upstream_parts(model)
             for key in ("anthropic-version", "anthropic-beta"):
                 if model["protocol"] == "anthropic" and key in request.headers:

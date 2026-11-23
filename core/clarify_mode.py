@@ -215,6 +215,8 @@ def normalize_run_context(run_context):
         # Retain invalid values too: the runtime must reject damaged bindings,
         # never normalize them into an ordinary personal conversation.
         normalized["team_space"] = json_copy(ctx["team_space"], {"invalid": True})
+    if "enterprise_capabilities" in ctx:
+        normalized["enterprise_capabilities"] = json_copy(ctx["enterprise_capabilities"], {"invalid": True})
     if isinstance(ctx.get("desktop_long_context"), dict):
         from .long_context import normalize_policy
         normalized["desktop_long_context"] = normalize_policy(ctx["desktop_long_context"])

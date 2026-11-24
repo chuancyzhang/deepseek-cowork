@@ -1742,7 +1742,7 @@ class LLMWorker(TaskWorker):
             "策略 [读取审计]: 修改已有文件前，必须用 'text_file_read' 从 offset=1 且不传 limit 完整读取，建立基于 SHA-256、大小、mtime_ns、编码、BOM 和换行风格的审计凭据；分页读取不授予写审计，禁止用 'grep' 的匹配结果代替完整读取。",
             "策略 [补丁格式]: 'apply_patch' 的 patch 必须以 '*** Begin Patch' 开始、以 '*** End Patch' 结束；使用 '*** Add File: path'（内容每行以 + 开头）、'*** Update File: path'、可选 '*** Move to: path'、'@@' 精确上下文 hunk、'*** Delete File: path'，纯追加 hunk 必须以 '*** End of File' 收尾。",
             "策略 [补丁约束]: 先读后改并提供精确上下文；重复片段必须补足上下文直到唯一匹配，不得依赖空白或 Unicode 模糊匹配。删除会一次展示全部路径并要求确认。补丁失败后根据结构化错误重新读取或修正补丁，不得臆造其他文本写入工具。",
-            "Office/PDF 策略: 通过 `documents` 的 'document_read' 按需读取文档；Word 制作遵循 documents，PPTX 制作遵循 presentations，分析数据遵循 data-analysis。使用现有 Python 库生成文件；版式检查用 'document_render' 分页生成图片，再用 'view_image' 实际检查。文件生成、结构检查和视觉检查是不同结果，不得混淆。",
+            "Office/PDF 策略: 通过 `documents` 的 'document_read' 按需读取；Word 制作遵循 documents，PPTX 制作遵循 presentations，分析数据遵循 data-analysis。修改已有文档先用 'document_copy' 创建任务副本，再用现有 Python 库编辑。版式检查用 'document_render(review=true)' 独立审图，主对话只接收覆盖与结论；长文档先总览，优先改动页、复杂页并分布抽查，为复查留预算，初稿后最多两轮修改。触及预算就交付最新稿并说明未查页。生成、结构检查、图片提交和视觉结论分别报告，不得混淆。",
             "依赖策略: 不要根据静态库清单、系统 PATH 或常见安装目录推断依赖可用性；以实际 Tool/Skill 调用和依赖协调结果为准。缺少依赖时报告根因和恢复方式。",
             "",
             "策略 [持久化]: 只有用户明确要求时，才创建、修改或安装 Skill，或调用 'write_memories' 写入长期记忆；不得静默持久化推断、敏感信息、临时细节或完整聊天记录。",
@@ -2261,6 +2261,34 @@ class LLMWorker(TaskWorker):
         if "request_context" in parameters:
             kwargs["request_context"] = request_context or {}
         return provider.chat_stream(messages, **kwargs)
+
+    def _document_review_provider(self):
+        """A separate transport with the same selected model and authorization.
+
+        Office image batches must not share the main dialogue's active stream,
+        replay history, or request snapshot. No model is selected implicitly.
+        """
+        provider = LLMFactory.create_provider(self.config_manager,
+            self.run_context.get('selected_model_id'),
+            reasoning_effort=self.run_context.get('reasoning_effort') or None,
+            model_profile=self.run_context.get('selected_model_profile'))
+        provider.data_security_run = self.data_security_run
+        from core.team_spaces import resolve_run_binding, bind_space_provider
+        binding = resolve_run_binding(self.chat_storage, self.conversation_id, self.run_context)
+        if binding:
+            if os.path.normcase(os.path.realpath(self.workspace_dir or '')) != os.path.normcase(os.path.realpath(binding['workspace_dir'])):
+                provider.client.close()
+                raise RuntimeError('空间任务目录与原会话不一致，未启动审稿。')
+            provider = bind_space_provider(provider, binding,
+                self.run_context.get('selected_model_profile') or self.config_manager.get_model_profile(self.run_context.get('selected_model_id')),
+                client=getattr(self, '_team_space_client', None))
+        capability = getattr(self, '_enterprise_capability_runtime', None)
+        if capability is not None:
+            provider.enterprise_capability_guard = capability.check
+            provider.client = provider.client.with_options(max_retries=0)
+            provider.enterprise_replay_scope = (getattr(provider, 'enterprise_replay_scope', '')
+                + ':capabilities:' + self._enterprise_capability_scope)
+        return provider
 
     def _generate_context_checkpoint(self, provider, messages, rollover_id, part, retries, output_limit):
         """A separate, tool-free request. Never becomes assistant dialogue or replay."""
@@ -4433,6 +4461,12 @@ class LLMWorker(TaskWorker):
                                 "run_context": json_copy(self.run_context, {}),
                                 "model_api_protocol": getattr(provider, "api_protocol", ""),
                                 "model_supports_vision": bool(getattr(provider, "supports_vision", False)),
+                                "document_review_provider": self._document_review_provider,
+                                "document_review_attempt": self._record_provider_attempt,
+                                "document_review_audit": self._enterprise_chat_audit.capture,
+                                "document_review_audit_version": 1 if self._enterprise_chat_audit.enterprise_negotiated else 0,
+                                "run_id": self.request_id or self.turn_id or self.session_id,
+                                "turn_id": self.turn_id,
                                 "discovered_tool_names": self.discovered_tool_names,
                             }
                             if missing_tool_name:

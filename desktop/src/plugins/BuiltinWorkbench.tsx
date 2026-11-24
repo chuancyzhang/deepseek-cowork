@@ -12,7 +12,7 @@ import {activeReview} from '../reviews';
 import HistoryEditor from '../HistoryEditor';
 import Dialog from '../Dialog';
 import OfficeEditor from '../OfficeEditor';
-import FilePreview from '../FilePreview';
+import FilePreview, {SpreadsheetWorkspace} from '../FilePreview';
 import MoreActions, {type MenuAction} from '../MoreActions';
 import {FileHistoryPanel, ChangesPanel, WorkspaceDiff} from '../WorkspaceChanges';
 import {pathKey} from '../projects';
@@ -357,7 +357,7 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
           {editor && fileChanged && <div className="file-update-notice" role="status">文件已更新<button className="text-link" onClick={() => void reloadFile()}>刷新</button></div>}
           {editor?.file.payload.recovery_available && editor.text !== editor.saved && <div className="file-update-notice" role="status">上次未保存的编辑已恢复。请保存恢复副本，再用本机应用继续编辑。</div>}
           {editor && (editor.file.conflict || editor.file.unavailable) && <div className="run-error">原文件已变化或暂时无法打开。当前编辑仍保留，可以复制内容或<button className="secondary" onClick={() => void saveCopy()}>另存副本</button>。</div>}
-          {editor ? <PluginSlot kind="editor" target={editor.file.payload.editor_target || editor.file.payload.kind} scope={{conversationId:current?.id,filePath:editor.file.path}}>{(['preview', 'html'].includes(editor.file.payload.kind) ? <FilePreview key={editor.file.id} cid={current!.id} toolbar={!showingDiff && fileTools} file={editor.file} text={editor.text} change={text => changeEditor(editor.file.path, text)} register={registerEditorFlush}/> : editor.file.payload.kind !== 'text' ? <OfficeEditor key={editor.file.id} file={editor.file} text={editor.text} onChange={text => changeEditor(editor.file.path, text)} error={error} register={registerEditorFlush}/> : <Suspense fallback={<div className="loading">正在载入编辑器…</div>}><CodeEditor key={current.id + ":" + editor.file.path} cid={current.id} file={editor.file} text={editor.text} saved={editor.saved} change={text => changeEditor(editor.file.path,text)} save={async () => {await saveEditor(editor.file.path);}}/></Suspense> )}</PluginSlot> : <div className="empty-workspace">选择一个文件开始查看。</div>}
+          {editor ? <PluginSlot kind="editor" target={editor.file.payload.editor_target || editor.file.payload.kind} scope={{conversationId:current?.id,filePath:editor.file.path}}>{(['preview', 'html'].includes(editor.file.payload.kind) ? <FilePreview key={editor.file.id} cid={current!.id} toolbar={!showingDiff && fileTools} file={editor.file} text={editor.text} change={text => changeEditor(editor.file.path, text)} register={registerEditorFlush}/> : editor.file.payload.kind === 'sheet' ? <SpreadsheetWorkspace key={editor.file.id} cid={current!.id} file={editor.file} text={editor.text} onChange={text => changeEditor(editor.file.path, text)} error={error} register={registerEditorFlush}/> : editor.file.payload.kind !== 'text' ? <OfficeEditor key={editor.file.id} file={editor.file} text={editor.text} onChange={text => changeEditor(editor.file.path, text)} error={error} register={registerEditorFlush}/> : <Suspense fallback={<div className="loading">正在载入编辑器…</div>}><CodeEditor key={current.id + ":" + editor.file.path} cid={current.id} file={editor.file} text={editor.text} saved={editor.saved} change={text => changeEditor(editor.file.path,text)} save={async () => {await saveEditor(editor.file.path);}}/></Suspense> )}</PluginSlot> : <div className="empty-workspace">选择一个文件开始查看。</div>}
           </div>
         </>}/></PluginSlot>}
 

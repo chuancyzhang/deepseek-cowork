@@ -310,13 +310,58 @@ class _TaskCancellation:
         return self.event.wait(timeout) or self.is_set()
 
 
-def document_render(workspace_dir, path, pages=None, source_version=None, _context=None):
+def document_copy(workspace_dir, path, _context=None):
+    """Create a new task copy; never provide an original-overwrite operation."""
+    from core.document_preview import source_bytes
+    context=_context or {}
+    session=str(context.get('session_id') or context.get('conversation_id') or '')
+    run=str(context.get('run_id') or '')
+    try:
+        if not session or not run: raise ValueError('缺少任务或会话，无法创建修改稿。')
+        source,display,error=resolve_path(workspace_dir,path,context=context,action='document_copy',must_exist=True)
+        if error: return error
+        if os.path.splitext(source)[1].lower() not in SUPPORTED_EXTENSIONS: raise ValueError('此工具仅为 Office/PDF 创建任务副本。')
+        if _TaskCancellation(context).is_set(): raise ValueError('任务已停止，未创建修改稿。')
+        data=source_bytes(source)
+        version=hashlib.sha256(data).hexdigest()
+        task=hashlib.sha256((session+'\0'+run+'\0'+os.path.normcase(source)+'\0'+version).encode()).hexdigest()[:32]
+        folder,_,error=resolve_path(workspace_dir,'.cowork/office-drafts/'+task,context={},action='document_copy',for_write=True)
+        if error: return error
+        os.makedirs(folder,exist_ok=True)
+        name,extension=os.path.splitext(os.path.basename(source))
+        target=os.path.join(folder,name+'-修改稿'+extension)
+        if os.path.normcase(os.path.realpath(target))!=os.path.normcase(os.path.abspath(target)):
+            raise ValueError('修改稿路径包含重定向，未写入文件。')
+        existed=os.path.exists(target)
+        if not existed:
+            # Publish only a complete copy, without replacing another call's file.
+            fd,temporary=tempfile.mkstemp(prefix='.copy-',dir=folder)
+            try:
+                with os.fdopen(fd,'wb') as handle:
+                    handle.write(data);handle.flush();os.fsync(handle.fileno())
+                try:
+                    if os.name=='nt': os.rename(temporary,target)  # Windows rename is exclusive, including FAT/SMB.
+                    else: os.link(temporary,target)
+                except FileExistsError: existed=True
+            finally:
+                if os.path.exists(temporary): os.unlink(temporary)
+        LOGGER.info('document_copy stage=completed session_id=%s run_id=%s version=%s reused=%s',session,run,version[:12],existed)
+        return _build_ok('document_copy',{'path':os.path.relpath(target,workspace_dir).replace('\\','/'),
+            'source_version':version,'reused':existed,'content':'继续修改此任务副本。原件未写入；默认另存流程不等于操作系统写入隔离。'})
+    except Exception as exc:
+        LOGGER.warning('document_copy stage=failed session_id=%s run_id=%s reason=%s',session,run,type(exc).__name__)
+        return _build_error('document_copy',getattr(exc,'code','copy_failed'),str(exc)[:500])
+
+
+def document_render(workspace_dir, path, pages=None, source_version=None, renderer='auto', review=False,
+                    constraints='', review_kind='details', excel_options=None, _context=None):
     """Create bounded page images for view_image without changing the document."""
-    from core.document_preview import render_document_pages
+    from core.document_preview import render_document_pages, session_preview_root
     context = _context or {}
     session = str(context.get("session_id") or context.get("conversation_id") or "")
     trace = f"session_id={session} tool_call_id={context.get('tool_call_id', '')}"
     output = None
+    preserve_evidence = False
     LOGGER.info("document_render stage=start %s pages=%s", trace, pages or "first-batch")
     try:
         if not session:
@@ -326,6 +371,12 @@ def document_render(workspace_dir, path, pages=None, source_version=None, _conte
         if error:
             LOGGER.warning("document_render stage=failed %s reason=%s", trace, error.get("error"))
             return error
+        if type(review) is not bool:
+            raise ValueError('review 必须为布尔值。')
+        timeout = 120
+        if review:
+            from core.document_review import begin_review
+            timeout = min(timeout,begin_review(context))
         session_key = hashlib.sha256(session.encode("utf-8")).hexdigest()[:24]
         # No caller-supplied output path, and no junction/symlink traversal.
         destination, _, error = resolve_path(workspace_dir, f".cowork/document-previews/{session_key}",
@@ -333,21 +384,37 @@ def document_render(workspace_dir, path, pages=None, source_version=None, _conte
         if error:
             LOGGER.warning("document_render stage=failed %s reason=%s", trace, error.get("error"))
             return error
+        if review:
+            destination = str(session_preview_root(session) / 'evidence')
         cancelled = _TaskCancellation(context)
         if cancelled.is_set():
             LOGGER.info("document_render stage=cancelled %s", trace)
             return _build_error("document_render", "cancelled", "已停止页面渲染，源文件未修改。")
         os.makedirs(destination, exist_ok=True)
         output = tempfile.mkdtemp(prefix="pages-", dir=destination)
-        result = render_document_pages(source, output, pages=pages, source_version=source_version, cancel=cancelled)
+        result = render_document_pages(source, output, pages=pages, source_version=source_version, cancel=cancelled,
+            renderer=renderer, pdf_root=session_preview_root(session) / 'pdf',timeout=timeout,kind=review_kind,excel_options=excel_options)
+        check = None
+        if review:
+            from core.document_review import review_rendered_batch
+            preserve_evidence = True
+            check = review_rendered_batch(source, result, output, {**context, 'abort_check': cancelled.is_set},
+                constraints=constraints, kind=review_kind)
+            if check.get('reused'):
+                shutil.rmtree(output)
         for page in result["pages"]:
-            page["path"] = os.path.relpath(os.path.join(output, page.pop("file")), workspace_dir).replace("\\", "/")
+            filename = page.pop('file')
+            if not review:
+                page['path'] = os.path.relpath(os.path.join(output, filename), workspace_dir).replace('\\', '/')
+        result.pop('pdf_path', None)
         LOGGER.info("document_render stage=completed %s version=%s pages=%s", trace, result["source_version"][:12], len(result["pages"]))
         return _build_ok("document_render", {"path": display_path, **result,
-            "content": "页面图片已生成；请调用 view_image 检查所需页面。生成成功不代表已完成排版检查。"})
+            **({'visual_review': check} if review else {}),
+            "content": ('页面图片与检查记录已保存。以 visual_review 的实际覆盖、问题和未查页为准；原图不进入主对话。'
+                if review else '页面图片已生成；可用 review=true 发起独立视觉检查。生成成功不代表已检查。')})
     except Exception as exc:
         cleanup_error = ""
-        if output:
+        if output and not preserve_evidence:
             try:
                 shutil.rmtree(output)
             except OSError:
@@ -373,12 +440,27 @@ TOOL_EXPORTS = [{
     "read_only": True, "search_hint": "read docx pptx xlsx xls pdf office document structured batch range",
 }, {
     "name": "document_render", "handler": document_render,
-    "description": "Render DOCX/PPTX/PDF to at most four page images for view_image. Does not edit source. Office needs LibreOffice. Return source_version on later batches; inspect images before claiming layout verified.",
+    "description": "Render Office/PDF pages without editing the source. review=true sends at most 4 images to a separate visual request and returns verified page coverage and findings, without images in chat history. Local Office/WPS or LibreOffice is required for Office. Keep source_version, renderer and exact layout constraints on later batches. Review budgets span all files and versions in the run; stop on a budget limit and deliver the latest draft with remaining issues.",
     "parameters": {"type": "object", "properties": {
         "path": {"type": "string", "description": "Document path; relative to current workspace or an authorized absolute path."},
-        "pages": {"type": "string", "description": "One-based page/range, e.g. '2-4'; at most 4 pages. Default first batch."},
+        "pages": {"type": "string", "description": "One-based pages/ranges, e.g. '2-4' or '1,8,16,24'; at most 4 details or 24 overview pages. Overview default samples across the entire document."},
         "source_version": {"type": "string", "description": "Source hash returned by an earlier batch; rejects changed documents."},
+        'renderer': {'type': 'string', 'enum': ['auto', 'office', 'wps', 'libreoffice'], 'description': 'Choose once per task. A failed selected renderer is never silently replaced.'},
+        'review': {'type': 'boolean', 'description': 'Use true for independent visual review; false only renders images.'},
+        'constraints': {'type': 'string', 'description': 'Short exact layout requirements, including fonts, sizes, colors, template and exceptions. Repeat unchanged across batches.'},
+        'review_kind': {'type': 'string', 'enum': ['details', 'overview'], 'description': 'details checks legibility and clipping; overview checks consistency and does not count as detail coverage.'},
+        'excel_options': {'type':'object','properties':{
+            'mode':{'type':'string','enum':['region','print']},'sheet':{'type':'string'},
+            'range':{'type':'string','description':'A1:R80; omit for used cells.'},
+            'header_rows':{'type':'string','description':'Optional repeated header rows, e.g. 1:2. Omit to retain existing print title rows.'},
+            'identity_columns':{'type':'string','description':'Explicit row identity columns repeated on each slice, e.g. A:B. Omit if none.'}},'required':['mode'],
+            'description':'Excel region reading splits wide tables before rasterization; print preserves original pagination. Defaults to original print if omitted.'},
     }, "required": ["path"]},
     "read_only": True, "destructive": False,
     "search_hint": "render inspect docx pptx pdf page slide layout PNG 文档 页面 幻灯片 排版 检查",
+}, {
+    'name':'document_copy','handler':document_copy,
+    'description':'Create or reuse an Office/PDF task copy before editing an existing file. Only writes a new application-chosen draft path; never overwrites the original or an existing edited copy. This is a default workflow, not an OS write sandbox.',
+    'parameters':{'type':'object','properties':{'path':{'type':'string','description':'Source document path.'}},'required':['path']},
+    'read_only':False,'destructive':False,'search_hint':'office draft copy preserve original 修改稿 副本',
 }]

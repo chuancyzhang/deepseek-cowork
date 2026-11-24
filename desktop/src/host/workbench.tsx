@@ -735,6 +735,7 @@ export function useWorkbenchController() {
     try {
       const file = await call<FileSession>('file.open', {conversation_id: id, path: item.file.path});
       if (selectedId.current !== id) return;
+      file.payload.manual_preview_refresh=crypto.randomUUID();
       const text = file.payload.text ?? file.payload.content ?? '';
       setEditors(previous => previous.map(editor => editor.file.path === item.file.path ? {...editor, file, text, saved: text} : editor));
       setFileChanged(false);

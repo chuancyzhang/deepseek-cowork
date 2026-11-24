@@ -18,6 +18,8 @@ import threading
 import time
 from unittest.mock import patch
 
+os.environ['COWORK_APP_DATA_DIR']=str(QA_ROOT/'appdata')
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from core import document_preview
@@ -147,5 +149,127 @@ def run():
         holder.stdin.close(); holder.stdout.close()
 
 
+def run_edits(paths):
+    """Opt-in real-file copy/edit/refresh; originals and old PDFs must survive."""
+    import importlib.util
+    import hashlib
+    from pypdf import PdfReader
+    from docx import Document
+    from openpyxl import load_workbook
+    from pptx import Presentation
+    from pptx.chart.data import CategoryChartData
+    spec=importlib.util.spec_from_file_location('office_edit_smoke_tools',ROOT/'skills/documents/impl.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    workspace=QA_ROOT/'editing';workspace.mkdir(parents=True,exist_ok=True)
+    # Input fixtures are copied to the isolated workspace before using the same
+    # application-owned task-copy handler as an agent. No external write access.
+    import shutil
+    for index,path in enumerate(paths):
+        source=Path(path).resolve();original=source.read_bytes()
+        imported=workspace/source.name;shutil.copyfile(source,imported)
+        context={'session_id':'edit-smoke','run_id':'edit-'+str(time.time_ns())}
+        result=module.document_copy(str(workspace),str(imported),context)
+        assert result['ok'],result
+        draft=workspace/result['path'];cache=workspace/'pdf';cache.mkdir(exist_ok=True)
+        before,old_version=document_preview.render_office_pdf(draft,root=cache,renderer='office')
+        old_pdf=Path(before).read_bytes()
+        marker='修改验证'
+        if draft.suffix=='.docx':
+            document=Document(draft);document.paragraphs[0].add_run(' · '+marker)
+            document.add_paragraph(marker+'：补充一条交付说明，保留原有正文、表格和样式。');document.save(draft)
+            assert marker in Document(draft).paragraphs[0].text
+        elif draft.suffix=='.xlsx':
+            book=load_workbook(draft);sheet=book.worksheets[0]
+            sheet['A3']=marker+'项目';sheet['C3']=7;sheet['D3']=123;sheet['E3']='=C3*D3';book.save(draft);book.close()
+            check=load_workbook(draft);assert check.worksheets[0]['E3'].value=='=C3*D3';check.close()
+        elif draft.suffix=='.pptx':
+            deck=Presentation(draft)
+            shape=next(shape for shape in deck.slides[0].shapes if shape.has_text_frame)
+            shape.text_frame.paragraphs[0].add_run().text=' · '+marker
+            for slide in deck.slides:
+                for shape in slide.shapes:
+                    if shape.has_chart:
+                        data=CategoryChartData();data.categories=['第一阶段','第二阶段','第三阶段'];data.add_series('更新预算',[12,18,24]);shape.chart.replace_data(data)
+            deck.save(draft)
+            assert any(marker in shape.text for shape in Presentation(draft).slides[0].shapes if shape.has_text_frame)
+        else: raise ValueError('Pass DOCX, XLSX and PPTX inputs')
+        reused=module.document_copy(str(workspace),str(imported),context)
+        assert reused['reused'] and reused['path']==result['path']
+        after,new_version=document_preview.render_office_pdf(draft,root=cache,renderer='office')
+        pages=PdfReader(after).pages;text=''.join(page.extract_text() for page in pages).replace(' ','')
+        assert marker in text,(draft,text[:1000])
+        if draft.suffix=='.xlsx': assert '861' in text,text[:1000]
+        assert before!=after and old_version!=new_version
+        assert Path(before).read_bytes()==old_pdf and source.read_bytes()==original and imported.read_bytes()==original
+        output=workspace/('edited-'+draft.suffix[1:]);output.mkdir(exist_ok=True)
+        document_preview.render_document_pages(after,output)
+        print(json.dumps({'type':draft.suffix,'original_unchanged':True,'draft_reused_without_overwrite':True,
+            'preview_version_changed':True,'old_preview_unchanged':True,'pages':len(pages),'pdf':after},ensure_ascii=False),flush=True)
+
+
+def run_office_guards():
+    from docx import Document
+    from openpyxl import Workbook
+    from core.office_renderers import native_state
+    for family,progid in [('word','Word.Application'),('excel','Excel.Application')]:
+        root=QA_ROOT/family;root.mkdir(exist_ok=True)
+        cache=root/'cache';cache.mkdir(exist_ok=True)
+        source=root/('guard.docx' if family=='word' else 'guard.xlsx')
+        if family=='word':
+            document=Document();document.add_paragraph('Office guard conversion');document.save(source)
+            create="$doc=$app.Documents.Add();$doc.Content.Text='UNSAVED GUARD'"
+            fields="count=$app.Documents.Count;text=$doc.Content.Text;links=[bool]$app.Options.UpdateLinksAtOpen"
+        else:
+            book=Workbook();book.active['A1']='Office guard conversion';book.save(source)
+            create="$doc=$app.Workbooks.Add();$doc.Worksheets.Item(1).Range('A1').Value2='UNSAVED GUARD'"
+            fields="count=$app.Workbooks.Count;text=$doc.Worksheets.Item(1).Range('A1').Value2;events=[bool]$app.EnableEvents"
+        script=f"""$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
+$app=$null;$doc=$null
+try{{$app=[Activator]::CreateInstance([Type]::GetTypeFromProgID('{progid}'));{create}
+while($true){{[Console]::Out.WriteLine((@{{saved=[bool]$doc.Saved;alerts=[int]$app.DisplayAlerts;security=[int]$app.AutomationSecurity;{fields}}}|ConvertTo-Json -Compress));[Console]::Out.Flush();if([Console]::In.ReadLine() -ne 'state'){{break}}}}
+}}catch{{[Console]::Out.WriteLine('GUARD_ERROR: '+$_.Exception.Message+' '+$_.InvocationInfo.PositionMessage)}}finally{{if($doc){{$doc.Close($false);[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($doc)}};if($app){{[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($app)}}}}
+"""
+        holder=subprocess.Popen([str(Path(os.environ['SystemRoot'])/'System32/WindowsPowerShell/v1.0/powershell.exe'),'-NoProfile','-NonInteractive','-STA','-EncodedCommand',base64.b64encode(script.encode('utf-16-le')).decode()],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,**subprocess_kwargs_no_window())
+        states=queue.Queue()
+        def reader():
+            for line in iter(holder.stdout.readline,b''):states.put(line.decode('utf-8').strip())
+        reader_thread=threading.Thread(target=reader,daemon=True);reader_thread.start()
+        def read_state(initial=False):
+            if not initial: holder.stdin.write(b'state\n');holder.stdin.flush()
+            message=states.get(timeout=20)
+            try:return json.loads(message)
+            except ValueError as exc:raise AssertionError('Office guard holder: '+message) from exc
+        try:
+            baseline=read_state(True);assert not baseline['saved'] and 'UNSAVED GUARD' in baseline['text']
+            document_preview.render_office_pdf(source,root=cache,renderer='office',force=True)
+            assert read_state()==baseline
+            marker=root/'opened';marker.unlink(missing_ok=True)
+            injection="        $stage = 'export'\n        Assert-Active"
+            delayed=document_preview._OFFICE_SCRIPT.replace(injection,"        [IO.File]::WriteAllText('"+str(marker).replace("'","''")+"','opened')\n        Start-Sleep -Seconds 2\n"+injection)
+            cancel=threading.Event()
+            def stop():wait(marker.exists,30);cancel.set()
+            trigger=threading.Thread(target=stop);trigger.start()
+            try:
+                with patch.object(document_preview,'_OFFICE_SCRIPT',delayed):
+                    document_preview.render_office_pdf(source,root=cache,renderer='office',force=True,cancel=cancel)
+                raise AssertionError('cancel returned success')
+            except WorkbenchError as exc: assert exc.code=='cancelled',exc
+            finally: trigger.join(30)
+            assert native_state(family)['state']=='busy'
+            wait(lambda:native_state(family)['state']=='ready',30)
+            assert read_state()==baseline
+            print('PASS '+family+' render/cancellation preserves unsaved guard and settings; blocked reuse recovers after cleanup',flush=True)
+        finally:
+            if holder.poll() is None: holder.stdin.write(b'close\n');holder.stdin.flush()
+            holder.wait(timeout=20);reader_thread.join(5);holder.stdin.close();holder.stdout.close()
+
+
 if __name__ == "__main__":
-    run()
+    import argparse
+    parser=argparse.ArgumentParser();parser.add_argument('--edit-documents',nargs='+',type=Path)
+    arguments=parser.parse_args()
+    if arguments.edit_documents: run_edits(arguments.edit_documents)
+    else:
+        run()
+        run_office_guards()

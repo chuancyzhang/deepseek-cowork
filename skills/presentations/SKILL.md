@@ -8,7 +8,7 @@ default_enabled: true
 metadata:
   author: deepseek-cowork team
   version: "1.0"
-allowed-tools: [document_read, document_render, run_python_code, view_image, review_draft]
+allowed-tools: [document_read, document_render, document_copy, run_python_code, view_image, review_draft]
 ---
 
 # 演示文稿
@@ -24,11 +24,11 @@ allowed-tools: [document_read, document_render, run_python_code, view_image, rev
 - 文字、表格、形状与支持的图表保持可编辑，不默认把整页做成图片。图表复用 data-analysis 核验的同一份结果，单位与范围一致。
 - 图片保持比例，不裁掉证据；生成的说明图不能冒充真实事件照片。标识使用原素材。
 - 来源放相关页或备注，影响观众判断的假设与限制留在页面。
-- 编辑已有稿件保留原件，限定修改范围，保持其他页面及模板元素。动画、媒体、SmartArt 和嵌入对象需要专项验证，不能承诺无损。
+- 编辑已有稿件先用 document_copy 创建任务副本，限定修改范围，保持其他页面及模板元素。该流程不等于系统写入隔离。动画、媒体、SmartArt 和嵌入对象需要专项验证，不能承诺无损。
 
 ## 检查与交付
 
-重新打开 PPTX，检查页数、顺序、关键内容、数值和可编辑性。用 document_render 分批生成页面，再用 view_image 检查；续批携带相同 source_version。
+重新打开 PPTX，检查页数、顺序、关键内容、数值和可编辑性。用 document_render(review=true, constraints=...) 独立审图，每批最多 4 页；续批携带相同 source_version、renderer 和精确版式约束。长稿先 overview，再检查改动页、复杂页和分布抽样页；总览不计入细节全查。按 documents 的共享预算预留复查，初稿后最多修改两轮，预算到达时交付最新稿并列出未查范围。原图保留在检查记录，不反复加入主对话。
 
 新稿检查全部页，局部编辑检查相关页，整体布局变化重新完整检查。重点看中文换行、缺字、字号、遮挡、图片比例、图例和标签。对象坐标检查不能替代实际页面检查；拥挤时先改内容或布局，不一味缩小字体。
 

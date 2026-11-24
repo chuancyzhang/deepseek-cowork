@@ -82,7 +82,7 @@ def test_office_preview_job_is_read_only_versioned_and_conversation_scoped(tmp_p
     import hashlib
     import pytest
     from core.desktop_workbench import DesktopFiles
-    from core import document_preview, libreoffice_component
+    from core import document_preview, libreoffice_component, office_renderers
     source = tmp_path / 'slides.pptx'
     source.write_bytes(b'original')
     rendered = tmp_path / 'cache.pdf'
@@ -91,17 +91,20 @@ def test_office_preview_job_is_read_only_versioned_and_conversation_scoped(tmp_p
     jobs = SimpleNamespace(submit=Mock(return_value={'job_id': 'preview'}), get=Mock())
     files = DesktopFiles(storage, None, jobs)
     monkeypatch.setattr(libreoffice_component, 'status', lambda: {'available': True})
+    monkeypatch.setattr(office_renderers,'renderer_catalog',lambda family:{'candidates':[{'id':'office','name':'Microsoft PowerPoint','available':True,'state':'ready'}]})
     before = source.read_bytes()
     opened = files.dispatch('file.open', {'conversation_id': 'a', 'path': str(source)})
     assert opened['payload']['preview_kind'] == 'office'
     assert opened['payload']['read_only'] and opened['payload']['office_family'] == 'powerpoint'
     convert = Mock(return_value=(str(rendered), opened['fingerprint']))
     monkeypatch.setattr(document_preview, 'render_office_pdf', convert)
+    monkeypatch.setattr(document_preview, 'preview_diagnostics', lambda source,pdf:[])
     files.dispatch('file.render', {'conversation_id': 'a', 'path': str(source), 'fingerprint': opened['fingerprint']})
     import threading
     operation = jobs.submit.call_args.args[1]
     result = operation(threading.Event(), Mock())
-    assert convert.call_args.kwargs['renderer'] == 'libreoffice'
+    assert convert.call_args.kwargs['renderer'] == 'office'
+    assert convert.call_args.kwargs['root']==document_preview.session_preview_root('a')/'pdf'
     jobs.get.return_value = {'id': 'preview', 'status': 'completed', 'result': result}
     ready = files.dispatch('file.render_result', {'conversation_id': 'a', 'job_id': 'preview'})
     assert ready['path'] == str(source)

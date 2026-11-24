@@ -680,6 +680,9 @@ class OpenAIProvider(LLMProvider):
             )
             params[output_parameter] = int(request_context["max_output_tokens"])
         _guard_provider_request(self)
+        validate = request_context.get('validate_request')
+        if callable(validate):
+            validate('chat_completions', params)
         capture_provider_request(params, "chat_completions", request_context)
         stream = self._create_chat_completion_stream(params)
         if not _register_provider_stream(request_context, stream):
@@ -900,6 +903,9 @@ class OpenAIProvider(LLMProvider):
         if request_context.get("max_output_tokens"):
             params["max_output_tokens"] = int(request_context["max_output_tokens"])
         _guard_provider_request(self)
+        validate = request_context.get('validate_request')
+        if callable(validate):
+            validate('responses', params)
         capture_provider_request(params, "responses", request_context)
         stream = self.client.responses.create(**params)
         if not _register_provider_stream(request_context, stream):
@@ -1662,6 +1668,9 @@ class AnthropicProvider(LLMProvider):
         if (request_context or {}).get("max_output_tokens"):
             kwargs["max_tokens"] = int(request_context["max_output_tokens"])
         _guard_provider_request(self)
+        validate = (request_context or {}).get('validate_request')
+        if callable(validate):
+            validate('anthropic', kwargs)
         capture_provider_request(kwargs, "anthropic", request_context)
         with self.client.messages.stream(**kwargs) as stream:
             if not _register_provider_stream(request_context, stream):

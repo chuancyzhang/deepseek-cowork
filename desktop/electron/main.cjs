@@ -11,7 +11,7 @@ const { FileHost } = require('./files.cjs');
 const fileHost = new FileHost();
 const { resolveDataDirectory } = require('./data-path.cjs');
 const {prepareInstall,commitInstall,startupRequest,UpdateStartup} = require('./updates.cjs');
-protocol.registerSchemesAsPrivileged([{ scheme: 'cowork-local', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }, require('./plugins.cjs').PLUGIN_SCHEME, { scheme: 'cowork-editor', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
+protocol.registerSchemesAsPrivileged([{ scheme: 'cowork-local', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } }, require('./plugins.cjs').PLUGIN_SCHEME, { scheme: 'cowork-editor', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
 const visualizationPages = new Map();
 const {SnippetHost} = require('./snippets.cjs');
 const snippetHost = new SnippetHost({diagnostic:(event,details)=>{
@@ -43,7 +43,7 @@ allowed.add('task.inspect');
 allowed.add('task.output');
 allowed.add('updates.abort_install');
 allowed.add('task.context');
-for (const method of ['file.render', 'file.render_result', 'file.install_renderer']) allowed.add(method);
+for (const method of ['file.render', 'file.render_result', 'file.renderers', 'file.review_records', 'file.review_image', 'file.install_renderer']) allowed.add(method);
 for (const method of ['reviews.create', 'reviews.list', 'reviews.get', 'reviews.update', 'reviews.generate', 'reviews.open', 'reviews.save', 'reviews.rebase']) allowed.add(method);
 allowed.add('host.recovery.get'); allowed.add('host.recovery.save');
 for (const method of ['modes.list', 'modes.enable', 'creation.candidate']) allowed.add(method);
@@ -202,7 +202,7 @@ else {
     ipcMain.handle('cowork:call', async (event, method, params = {}) => {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame.url !== entry) throw new Error('无效的界面连接。');
       if (typeof method !== 'string' || typeof params !== 'object' || params === null) throw new Error('无效请求。');
-      if (['file.open', 'file.save_copy', 'workspace.create', 'file.render_result', 'file.preview', 'reviews.open'].includes(method)) return fileHost.register(await backend.call(method, params));
+      if (['file.open', 'file.save_copy', 'workspace.create', 'file.render_result', 'file.review_image', 'file.preview', 'reviews.open'].includes(method)) return fileHost.register(await backend.call(method, params));
       if (method === 'library.read_result' || (['library.read', 'library.edit_open'].includes(method) && params.source === 'local')) return fileHost.register(await backend.call(method, params));
       if (method === 'project.open_folder') {
         const folder = await backend.call('project.folder', params);

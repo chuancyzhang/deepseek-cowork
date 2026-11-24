@@ -211,18 +211,23 @@ class ExecutionAuthorizationTests(unittest.TestCase):
 
     def test_approved_python_bypasses_old_ast_filter(self):
         import importlib.util
+        import io
         path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills", "python-runner", "impl.py")
         spec = importlib.util.spec_from_file_location("authorization_python", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         process = Mock()
-        process.communicate.return_value = (b"ok", b"")
+        process.stdout=io.BytesIO(b'ok')
+        process.stderr=io.BytesIO(b'')
+        process.stdin=None
+        process.poll.return_value=0
         process.returncode = 0
         manager = self.manager("run_python_code", module.run_python_code)
         with self.approve(), patch.object(module, "run_in_sandbox", return_value=process), patch.object(module, "get_runtime_executable", return_value="python"):
             result = manager.call_tool("run_python_code", {"code": "import ctypes\nprint('C:/outside')"}, self.context)
         self.assertNotIn("Security Alert", str(result))
-        process.communicate.assert_called()
+        self.assertIn('ok',str(result))
+        self.assertNotIn('日志保存失败',str(result))
 
     def test_existing_delete_confirmation_is_preserved_only_when_needed(self):
         for god in (False, True):

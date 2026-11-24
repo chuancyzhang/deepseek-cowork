@@ -38,6 +38,7 @@
   "tool_refs": [
     "document_read",
     "document_render",
+    "document_copy",
     "run_python_code",
     "view_image",
     "review_draft"

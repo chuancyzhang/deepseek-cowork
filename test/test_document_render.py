@@ -84,6 +84,25 @@ class DocumentRenderTests(unittest.TestCase):
         self.assertEqual(self.source.read_bytes(), self.original)
         self.assertEqual(list((self.workspace / ".cowork/document-previews").glob("*/*")), [])
 
+    def test_noncontiguous_details_and_overview_cover_the_whole_document(self):
+        result=self.render(pages='1,5')
+        self.assertTrue(result['ok'],result)
+        self.assertEqual([page['page'] for page in result['pages']],[1,5])
+        overview=self.render(review_kind='overview')
+        self.assertTrue(overview['ok'],overview)
+        self.assertEqual(overview['pages'][0]['page_numbers'],[1,2,3,4,5])
+        self.assertEqual(overview['pages'][0]['width'],2000)
+        self.assertEqual(self.source.read_bytes(),self.original)
+
+    def test_font_diagnostics_report_unembedded_and_missing_declared_fonts(self):
+        from docx import Document
+        source=self.workspace/'font.docx'
+        document=Document();document.add_paragraph().add_run('font check').font.name='CoworkMissingFontFixture';document.save(source)
+        with patch('core.system_fonts.installed_font_families',return_value=['Arial']):
+            warnings=document_preview.preview_diagnostics(source,self.source)
+        self.assertTrue(any('未嵌入' in warning for warning in warnings))
+        self.assertTrue(any('CoworkMissingFontFixture' in warning for warning in warnings))
+
     def test_worker_cancellation_timeout_and_source_change_are_errors(self):
         out = self.workspace / "out"
         out.mkdir()

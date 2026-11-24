@@ -1848,6 +1848,12 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
             conn.execute("DELETE FROM im_sessions WHERE conversation_id = ?", (conversation_id,))
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
         try:
+            from .document_preview import delete_session_previews
+            delete_session_previews(conversation_id)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('document_preview.cleanup_failed session=%s',conversation_id)
+        try:
             from .data_security import delete_scope
             delete_scope(conversation_id)
         except Exception as exc:

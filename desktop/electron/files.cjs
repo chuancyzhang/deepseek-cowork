@@ -44,6 +44,8 @@ class FileHost {
       const response = await fetch(pathToFileURL(target).href, { headers: request.headers });
       const headers = new Headers(response.headers);
       headers.set('Content-Type', 'application/pdf');
+      // Read-only, unguessable file grants are also consumed by the local PDF.js reader.
+      headers.set('Access-Control-Allow-Origin', '*');
       headers.set('X-Content-Type-Options', 'nosniff');
       return new Response(response.body, { status: response.status, headers });
     }

@@ -192,7 +192,7 @@ class DesktopWorkbench:
 
 class DesktopFiles:
     methods = frozenset(['workspace.list', 'workspace.changes', 'workspace.diff', 'workspace.file_history', 'workspace.attach', 'workspace.attach_data', 'workspace.create', 'file.describe', 'file.open', 'file.save', 'file.save_copy',
-                         'file.render', 'file.render_result', 'file.install_renderer', 'file.preview'])
+                         'file.render', 'file.render_result', 'file.renderers', 'file.review_records', 'file.review_image', 'file.install_renderer', 'file.preview'])
 
     def __init__(self, storage, config, jobs=None):
         self.storage, self.config = storage, config
@@ -217,19 +217,37 @@ class DesktopFiles:
             self.workspace(cid)
             from core.libreoffice_component import install
             return self.jobs.submit("安装 LibreOffice", install)
+        if method == 'file.renderers':
+            from core.document_preview import OFFICE_FAMILIES
+            from core.office_renderers import renderer_catalog
+            path = self.preview_file(cid, p['path'])
+            return renderer_catalog(OFFICE_FAMILIES.get(path.suffix.lower()))
+        if method in {'file.review_records', 'file.review_image'}:
+            from core.document_review import read_reviews, review_image
+            root = self.workspace(cid)
+            source = Path(p['path'])
+            source = (root / source).resolve() if not source.is_absolute() else source.resolve()
+            if method == 'file.review_records':
+                return read_reviews(cid, source, fingerprint=p.get('fingerprint'), configuration=p.get('configuration'))
+            image = review_image(cid, source, str(p.get('batch_id') or ''), str(p.get('sha256') or ''))
+            return {'id': uuid.uuid4().hex, 'path': str(image), 'name': '检查时的页面.png', 'fingerprint': p['sha256'],
+                'payload': {'kind': 'preview', 'preview_kind': 'image', 'read_only': True}}
         if method == "file.render":
-            from core.document_preview import render_office_pdf
+            from core.document_preview import render_office_pdf, session_preview_root, preview_diagnostics
+            from core.office_renderers import select_renderer
+            from core.document_preview import OFFICE_FAMILIES
             from core.deliverable_editing import sha256_file
             path = self.preview_file(cid, p["path"])
             expected = str(p.get("fingerprint") or "")
-            if path.suffix.lower() not in {".doc", ".docx", ".ppt", ".pptx"}:
+            if path.suffix.lower() not in OFFICE_FAMILIES:
                 raise ValueError("此文件不使用文档版式预览。")
+            selected = select_renderer(OFFICE_FAMILIES[path.suffix.lower()], str(p.get('renderer') or 'auto'))
             def render(cancelled, progress):
                 if expected and sha256_file(path) != expected:
                     raise ValueError("文件已变化，请刷新后再预览。")
-                progress("正在生成页面预览…")
+                progress('正在用 ' + selected['name'] + ' 生成页面预览…')
                 try:
-                    preview, fingerprint = render_office_pdf(path, cancel=cancelled, renderer="libreoffice")
+                    preview, fingerprint = render_office_pdf(path, cancel=cancelled, renderer=selected['id'], root=session_preview_root(cid) / 'pdf',excel_options=p.get('excel_options'))
                 except WorkbenchError as exc:
                     if cancelled.is_set():
                         from core.desktop_jobs import JobCancelled
@@ -237,7 +255,8 @@ class DesktopFiles:
                     raise
                 log.info("file_preview_completed session=%s version=%s", cid, fingerprint[:12])
                 return {"kind": "office_preview", "conversation_id": cid, "path": str(path),
-                        "preview_path": preview, "fingerprint": fingerprint}
+                        "preview_path": preview, "fingerprint": fingerprint, 'renderer': selected['id'],
+                        'renderer_name': selected['name'], 'render_configuration': Path(preview).stem,'warnings':preview_diagnostics(path,preview)}
             return self.jobs.submit("生成文档预览", render)
         if method == "file.render_result":
             job = self.jobs.get(str(p["job_id"]))
@@ -246,7 +265,8 @@ class DesktopFiles:
                 raise ValueError("文档预览尚未完成或不属于当前对话。")
             path = self.preview_file(cid, result["path"])
             return {"id": job["id"], "path": str(path), "name": path.name, "fingerprint": result["fingerprint"],
-                    "payload": {"kind": "preview", "preview_kind": "pdf", "read_only": True, "preview_path": result["preview_path"]}}
+                    "payload": {"kind": "preview", "preview_kind": "pdf", "read_only": True, "preview_path": result["preview_path"],
+                        'renderer': result.get('renderer'), 'renderer_name': result.get('renderer_name'), 'render_configuration': result.get('render_configuration'),'warnings':result.get('warnings',[])}}
         if method in {"workspace.changes", "workspace.diff"}:
             from core.workspace_changes import read_changes
             try:
@@ -365,7 +385,7 @@ class DesktopFiles:
             from core.file_capabilities import file_capability
             capability = file_capability(str(path))
             if capability and capability.office_family in {"word", "powerpoint"}:
-                from core.libreoffice_component import status
+                from core.office_renderers import renderer_catalog
                 from core.deliverable_editing import sha256_file
                 session_id = uuid.uuid4().hex
                 recovery = bool(p.get("recover_draft") and capability.editable)
@@ -379,7 +399,7 @@ class DesktopFiles:
                     self.file_sessions[session_id] = (cid, session)
                 return {"id": session_id, "path": str(path), "name": path.name, "fingerprint": sha256_file(path),
                         "payload": {"kind": "preview", "preview_kind": "office", "office_family": capability.office_family,
-                                    "read_only": True, "recovery_available": recovery, "renderer": status()}}
+                                    "read_only": True, "recovery_available": recovery, "renderer": renderer_catalog(capability.office_family)}}
             if capability and not capability.editable:
                 from core.deliverable_editing import sha256_file
                 payload = {"kind": "preview", "preview_kind": capability.preview_kind, "read_only": True}

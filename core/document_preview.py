@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import uuid
+import zipfile
 
 from .env_utils import get_app_data_dir
 from .process_utils import subprocess_kwargs_no_window
@@ -26,11 +27,6 @@ DOCUMENT_RENDER_LONG_EDGE = 2000
 OFFICE_FAMILIES = {".doc": "word", ".docx": "word", ".ppt": "powerpoint",
                    ".pptx": "powerpoint", ".xls": "excel", ".xlsx": "excel"}
 MAX_DOCUMENT_BYTES = 100 * 1024 * 1024
-OFFICE_RENDERERS = {
-    "word": ("Word.Application", "KWPS.Application", "WPS.Application"),
-    "excel": ("Excel.Application", "KET.Application", "ET.Application"),
-    "powerpoint": ("PowerPoint.Application", "KWPP.Application", "WPP.Application"),
-}
 
 
 def cache_root():
@@ -39,13 +35,34 @@ def cache_root():
     return path
 
 
+def session_preview_root(session_id):
+    if not session_id:
+        raise ValueError('缺少预览所属会话。')
+    root = cache_root() / 'sessions' / hashlib.sha256(str(session_id).encode()).hexdigest()[:24]
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def delete_session_previews(session_id):
+    """Permanent conversation deletion only; workspace originals/drafts are separate."""
+    if not session_id: raise ValueError('缺少会话。')
+    root=cache_root().resolve()
+    candidate=(root/'sessions'/hashlib.sha256(str(session_id).encode()).hexdigest()[:24]).resolve()
+    if not candidate.is_relative_to(root/'sessions'): raise ValueError('缓存目录重定向，未删除文件。')
+    if candidate.exists(): shutil.rmtree(candidate)
+
+
 def source_bytes(path):
-    if os.path.getsize(path) > MAX_DOCUMENT_BYTES:
+    before = os.stat(path)
+    if before.st_size > MAX_DOCUMENT_BYTES:
         raise WorkbenchError("document_too_large", "文件超过 100 MiB，请使用系统应用打开。")
     with open(path, "rb") as stream:
         data = stream.read(MAX_DOCUMENT_BYTES + 1)
     if len(data) > MAX_DOCUMENT_BYTES:
         raise WorkbenchError("document_too_large", "文件超过 100 MiB，请使用系统应用打开。")
+    after = os.stat(path)
+    if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+        raise WorkbenchError("source_changed", "文件仍在保存，请稍后刷新；已有预览保留。")
     return data
 
 
@@ -66,42 +83,115 @@ def cache_pdf(path, root=None):
     return str(target)
 
 
+def preview_diagnostics(source, pdf):
+    """Observable font/size facts, without promising visual equivalence."""
+    from pypdf import PdfReader
+    from xml.etree import ElementTree
+    try: reader=PdfReader(str(pdf))
+    except Exception as exc: raise WorkbenchError('invalid_pdf','渲染结果不是有效的 PDF，已有预览保留，请重试或在本机应用查看。') from exc
+    if not reader.pages: raise WorkbenchError('invalid_pdf','渲染结果没有页面。')
+    warnings=[];unembedded=set()
+    if len(reader.pages)>200: warnings.append('字体嵌入诊断仅覆盖前 200 页，其余页面仍需按检查范围核对。')
+    for index in range(min(200,len(reader.pages))):
+        page=reader.pages[index]
+        resources=page.get('/Resources')
+        if not resources: continue
+        fonts=resources.get_object().get('/Font')
+        if not fonts: continue
+        for reference in fonts.get_object().values():
+            font=reference.get_object()
+            descendants=font.get('/DescendantFonts') or [font]
+            for item in descendants:
+                item=item.get_object();descriptor=item.get('/FontDescriptor')
+                if item.get('/Subtype')=='/Type3': continue
+                if not descriptor or not any(key in descriptor.get_object() for key in ('/FontFile','/FontFile2','/FontFile3')):
+                    unembedded.add(str(item.get('/BaseFont') or font.get('/BaseFont') or 'unknown').lstrip('/'))
+    if unembedded: warnings.append('PDF 中有未嵌入字体：'+ '、'.join(sorted(unembedded)[:8])+'。显示可能依赖阅读器字体，请核对关键页面。')
+    source=Path(source)
+    if source.suffix.lower() in {'.docx','.pptx','.xlsx'}:
+        try:
+            from .system_fonts import installed_font_families
+            installed={name.casefold() for name in installed_font_families()}
+            requested=set()
+            with zipfile.ZipFile(source) as package:
+                for name in package.namelist():
+                    if name=='word/document.xml' or name=='xl/styles.xml' or (name.startswith('ppt/slides/slide') and name.endswith('.xml')):
+                        if package.getinfo(name).file_size>10*1024*1024: continue
+                        for node in ElementTree.fromstring(package.read(name)).iter():
+                            tag=node.tag.rsplit('}',1)[-1]
+                            if tag=='rFonts': requested.update(value for key,value in node.attrib.items() if key.rsplit('}',1)[-1] in {'ascii','hAnsi','eastAsia'})
+                            elif tag in {'latin','ea','cs'} and node.get('typeface'): requested.add(node.get('typeface'))
+                            elif name=='xl/styles.xml' and tag=='name' and node.get('val'): requested.add(node.get('val'))
+            missing=sorted(name for name in requested if name and not name.startswith('+') and name.casefold() not in installed)
+            if missing: warnings.append('文件声明的部分字体在本机未找到：'+'、'.join(missing[:8])+'。可能发生字体替换，请核对版式。')
+        except Exception as exc:
+            log.warning('office_preview.font_inventory_unavailable reason=%s',type(exc).__name__)
+            warnings.append('本次未能核对本机字体，请检查关键页面。')
+    size=Path(pdf).stat().st_size
+    if size>10*1024*1024 and size>20*max(1,source.stat().st_size): warnings.append('预览副本明显大于原文件，可能包含大量字体或位图。')
+    return warnings
+
+
 # PDFium is not thread-safe. A bounded, cancellable process per batch avoids
 # sharing native handles between concurrent conversations and the service.
 _PDF_RASTER_SCRIPT = r'''
 import json, math, pathlib, sys
 try:
     import pypdfium2 as pdfium
-    source, destination, first, last, max_pages, long_edge = sys.argv[1:]
-    first, last, max_pages, long_edge = map(int, (first, last, max_pages, long_edge))
+    from PIL import Image, ImageDraw
+    source, destination, selection, kind, long_edge = sys.argv[1:]
+    long_edge = int(long_edge)
     doc = pdfium.PdfDocument(source)
     try:
         total = len(doc)
-        last = min(max_pages, total) if last == 0 else last
-        if first < 1 or last < first or last > total or last - first + 1 > max_pages:
-            raise ValueError('页码超出文档范围；每批最多渲染 4 页。')
+        numbers = json.loads(selection)
+        if not numbers:
+            count = min(total, 24 if kind == 'overview' else 4)
+            numbers = ([round(i*(total-1)/max(1,count-1))+1 for i in range(count)]
+                if kind == 'overview' else list(range(1,count+1)))
+        if not numbers or min(numbers)<1 or max(numbers)>total:
+            raise ValueError('页码超出文档范围。')
         pages = []
-        for index in range(first - 1, last):
+        contact = None
+        for offset, number in enumerate(numbers):
+            index = number-1
             page = doc[index]
             try:
                 width, height = page.get_size()
                 if not all(math.isfinite(v) and v > 0 for v in (width, height)):
                     raise ValueError('PDF 页面尺寸无效。')
-                bitmap = page.render(scale=long_edge / max(width, height))
+                edge = 600 if kind == 'overview' else long_edge
+                bitmap = page.render(scale=edge / max(width, height))
                 try:
                     picture = bitmap.to_pil()
                     try:
-                        filename = f'page-{index + 1}.png'
-                        picture.save(str(pathlib.Path(destination) / filename))
-                        pages.append(dict(page=index + 1, file=filename, width=picture.width, height=picture.height))
+                        # PDFium rounds up fractional page dimensions; keep the
+                        # promised image budget even for 2000.0000001 pixels.
+                        if max(picture.size)>edge: picture.thumbnail((edge,edge),Image.Resampling.LANCZOS)
+                        if kind == 'overview':
+                            if offset%6 == 0: contact = Image.new('RGB', (2000, 1400), '#eeeeee')
+                            x, y = (offset%3)*666, ((offset%6)//3)*700
+                            contact.paste(picture.convert('RGB'), (x+(666-picture.width)//2,y+40))
+                            ImageDraw.Draw(contact).text((x+20,y+12), f'Page {number}', fill='black')
+                            if offset%6 == 5 or offset == len(numbers)-1:
+                                filename = f'overview-{offset//6+1}.png'
+                                contact.save(str(pathlib.Path(destination)/filename))
+                                pages.append(dict(page=numbers[offset-offset%6],page_numbers=numbers[offset-offset%6:offset+1],file=filename,width=2000,height=1400))
+                                contact.close()
+                        else:
+                            filename = f'page-{number}.png'
+                            picture.save(str(pathlib.Path(destination) / filename))
+                            pages.append(dict(page=number, file=filename, width=picture.width, height=picture.height))
                     finally:
                         picture.close()
                 finally:
                     bitmap.close()
             finally:
                 page.close()
-        print(json.dumps(dict(page_count=total, pages=pages, has_more=last < total,
-                             next_pages=f'{last + 1}-{min(last + max_pages, total)}' if last < total else None)))
+        last=max(numbers)
+        print(json.dumps(dict(page_count=total, pages=pages, has_more=(len(numbers)<total if kind=='overview' else last<total),
+                             next_pages=f'{last + 1}-{min(last + 4, total)}' if kind=='details' and last<total else None,
+                             suggested_detail_pages=sorted(set([1,total]+[round(i*(total-1)/3)+1 for i in range(4)])))))
     finally:
         doc.close()
 except Exception as exc:
@@ -110,7 +200,7 @@ except Exception as exc:
 '''
 
 
-def render_document_pages(path, output_dir, *, pages=None, source_version=None, cancel=None, timeout=120):
+def render_document_pages(path, output_dir, *, pages=None, source_version=None, cancel=None, timeout=120, renderer='auto', pdf_root=None, kind='details', excel_options=None):
     """Render an immutable batch into a caller-owned directory; never edit source."""
     from .process_utils import popen_external_program, terminate_process_tree
     from .sandbox_runtime import get_runtime_executable
@@ -119,29 +209,34 @@ def render_document_pages(path, output_dir, *, pages=None, source_version=None, 
     cancel = cancel or threading.Event()
     if cancel.is_set():
         raise WorkbenchError("cancelled", "已停止页面渲染，源文件未修改。")
-    first, last = 1, 0
+    if kind not in {'details','overview'}: raise ValueError('无效的检查类型。')
+    numbers = []
     if pages is not None:
-        match = re.fullmatch(r"([1-9][0-9]*)(?:-([1-9][0-9]*))?", str(pages))
-        if not match:
-            raise ValueError("pages 应为 '1' 或 '2-4'，每批最多 4 页。")
-        first, last = int(match[1]), int(match[2] or match[1])
-        if last < first or last - first + 1 > DOCUMENT_RENDER_MAX_PAGES:
-            raise ValueError("每批最多渲染 4 页，请缩小页码范围。")
+        for part in str(pages).split(','):
+            match = re.fullmatch(r"([1-9][0-9]*)(?:-([1-9][0-9]*))?", part.strip())
+            if not match: raise ValueError("pages 应为 '1'、'2-4' 或 '1,8,16,24'。")
+            first,last=int(match[1]),int(match[2] or match[1])
+            if last<first or last-first>23: raise ValueError('页码范围无效。')
+            numbers.extend(range(first,last+1))
+        if len(numbers)!=len(set(numbers)) or len(numbers)>(24 if kind=='overview' else 4):
+            raise ValueError('细节每批最多 4 页，总览每批最多 24 页，不能重复页码。')
     source = Path(path).resolve()
-    if source.suffix.lower() not in {".docx", ".pptx", ".pdf"}:
-        raise ValueError("页面渲染支持 DOCX、PPTX 和 PDF。")
+    if source.suffix.lower() not in {*OFFICE_FAMILIES, '.pdf'}:
+        raise ValueError("页面渲染支持 Office 和 PDF。")
     fingerprint = hashlib.sha256(source_bytes(source)).hexdigest()
     if source_version is not None and source_version != fingerprint:
         raise WorkbenchError("source_changed", "文件版本已变化，请重新渲染，不能沿用旧页面检查结果。")
     deadline = time.monotonic() + timeout
     if source.suffix.lower() == ".pdf":
-        pdf = cache_pdf(source)
+        pdf = cache_pdf(source, root=pdf_root)
         renderer = "PDFium"
     else:
-        pdf, converted_version = render_office_pdf(source, cancel=cancel, timeout=timeout, renderer="libreoffice")
+        from .office_renderers import select_renderer
+        selected = select_renderer(OFFICE_FAMILIES[source.suffix.lower()], renderer)
+        pdf, converted_version = render_office_pdf(source, cancel=cancel, timeout=timeout, renderer=selected['id'], root=pdf_root, excel_options=excel_options)
         if converted_version != fingerprint:
             raise WorkbenchError("source_changed", "文件在转换前发生变化，请重新渲染。")
-        renderer = "LibreOffice + PDFium"
+        renderer = selected['name'] + ' + PDFium'
     if cancel.is_set():
         raise WorkbenchError("cancelled", "已停止页面渲染，源文件未修改。")
     if time.monotonic() >= deadline:
@@ -154,7 +249,7 @@ def render_document_pages(path, output_dir, *, pages=None, source_version=None, 
     try:
         process = popen_external_program(
             [executable, "-I", "-B", "-X", "utf8", "-c", _PDF_RASTER_SCRIPT,
-             str(pdf), str(output_dir), str(first), str(last), str(DOCUMENT_RENDER_MAX_PAGES), str(DOCUMENT_RENDER_LONG_EDGE)],
+             str(pdf), str(output_dir), json.dumps(numbers), kind, str(DOCUMENT_RENDER_LONG_EDGE)],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             **subprocess_kwargs_no_window(),
         )
@@ -182,7 +277,7 @@ def render_document_pages(path, output_dir, *, pages=None, source_version=None, 
             raise WorkbenchError("cancelled", "已停止页面渲染，源文件未修改。")
         if hashlib.sha256(source_bytes(source)).hexdigest() != fingerprint:
             raise WorkbenchError("source_changed", "文件在渲染时发生变化，请重新渲染最新版本。")
-        result.update(source_version=fingerprint, renderer=renderer)
+        result.update(source_version=fingerprint, renderer=renderer, render_configuration=Path(pdf).stem, pdf_path=str(pdf),warnings=preview_diagnostics(source,pdf))
         log.info("document_raster.finish version=%s pages=%s", fingerprint[:12], len(result["pages"]))
         return result
     except Exception as exc:
@@ -204,19 +299,69 @@ Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; pu
 $names = @{word='WINWORD'; excel='EXCEL'; powerpoint='POWERPNT'}
 $app = $null; $doc = $null; $bootstrap = $null; $owned = $false
 $wps = $false; $renderer = ''; $stage = 'activate'
-$mutex = New-Object System.Threading.Mutex($false, ('Local\CoworkOfficePreview-' + $cfg.family))
+$mutex = New-Object System.Threading.Mutex($false, ('Local\CoworkOfficePreview-' + $cfg.group))
 $locked = $false
+$clean = $true
+$stateOwned = $false
 function Assert-Active {
     if (Test-Path -LiteralPath $cfg.cancel) { throw '已取消版式预览，源文件未修改。' }
+}
+function Export-Workbook {
+    if ($null -eq $cfg.excel -or $cfg.excel.mode -ne 'region') {
+        $doc.ExportAsFixedFormat(0, [string]$cfg.target, 0, $false, $false)
+        return
+    }
+    $part = 0
+    foreach ($sheet in $doc.Worksheets) {
+        if ($sheet.Visible -ne -1 -or ($cfg.excel.sheet -and $sheet.Name -ne $cfg.excel.sheet)) { continue }
+        $area = $sheet.UsedRange
+        if ($cfg.excel.range) { $area = $sheet.Range([string]$cfg.excel.range) }
+        $top = $area.Row; $bottom = $top+$area.Rows.Count-1
+        $left = $area.Column; $right = $left+$area.Columns.Count-1
+        if ($area.Rows.Count -gt 2000 -or $area.Columns.Count -gt 100) { throw '区域过大，请指定不超过 2000 行、100 列的阅读范围。' }
+        $setup = $sheet.PageSetup
+        $setup.PaperSize = 9; $setup.Orientation = 2
+        $setup.LeftMargin = 18; $setup.RightMargin = 18
+        $setup.TopMargin = 30; $setup.BottomMargin = 30
+        $setup.Zoom = 100; $setup.FitToPagesWide = $false; $setup.FitToPagesTall = $false
+        $setup.PrintTitleColumns = [string]$cfg.excel.identity_columns
+        if ($cfg.excel.header_rows) { $setup.PrintTitleRows = [string]$cfg.excel.header_rows }
+        $identityWidth = if ($cfg.excel.identity_columns) { $sheet.Range([string]$cfg.excel.identity_columns).Width } else { 0 }
+        if ($identityWidth -gt 300) { throw '重复标识列过宽，请减少列数。' }
+        $start = $left
+        while ($start -le $right) {
+            Assert-Active
+            $end = $start
+            while ($end -lt $right -and ($sheet.Range($sheet.Cells.Item($top,$start),$sheet.Cells.Item($top,$end+1)).Width+$identityWidth) -le 730) { $end++ }
+            # Keep merged column groups together. Oversized groups need an
+            # explicit user range instead of silently slicing merged labels.
+            foreach ($merge in $cfg.excel.merges) {
+                if ($merge.sheet -eq $sheet.Name -and $merge.first -le $end -and $merge.last -gt $end -and $merge.last -le $right) { $end = $merge.last }
+            }
+            $slice = $sheet.Range($sheet.Cells.Item($top,$start),$sheet.Cells.Item($bottom,$end))
+            if (($slice.Width+$identityWidth) -gt 1250) { throw '合并列组或单列过宽，请在表格视图阅读或指定较小范围。' }
+            $setup.Zoom = [Math]::Min(100,[Math]::Floor(73000/($slice.Width+$identityWidth)))
+            $setup.PrintArea = $slice.Address()
+            $setup.CenterHeader = $sheet.Name + ' ' + $slice.Address()
+            $part++
+            if ($part -gt 40) { throw '阅读分片超过 40 份，请缩小范围。' }
+            $sheet.ExportAsFixedFormat(0, [string]($cfg.target + '.part' + $part + '.pdf'), 0, $false, $false)
+            $start = $end+1
+        }
+    }
+    if ($part -eq 0) { throw '没有找到可读取的工作表，请核对表名。' }
+    [Console]::Out.WriteLine('COWORK_PARTS:' + $part)
 }
 try {
     # PowerPoint is MultiUse: serialize our helpers without taking ownership of
     # an existing application or interfering with the user's presentations.
-    while (-not $locked) {
-        Assert-Active
-        try { $locked = $mutex.WaitOne(100) }
-        catch [System.Threading.AbandonedMutexException] { $locked = $true }
-    }
+    Assert-Active
+    try { $locked = $mutex.WaitOne(0) }
+    catch [System.Threading.AbandonedMutexException] { $locked = $true }
+    if (-not $locked) { throw '本机办公软件仍在转换或收尾，请重新检测后再试。' }
+    if (Test-Path -LiteralPath $cfg.state) { throw '上次转换未确认清理完成，请关闭对应软件后重新检测。' }
+    [IO.File]::WriteAllText([string]$cfg.state, (@{helper=$PID; renderer=$cfg.renderers[0]; phase='activate'} | ConvertTo-Json -Compress))
+    $stateOwned = $true
     $ids = @(Get-Process -Name $names[$cfg.family] -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
     # Only discovery/activation may try another provider. Never retry a failed
     # document open/export with another engine, hiding the actual file error.
@@ -245,6 +390,8 @@ try {
         # WPS can share a process across windows and document families. Do not
         # hide/quit the app or assign it to a kill-on-close job, even if new.
         [Console]::Out.WriteLine('COWORK_SHARED:0')
+        $count = if ($cfg.family -eq 'word') { $app.Documents.Count } elseif ($cfg.family -eq 'excel') { $app.Workbooks.Count } else { $app.Presentations.Count }
+        if ($count -gt 0) { throw 'WPS 当前有打开的文档，无法确认独立转换。请先保存并关闭 WPS 文档，或选择其他渲染方式。' }
     } elseif ($cfg.family -eq 'word') {
         $bootstrap = $app.Documents.Add()
         $windowHandle = $bootstrap.Windows.Item(1).Hwnd
@@ -263,37 +410,25 @@ try {
     }
     [Console]::Out.Flush()
     Assert-Active
-    if ($null -ne $bootstrap) { $bootstrap.Close($false); $bootstrap = $null }
+    if ($null -ne $bootstrap) { $bootstrap.Close($false); [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($bootstrap); $bootstrap = $null }
     if ($wps) {
-        # Restore shared application settings even when Open throws. Only this
-        # request's read-only snapshot is closed in finally.
-        $security = $app.AutomationSecurity
+        # Shared application settings are never modified. Python has rejected
+        # macros, embedded active content and remote dependencies before COM.
         $stage = 'open'
-        try {
-            $app.AutomationSecurity = 3
-            if ($cfg.family -eq 'word') {
-                $links = $app.Options.UpdateLinksAtOpen
-                try {
-                    $app.Options.UpdateLinksAtOpen = $false
-                    $doc = $app.Documents.Open([string]$cfg.source, $false, $true, $false, '', '', $false, '', '', 0, 0, $false)
-                } finally { $app.Options.UpdateLinksAtOpen = $links }
-            } elseif ($cfg.family -eq 'excel') {
-                $events = $app.EnableEvents
-                try {
-                    $app.EnableEvents = $false
-                    $doc = $app.Workbooks.Open([string]$cfg.source, 0, $true, [Type]::Missing, '', '', $true)
-                } finally { $app.EnableEvents = $events }
-            } else {
-                $doc = $app.Presentations.Open([string]$cfg.source, -1, 0, 0)
-            }
-        } finally { $app.AutomationSecurity = $security }
+        if ($cfg.family -eq 'word') {
+            $doc = $app.Documents.Open([string]$cfg.source, $false, $true, $false, '', '', $false, '', '', 0, 0, $false)
+        } elseif ($cfg.family -eq 'excel') {
+            $doc = $app.Workbooks.Open([string]$cfg.source, 0, $true, [Type]::Missing, '', '', $true)
+        } else {
+            $doc = $app.Presentations.Open([string]$cfg.source, -1, 0, 0)
+        }
         Assert-Active
         if ($null -eq $doc) { throw 'WPS 未返回只读文档。' }
         $stage = 'export'
         if ($cfg.family -eq 'word') {
             $doc.ExportAsFixedFormat([string]$cfg.target, 17, $false, 0)
         } elseif ($cfg.family -eq 'excel') {
-            $doc.ExportAsFixedFormat(0, [string]$cfg.target, 0, $false, $false)
+            Export-Workbook
         } else {
             $doc.SaveAs([string]$cfg.target, 32)
         }
@@ -305,6 +440,7 @@ try {
         $stage = 'open'
         $doc = $app.Documents.Open([string]$cfg.source, $false, $true, $false, '', '', $false, '', '', 0, 0, $false, $false, 0, $true)
         $stage = 'export'
+        Assert-Active
         $doc.ExportAsFixedFormat([string]$cfg.target, 17, $false, 0)
     } elseif ($cfg.family -eq 'excel') {
         $app.AutomationSecurity = 3
@@ -316,14 +452,11 @@ try {
         $doc = $app.Workbooks.Open([string]$cfg.source, 0, $true, [Type]::Missing, '', '', $true, [Type]::Missing, [Type]::Missing, $false, $false, [Type]::Missing, $false)
         $app.Calculation = -4135
         $stage = 'export'
-        $doc.ExportAsFixedFormat(0, [string]$cfg.target, 0, $false, $false)
+        Assert-Active
+        Export-Workbook
     } else {
-        $security = $app.AutomationSecurity
         $stage = 'open'
-        try {
-            $app.AutomationSecurity = 3
-            $doc = $app.Presentations.Open([string]$cfg.source, -1, 0, 0)
-        } finally { $app.AutomationSecurity = $security }
+        $doc = $app.Presentations.Open([string]$cfg.source, -1, 0, 0)
         $stage = 'export'
         Assert-Active
         $doc.SaveAs([string]$cfg.target, 32)
@@ -331,25 +464,26 @@ try {
     Assert-Active
     [Console]::Out.WriteLine('COWORK_OK')
 } catch {
-    [Console]::Error.WriteLine($renderer + ' [' + $stage + ']: ' + $_.Exception.Message)
+    [Console]::Error.WriteLine($renderer + ' [' + $stage + ':' + $_.InvocationInfo.ScriptLineNumber + ']: ' + $_.Exception.Message)
     exit 1
 } finally {
     if ($null -ne $bootstrap) {
         try { $bootstrap.Close($false) }
-        catch { [Console]::Error.WriteLine('Office cleanup: ' + $_.Exception.Message) }
+        catch { $clean = $false; [Console]::Error.WriteLine('Office cleanup: ' + $_.Exception.Message) }
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($bootstrap)
     }
     if ($null -ne $doc) {
         try {
             if ($cfg.family -eq 'powerpoint') { $doc.Close() } else { $doc.Close($false) }
-        } catch { [Console]::Error.WriteLine('Office cleanup: ' + $_.Exception.Message) }
+        } catch { $clean = $false; [Console]::Error.WriteLine('Office cleanup: ' + $_.Exception.Message) }
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($doc)
     }
     if ($null -ne $app) {
-        try {
-            if ($owned -and ($cfg.family -ne 'powerpoint' -or $app.Presentations.Count -eq 0)) { $app.Quit() }
-        } catch { [Console]::Error.WriteLine('Office cleanup: ' + $_.Exception.Message) }
+        # Do not Quit or kill an application: it may have acquired user windows
+        # after activation. Release our references after closing our copy only.
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($app)
     }
+    if ($stateOwned -and $clean) { Remove-Item -LiteralPath $cfg.state -Force -ErrorAction SilentlyContinue }
     if ($locked) { $mutex.ReleaseMutex() }
     $mutex.Dispose()
     # Also clean up if the desktop has already stopped waiting for a shared COM
@@ -364,18 +498,6 @@ try {
 '''
 
 
-def _office_powershell_executables():
-    windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
-    hosts = [windows / "System32/WindowsPowerShell/v1.0/powershell.exe"]
-    # Some WPS installations register their COM server only in the 32-bit
-    # registry view. Try that host only after *all* activations fail, before
-    # any document is opened; never repeat an open/export in another process.
-    x86 = windows / "SysWOW64/WindowsPowerShell/v1.0/powershell.exe"
-    if x86.is_file():
-        hosts.append(x86)
-    return [str(path) for path in hosts]
-
-
 def _finish_office_helper(process, paths):
     """Reap a cooperatively cancelled helper without killing shared Office."""
     try:
@@ -384,6 +506,8 @@ def _finish_office_helper(process, paths):
             process.stdout.close()
         log.info("office_preview.cleanup_finish helper_pid=%s", process.pid)
     finally:
+        for part in paths[0].parent.glob(paths[0].name + '.part*.pdf'):
+            part.unlink(missing_ok=True)
         for path in paths:
             try:
                 path.unlink(missing_ok=True)
@@ -391,20 +515,51 @@ def _finish_office_helper(process, paths):
                 log.exception("office_preview.cleanup_error helper_pid=%s", process.pid)
 
 
-def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False, renderer="auto"):
-    if renderer not in {"auto", "libreoffice"}:
-        raise ValueError("不支持的文档渲染器。")
-    if renderer == "libreoffice" or os.name != "nt":
-        return _render_libreoffice_pdf(path, cancel=cancel, timeout=timeout, root=root, force=force)
+def _excel_options(source, value, data):
+    import re
+    if value is None: return None
+    if not isinstance(value, dict) or set(value)-{'mode','sheet','range','identity_columns','header_rows'}:
+        raise ValueError('无效的 Excel 阅读选项。')
+    options = {key:str(value.get(key) or '') for key in ('mode','sheet','range','identity_columns','header_rows')}
+    if options['mode'] not in {'region','print'}: raise ValueError('请选择区域阅读或打印预览。')
+    if options['mode']=='print': return None
+    if source.suffix.lower()!='.xlsx': raise ValueError('区域阅读需要 XLSX；旧格式请用表格视图或打印预览。')
+    if options['range'] and not re.fullmatch(r'[A-Z]{1,3}[1-9][0-9]*:[A-Z]{1,3}[1-9][0-9]*', options['range']):
+        raise ValueError('阅读范围应为 A1:R80 这样的单一区域。')
+    if options['identity_columns'] and not re.fullmatch(r'[A-Z]{1,3}:[A-Z]{1,3}',options['identity_columns']):
+        raise ValueError('重复标识列应为 A:B 这样的连续列范围。')
+    if options['header_rows'] and not re.fullmatch(r'[1-9][0-9]*:[1-9][0-9]*',options['header_rows']):
+        raise ValueError('重复标题行应为 1:2 这样的连续行范围。')
+    import io
+    from openpyxl import load_workbook
+    workbook = load_workbook(io.BytesIO(data), data_only=False)
+    try:
+        options['merges']=sorted([{'sheet':sheet.title,'first':area.min_col,'last':area.max_col}
+            for sheet in workbook for area in sheet.merged_cells.ranges if area.min_col!=area.max_col],key=lambda area:(area['sheet'],area['first']))
+    finally: workbook.close()
+    return options
+
+
+def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False, renderer="auto", excel_options=None):
+    from .office_renderers import select_renderer, state_path, state_root
     source = Path(path).resolve()
     family = OFFICE_FAMILIES.get(source.suffix.lower())
     if family is None:
         raise WorkbenchError("unsupported", "此格式没有 Office 版式预览。")
+    selected = select_renderer(family, renderer)
     data = source_bytes(source)
+    options = _excel_options(source, excel_options, data) if family == 'excel' else None
+    if selected['id'] == 'libreoffice':
+        if options and options['mode']=='region':
+            raise WorkbenchError('region_unavailable', 'LibreOffice 暂不提供区域分页。可使用表格视图，或明确选择打印预览。')
+        return _render_libreoffice_pdf(path, cancel=cancel, timeout=timeout, root=root, force=force)
+    if selected['id'] == 'wps' or family == 'powerpoint':
+        _check_shared_office_source(source, data)
     fingerprint = hashlib.sha256(data).hexdigest()
     root = Path(root or cache_root())
     root.mkdir(parents=True, exist_ok=True)
-    target = root / ("office-v1-" + fingerprint + ".pdf")
+    option_key = hashlib.sha256(json.dumps(options,sort_keys=True).encode()).hexdigest()[:12]
+    target = root / ("office-v3-" + selected['version'][:20] + '-' + option_key + '-' + fingerprint + ".pdf")
     if target.is_file() and not force:
         return str(target), fingerprint
     cancel = cancel or threading.Event()
@@ -415,13 +570,14 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False,
     snapshot = root / (uuid.uuid4().hex + source.suffix)
     snapshot.write_bytes(data)
     cancel_path = root / (uuid.uuid4().hex + ".cancel")
-    payload = base64.b64encode(json.dumps({"family": family, "renderers": OFFICE_RENDERERS[family], "source": str(snapshot), "target": str(partial), "cancel": str(cancel_path)}).encode("utf-8")).decode("ascii")
+    state = state_path(selected['group'])
+    payload = base64.b64encode(json.dumps({"family": family, "group": selected['group'], "state": str(state),
+        "renderers": [selected['progid']], "source": str(snapshot), "target": str(partial), "cancel": str(cancel_path), 'excel':options}).encode("utf-8")).decode("ascii")
     script = _OFFICE_SCRIPT.replace("__PAYLOAD__", payload)
-    executables = iter(_office_powershell_executables())
+    script_path = root / (uuid.uuid4().hex + '.ps1')
+    script_path.write_text(script, encoding='utf-8-sig')
     events = queue.Queue()
     process = None
-    owned_job = None
-    shared = False
     errors = []
     renderer = ""
     log.info("office_preview.start family=%s source_version=%s", family, fingerprint[:12])
@@ -432,39 +588,28 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False,
             events.put(None)
         def start_helper(executable):
             log.info("office_preview.helper family=%s host=%s source_version=%s", family, executable, fingerprint[:12])
-            helper = subprocess.Popen([executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand",
-                                       base64.b64encode(script.encode("utf-16-le")).decode("ascii")],
+            helper = subprocess.Popen([executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                       **subprocess_kwargs_no_window())
             threading.Thread(target=read_lines, args=(helper,), daemon=True).start()
             return helper
-        process = start_helper(next(executables))
+        process = start_helper(selected['host'])
         deadline = time.monotonic() + timeout
         complete = False
         unavailable = False
-        cancellation_deadline = None
         while True:
             if cancel.is_set():
                 # Let COM publish its owned PID before tearing down the helper.
                 # Killing the helper during activation can orphan its Office server.
-                cancellation_deadline = cancellation_deadline or (time.monotonic() + 10)
                 cancel_path.touch(exist_ok=True)
-                if owned_job or shared or time.monotonic() >= cancellation_deadline:
-                    raise WorkbenchError("cancelled", "已取消版式预览，源文件未修改。")
+                raise WorkbenchError("cancelled", "已停止等待预览，原文件未修改。本机转换可能仍在收尾，可重新检测可用性。")
             if time.monotonic() > deadline:
-                raise WorkbenchError("renderer_timeout", "版式预览超时，请检查文件后重试，或用系统应用打开。")
+                raise WorkbenchError("renderer_timeout", "本机办公软件无响应，可能存在待处理弹窗，请切到对应窗口查看。已停止等待，原文件与已有预览保留；旧任务退出前不启动新转换。")
             try:
                 line = events.get(timeout=0.1)
             except queue.Empty:
                 continue
             if line is None:
-                executable = next(executables, None) if unavailable else None
-                if executable and not cancel.is_set():
-                    process.wait(timeout=2)
-                    process.stdout.close()
-                    unavailable = False
-                    process = start_helper(executable)
-                    continue
                 break
             if line == "COWORK_UNAVAILABLE":
                 unavailable = True
@@ -477,10 +622,8 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False,
                 log.info("office_preview.probe_failed family=%s detail=%s", family, detail)
                 errors.append(detail)
             elif line.startswith("COWORK_PID:"):
-                from .workbench_terminal import WindowsProcessJob
-                owned_job = WindowsProcessJob(int(line.partition(":")[2]))
+                log.info("office_preview.instance family=%s office_pid=%s", family, line.partition(":")[2])
             elif line.startswith("COWORK_SHARED:"):
-                shared = True
                 log.info("office_preview.shared family=%s office_pid=%s", family, line.partition(":")[2])
             elif line == "COWORK_OK":
                 complete = True
@@ -490,9 +633,19 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False,
             raise WorkbenchError("cancelled", "已取消版式预览，源文件未修改。")
         exit_code = process.wait(timeout=2)
         if unavailable:
-            raise WorkbenchError("renderer_unavailable", "未找到可用的 Microsoft Office 或 WPS 自动化接口。\n请安装或修复办公软件后重试，也可以选择简化预览或用系统应用打开。")
+            raise WorkbenchError("renderer_unavailable", "所选办公软件的自动化接口不可用。请修复软件后重试，或明确选择其他渲染方式，也可用本机应用打开。")
+        parts = sorted(root.glob(partial.name + '.part*.pdf'),key=lambda item:int(item.name.rsplit('.part',1)[1].split('.')[0]))
+        if exit_code == 0 and complete and parts:
+            from pypdf import PdfWriter
+            writer = PdfWriter()
+            try:
+                for part in parts: writer.append(str(part))
+                with partial.open('wb') as handle: writer.write(handle)
+            finally: writer.close()
         if exit_code != 0 or not complete or not partial.is_file():
             raise WorkbenchError("renderer_failed", "无法生成版式预览（Microsoft Office / WPS）。" + "\n" + "\n".join(errors[-8:]))
+        if state.exists():
+            raise WorkbenchError('renderer_cleanup_pending', '页面已转换，但未确认本机文档清理完成；已有预览保留。请关闭对应软件后重新检测。')
         if not partial.read_bytes().startswith(b"%PDF-"):
             raise WorkbenchError("invalid_pdf", "办公软件没有返回有效的 PDF，请重试或用系统应用打开。")
         if cancel.is_set():
@@ -500,6 +653,11 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False,
         if hashlib.sha256(source_bytes(source)).hexdigest() != fingerprint:
             raise WorkbenchError("source_changed", "文件在转换时发生修改，请重新预览最新版本。")
         os.replace(partial, target)
+        # This confirms this version/family actually exported and closed a copy;
+        # it does not promise arbitrary future files or fonts will succeed.
+        evidence = state_root() / (selected['version'] + '-' + family + '.verified.json')
+        evidence.write_text(json.dumps({'renderer': selected['progid'], 'bits': selected['bits'],
+            'version': selected['version'], 'family': family, 'verified_at': time.time()}), encoding='utf-8')
         log.info("office_preview.finish family=%s renderer=%s source_version=%s", family, renderer, fingerprint[:12])
         return str(target), fingerprint
     except Exception as exc:
@@ -509,29 +667,63 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False,
             log.exception("office_preview.error family=%s source_version=%s", family, fingerprint[:12])
         raise
     finally:
-        if process is not None and process.poll() is None and not owned_job:
+        if process is not None and process.poll() is None:
             cancel_path.touch(exist_ok=True)
             log.info("office_preview.cleanup_pending family=%s helper_pid=%s", family, process.pid)
             # Keep COM alive until its current call completes and closes only
             # this request's hidden document. A running user app is never killed.
             threading.Thread(target=_finish_office_helper,
-                             args=(process, (partial, snapshot, cancel_path)), daemon=True).start()
+                             args=(process, (partial, snapshot, cancel_path, script_path)), daemon=True).start()
             process = None
             deferred_cleanup = True
         else:
             deferred_cleanup = False
-        if owned_job:
-            owned_job.close()
         if process is not None:
-            if process.poll() is None:
-                process.kill()
             process.wait(timeout=5)
             if process.stdout:
                 process.stdout.close()
         if not deferred_cleanup:
+            for part in root.glob(partial.name + '.part*.pdf'): part.unlink(missing_ok=True)
+            script_path.unlink(missing_ok=True)
             partial.unlink(missing_ok=True)
             snapshot.unlink(missing_ok=True)
             cancel_path.unlink(missing_ok=True)
+
+
+def _check_shared_office_source(source, data):
+    """Shared COM applications keep user settings. Only passive OOXML is opened."""
+    import io
+    from xml.etree import ElementTree
+    if source.suffix.lower() not in {'.docx', '.xlsx', '.pptx'}:
+        raise WorkbenchError('renderer_unsafe_shared', '此格式无法在共享的办公软件实例中安全转换。请用本机应用另存为 DOCX、XLSX 或 PPTX，或选择 LibreOffice。')
+    def check_package(content, depth=0):
+        if depth > 2:
+            raise WorkbenchError('renderer_unsafe_shared', '文件包含多层嵌入文档，请用本机应用打开。')
+        with zipfile.ZipFile(io.BytesIO(content)) as package:
+            if sum(entry.file_size for entry in package.infolist()) > 256 * 1024 * 1024:
+                raise ValueError('展开后的文档过大')
+            for entry in package.infolist():
+                name = entry.filename.lower()
+                if any(part in name for part in ('vbaproject', '/activex/', '/externallinks/')):
+                    raise WorkbenchError('renderer_unsafe_shared', '文件包含宏、活动对象或外部依赖，请用本机应用打开；未修改原文件。')
+                if '/embeddings/' in name and not entry.is_dir():
+                    # PowerPoint charts normally embed a passive XLSX data book.
+                    # Verify its contents, rather than treating every chart as OLE.
+                    if not name.endswith('.xlsx') or entry.file_size > MAX_DOCUMENT_BYTES:
+                        raise WorkbenchError('renderer_unsafe_shared', '文件包含需要原软件处理的嵌入对象，请用本机应用打开。')
+                    check_package(package.read(entry), depth+1)
+                if name == '[content_types].xml' and b'macroenabled' in package.read(entry).lower():
+                    raise WorkbenchError('renderer_unsafe_shared', '文件包含宏，请用本机应用打开。')
+                if name.endswith('.rels'):
+                    if entry.file_size > 2 * 1024 * 1024:
+                        raise ValueError('文档关系文件过大')
+                    for relationship in ElementTree.fromstring(package.read(entry)):
+                        if relationship.get('TargetMode') == 'External' and not relationship.get('Type', '').endswith('/hyperlink'):
+                            raise WorkbenchError('renderer_unsafe_shared', '文件引用了外部资源，请用本机应用打开或选择其他渲染方式；未修改原文件。')
+    try:
+        check_package(data)
+    except (zipfile.BadZipFile, ElementTree.ParseError, ValueError) as exc:
+        raise WorkbenchError('renderer_failed', '文件不是有效的 Office 文档，或已加密；请用本机应用检查后重试。') from exc
 
 
 def _libreoffice_executable():

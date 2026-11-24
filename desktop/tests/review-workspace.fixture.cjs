@@ -96,7 +96,7 @@ app.whenReady().then(async()=>{
   await read('window.taskPreview({kind:"skill",title:"工程经验整理",status:"completed"})');
   await until('!document.querySelector(".generation-task") && !document.querySelector(".process-timeline")');
   assert.match(await read('document.querySelector(".process-summary").textContent'),/^用时 /);
-  assert.equal(await read('document.querySelectorAll(".message-file-table").length'),1);
+  assert.equal(await read('document.querySelectorAll(".chat-change-summary").length'),1);
   await snap('chat-generation-completed','.task-fixture');
   await read('window.taskPreview({status:"stopping"})');
   await until('document.querySelector(".generation-task-stage")?.textContent.includes("正在停止")');

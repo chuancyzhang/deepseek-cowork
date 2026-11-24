@@ -3,7 +3,8 @@ import ReactMarkdown, {type Components} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Copy, ExternalLink, FileText, GitBranch, Image as ImageIcon, Link, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Puzzle, RefreshCw, Sparkles, Trash2, Users, Wrench } from 'lucide-react';
 import {agentRecords, agentTools} from './subagents';
-import type { FileReference, MediaTask, Message } from './types';
+import type { FileReference, MediaTask, Message, TurnFile } from './types';
+import {FileSummary} from './WorkspaceChanges';
 import { messageText, toolErrorText, messageTime, replyParts, elapsedTime, thinkingTime, formatDuration, type TurnTiming, type QuestionRecord } from './runtime';
 import {useHost, useHostField} from './host/context';
 import InlineVisualization from './InlineVisualization';
@@ -123,7 +124,6 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
   message: Message; active: boolean; cid: string; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; answerOnly?: boolean; changeSummary?: ReactNode; readOnly?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
-  const [filesExpanded, setFilesExpanded] = useHostField('message-files:' + cid + ':' + message.id, false);
   const [more, setMore] = useState(false), [failure, setFailure] = useState('');
   const menu = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -157,8 +157,7 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
     {!!otherFiles.length && <div className="message-files">{otherFiles.map(file => <button key={file.path} title={file.path} onClick={() => onFile(file.path)}><FileText size={14}/>{file.name}</button>)}</div>}
     {text && <div className="markdown">{message.role === 'user' ? <div className="user-text">{text}</div> : text.split(/^::cowork-inline-vis\{file="([a-z0-9][a-z0-9.-]*\.html)"\}\s*$/m).map((part, index) => index % 2 ? <InlineVisualization key={part} cid={cid} file={part}/> : <Markdown key={index} text={part} streaming={message.live} onFile={onFile} files={referencedFiles} previewScope={cid+':'+message.id+':'+index} cid={cid}/>)}</div>}
     {message.role === 'user' && imageFiles.length > 0 && <ImageAttachments cid={cid} files={imageFiles} onOpen={onFile}/>}
-    {documents.length > 0 && <section className="message-file-table" aria-label="回复中的文件"><strong>共 {documents.length} 个文件</strong>{(filesExpanded ? documents : documents.slice(0,3)).map(file => <button key={file.path} title={file.path} aria-label={'打开文件 ' + file.name} onClick={() => onFile(file.path)}><FileText size={16}/><span>{file.name}</span><small>{file.label}</small></button>)}{documents.length > 3 && <button className="message-files-toggle" onClick={() => setFilesExpanded(!filesExpanded)}>{filesExpanded ? '收起文件列表' : `再显示 ${documents.length - 3} 个文件`}</button>}</section>}
-    {changeSummary}
+    {changeSummary || <FileSummary references={documents} openFile={onFile}/>}
     </div>
     <div className="message-footer">{message.role !== 'assistant' && <MessageTimestamp createdAt={message.created_at}/>}<div className="message-actions">
       <button title="复制消息" aria-label="复制消息" onClick={async () => { try {await window.cowork.call('clipboard.write', {text}); setCopied(true); setFailure(''); setTimeout(() => setCopied(false), 1500);} catch (error) {setFailure('复制未完成：' + (error as Error).message);} }}>{copied ? <Check size={14}/> : <Copy size={14}/>}</button>
@@ -215,10 +214,12 @@ export function GenerationTaskStatus({task, statusLabel = '正在处理', durati
   </div>;
 }
 
-export function AssistantTurn({messages, cid, active, onAction, onFile, timing, activeRun, interactionRun = activeRun, showDuration = true, stopped = false, statusLabel = '正在处理', questions = [], onInteractionDone = () => {}, reviewTask, changeSummary, readOnly = false}: {
-  messages: Message[]; cid: string; active: boolean; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; timing?: TurnTiming; activeRun?: string; interactionRun?: string; showDuration?: boolean; stopped?: boolean; statusLabel?: string; questions?: QuestionRecord[]; onInteractionDone?: (requestId: string) => void; reviewTask?: ReviewSummary; changeSummary?: ReactNode; readOnly?: boolean;
+export function AssistantTurn({messages, cid, active, onAction, onFile, timing, activeRun, interactionRun = activeRun, showDuration = true, stopped = false, statusLabel = '正在处理', questions = [], onInteractionDone = () => {}, reviewTask, onHistory, onHistoryRetry, readOnly = false}: {
+  messages: Message[]; cid: string; active: boolean; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; timing?: TurnTiming; activeRun?: string; interactionRun?: string; showDuration?: boolean; stopped?: boolean; statusLabel?: string; questions?: QuestionRecord[]; onInteractionDone?: (requestId: string) => void; reviewTask?: ReviewSummary; onHistory?: (files: TurnFile[], selected?: string) => void; onHistoryRetry?: () => void; readOnly?: boolean;
 }) {
   const {answer, results, hasProcess: messageProcess} = replyParts(messages);
+  const fileSummary = <FileSummary references={messages.flatMap(message => (message.file_references || []).filter(file => file.references.some(reference => messageText(message.content).includes(reference)))).filter(file => !['image','audio','video'].includes(file.kind))}
+    records={onHistory ? messages.flatMap(message => message.turn_files || []) : []} openFile={onFile} openHistory={onHistory} failure={messages.find(message => message.file_history_error)?.file_history_error} retry={onHistoryRetry}/>;
   const hasProcess = messageProcess || questions.length > 0;
   const running = Boolean(activeRun && timing?.end == null);
   const [now, setNow] = useState(() => Date.now() / 1000);
@@ -311,6 +312,6 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
     {!hasProcess && !task && (running || stopped
       ? <RunStatus label={running ? statusLabel : '已停止'} duration={durationLabel}/>
       : durationLabel && <div className="process-duration">{durationLabel}</div>)}
-    {answer && <MessageBubble message={answer} cid={cid} active={active} onAction={onAction} onFile={onFile} answerOnly readOnly={readOnly} changeSummary={!answer.live && changeSummary}/>}
+    {answer ? <MessageBubble message={answer} cid={cid} active={active} onAction={onAction} onFile={onFile} answerOnly readOnly={readOnly} changeSummary={fileSummary}/> : fileSummary}
   </section>;
 }

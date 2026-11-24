@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useMemo, lazy, Suspense, useSyncExternalStore } from 'react';
 import {ArrowLeft, ChartColumn, ChevronDown, Copy, ExternalLink, FileDiff, Folder, History, LoaderCircle, PanelRight, RefreshCw, Sparkles, X} from 'lucide-react';
-import type { Conversation } from '../types';
+import type { Conversation, TurnFile } from '../types';
 import { contextRecoveryForRun, displayMessages, messageGroups, isActive, mergeEvents, messageText, runErrorSummary, isUserStopped, unwrapEvents, turnTimings } from '../runtime';
 import PluginSlot from './PluginSlot';
 import Usage, {UsageToolbarButton, type UsageView} from '../Usage';
@@ -14,7 +14,7 @@ import Dialog from '../Dialog';
 import OfficeEditor from '../OfficeEditor';
 import FilePreview from '../FilePreview';
 import MoreActions, {type MenuAction} from '../MoreActions';
-import {ChangeSummary, ChangesPanel, WorkspaceDiff} from '../WorkspaceChanges';
+import {FileHistoryPanel, ChangesPanel, WorkspaceDiff} from '../WorkspaceChanges';
 import {pathKey} from '../projects';
 import Workspace, { emptyWorkspace, type WorkspaceView } from '../Workspace';
 import Composer from '../Composer';
@@ -72,6 +72,16 @@ export default function BuiltinWorkbench() {
       changeWorkspace({selected: 'changes', changesOpen: true, ...(!workspaceView.filesPinned ? {filesOpen:false} : {})});
       setWorkspaceOpen(true);
       void refreshChanges(cid);
+    } catch (failure) {error((failure as Error).message);}
+  }
+  async function openFileHistory(files: TurnFile[], selected = files[0]?.id || '') {
+    if (!current) return;
+    const cid = current.id;
+    try {
+      await saveView(cid);
+      if (selectedId.current !== cid) return;
+      changeWorkspace({selected: 'file-history', fileHistory: {files, selected}, ...(!workspaceView.filesPinned ? {filesOpen: false} : {})});
+      setWorkspaceOpen(true);
     } catch (failure) {error((failure as Error).message);}
   }
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
@@ -290,8 +300,8 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
       interactionRun={active ? current?.run?.id : undefined}
       showDuration={!groups.slice(groupIndex + 1).some(next => next.assistant && (next.messages[0].meta?.turn_id || next.messages[0].meta?.ui_turn_id) === (message.meta?.turn_id || message.meta?.ui_turn_id))}
       onInteractionDone={requestId => finishInteraction(current!.id, requestId)}
-      changeSummary={group === latestGroup && !active && !creationOpen && changes && changes.files.length > 0
-        ? <ChangeSummary files={changes.files} open={path => void openChanges(path)}/> : undefined}
+      onHistory={(files, selected) => void openFileHistory(files, selected)}
+      onHistoryRetry={() => void loadConversation(current!.id, true).catch(failure => error(failure.message))}
       messages={group.messages} cid={current!.id} active={active} onAction={onMessageAction} onFile={onMessageFile}/>
       : <MessageBubble key={current!.id + ':' + message.id} cid={current!.id} message={message} active={active} onAction={onMessageAction} onFile={onMessageFile}/>;}) }
             {current && Boolean(current.media_tasks?.length) && <Suspense fallback={null}><ChatMediaTasks key={current.id} cid={current.id} tasks={current.media_tasks || []} configured={settings?.media_capabilities||[]} openFile={path=>void openFile(path)} configure={()=>void goRoute('multimedia')}/></Suspense>}
@@ -332,6 +342,8 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
         {workspaceOpen && current && <div className="workspace-divider" role="separator" tabIndex={0} aria-label="调整工作区宽度" aria-orientation="vertical" aria-valuemin={25} aria-valuemax={100} aria-valuenow={workspaceExpanded ? 100 : workspaceView.width || 46} onPointerDown={event => {event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId);}} onPointerMove={event => {if (event.currentTarget.hasPointerCapture(event.pointerId)) resizeWorkspace(event.clientX);}} onPointerUp={event => event.currentTarget.releasePointerCapture(event.pointerId)} onKeyDown={event => {if (['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) {event.preventDefault(); if (event.key === 'End') setWorkspaceExpanded(true); else {setWorkspaceExpanded(false); changeWorkspace({width: event.key === 'Home' ? 46 : Math.max(25, Math.min(95, (workspaceExpanded ? 100 : workspaceView.width || 46) + (event.key === 'ArrowLeft' ? 5 : -5)))});}}}}/>}
         {workspaceOpen && current && <PluginSlot kind="panel" target="workspace" scope={{conversationId:current.id}}><Workspace key={current.id} conversation={current} value={workspaceView} change={value => {if (selectedId.current === current.id) changeWorkspace(value);}} expanded={workspaceExpanded} expand={() => setWorkspaceExpanded(!workspaceExpanded)} close={closeWorkspace} obscured={Boolean(projectDialog || projectMenuOpen || showHistory || ask || historyEdit || showSkills || pluginPreview || themePreview || creationOpen && creationTab!=='design')} dark={theme === 'dark'} editors={editors} fileTree={fileTree} preserve={saveView} openReview={openReview} registerEditorFlush={registerEditorFlush} selectFile={activateFile} openFile={openFile} closeFile={closeEditor} refreshFiles={refreshFiles} createDocument={createDocument}
           canViewChanges={Boolean(changes?.repository || workspaceChanges?.error)} openChanges={() => void openChanges()}
+          historyContent={workspaceView.fileHistory && <FileHistoryPanel cid={current.id} {...workspaceView.fileHistory}
+            select={selected => changeWorkspace({fileHistory: {...workspaceView.fileHistory!, selected}})} openFile={onMessageFile}/>}
           changesContent={<ChangesPanel cid={current.id} read={workspaceChanges} selection={selectedChange} select={selectChange}
             openFile={path => void openFile(path, false, true)} refresh={refreshChanges} error={error}/>}
           error={error} confirm={confirm} libraryContent={<Suspense fallback={<div className="loading">正在打开资料库…</div>}><Library scope={'workspace:' + current.id} onError={error} confirm={confirm} projectsKey={JSON.stringify(settings?.projects || [])} onReference={(source, items) => addLibraryReference(source, items, current.id)}/></Suspense>} fileContent={<>

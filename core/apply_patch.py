@@ -735,6 +735,7 @@ def apply_patch(workspace_dir, patch, *, context=None, confirm_delete=None, acti
     for index, change in enumerate(prepared):
         failure_phase = "commit"
         try:
+            from core.turn_files import capture_mutation
             with file_write_lock(change.abs_path, change.abs_move_path):
                 _assert_commit_path(
                     workspace_dir,
@@ -790,7 +791,8 @@ def apply_patch(workspace_dir, patch, *, context=None, confirm_delete=None, acti
                     )
                 elif change.kind == "delete":
                     _assert_expected_file(change)
-                    os.remove(change.abs_path)
+                    with capture_mutation(change.abs_path):
+                        os.remove(change.abs_path)
                     clear_read_state(change.abs_path, context)
                     applied.append(_change_summary(change))
                 elif change.kind == "move":
@@ -814,7 +816,8 @@ def apply_patch(workspace_dir, patch, *, context=None, confirm_delete=None, acti
                         )
                         try:
                             _assert_expected_file(change)
-                            os.remove(change.abs_path)
+                            with capture_mutation(change.abs_path):
+                                os.remove(change.abs_path)
                         except Exception:
                             applied.append(
                                 _change_summary(
@@ -836,7 +839,8 @@ def apply_patch(workspace_dir, patch, *, context=None, confirm_delete=None, acti
                             newline=change.newline,
                         )
                     else:
-                        os.rename(change.abs_path, change.abs_move_path)
+                        with capture_mutation(change.abs_path, change.abs_move_path):
+                            os.rename(change.abs_path, change.abs_move_path)
                         _mark_moved_file(change, context)
                         applied.append(_change_summary(change))
         except PatchError as exc:

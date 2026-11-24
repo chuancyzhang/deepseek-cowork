@@ -1,6 +1,7 @@
 import {useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
-import {ChevronDown, ChevronRight, Copy, FileDiff, FilePlus2, Folder, RefreshCw} from 'lucide-react';
-import type {WorkspaceChange, WorkspaceChangeList, WorkspaceChangeRead} from './types';
+import {ChevronDown, ChevronRight, Copy, ExternalLink, FileText, FileDiff, FilePlus2, Folder, RefreshCw} from 'lucide-react';
+import type {FileReference, TurnFile, WorkspaceChange, WorkspaceChangeList, WorkspaceChangeRead} from './types';
+import {historyReasons, turnFileRows} from './turnFiles';
 import {rpc} from './managementApi';
 import MoreActions, {type MenuAction} from './MoreActions';
 
@@ -26,23 +27,66 @@ function ChangeTotals({files}: {files: WorkspaceChange[]}) {
   return <span className="change-totals"><span>{number.format(files.length)} 个文件</span><ChangeCounts added={added} removed={removed}/></span>;
 }
 
-export function ChangeSummary({files, open}: {files: WorkspaceChange[]; open: (path?: string) => void}) {
+export function FileSummary({references, records = [], openFile, openHistory, failure, retry}: {
+  references: FileReference[]; records?: TurnFile[]; openFile: (path: string) => void; openHistory?: (files: TurnFile[], selected?: string) => void; failure?: string; retry?: () => void;
+}) {
   const [expanded, setExpanded] = useState(false);
-  return <section className="chat-change-summary" aria-label="工作目录变更">
-    <header>
-      <div><strong>工作目录变更</strong><ChangeTotals files={files}/></div>
-      <button className="secondary" onClick={() => open()}><FileDiff size={15} aria-hidden="true"/>查看变更</button>
-    </header>
+  const files = turnFileRows(references, records);
+  const added = records.reduce((sum, file) => sum + (file.added || 0), 0), removed = records.reduce((sum, file) => sum + (file.removed || 0), 0);
+  if (!files.length && !failure) return null;
+  return <section className="chat-change-summary" aria-label="本轮文件">
+    {files.length > 0 && <header>
+      <div><strong>{number.format(files.length)} 个文件</strong><ChangeCounts added={added} removed={removed}/></div>
+      {records.length > 0 && <button className="secondary" onClick={() => openHistory?.(records)}>查看变更</button>}
+    </header>}
+    {failure && <div className="inline-error" role="alert"><p>{failure}</p>{retry && <button onClick={retry}>重试</button>}</div>}
     <div className="chat-change-files">
       {(expanded ? files : files.slice(0, 3)).map(file => <button className="chat-change-file" key={file.path}
-        aria-label={`查看 ${file.path} 的变更`} title={file.path} onClick={() => open(file.path)}>
-        <FilePath file={file}/><ChangeCounts added={file.added} removed={file.removed}/>
+        aria-label={file.record ? `查看本轮 ${file.name} 的记录` : `打开 ${file.name} 的当前内容`} title={file.path}
+        onClick={() => file.record ? openHistory?.(records, file.record.id) : openFile(file.path)}>
+        {file.record ? <FileDiff size={16} aria-hidden="true"/> : <FileText size={16} aria-hidden="true"/>}
+        <span className="turn-file-name"><span>{file.name}</span>{file.record?.state === 'purged' && <small>历史正文已清理</small>}{file.record?.state === 'baseline_missing' && <small>缺少执行前内容</small>}</span>
+        <ChangeCounts added={file.record?.added ?? null} removed={file.record?.removed ?? null}/>
+        {file.record ? <ChevronRight size={15} aria-hidden="true"/> : <ExternalLink size={15} aria-hidden="true"/>}
       </button>)}
       {files.length > 3 && <button className="chat-change-more" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
         {expanded ? '收起文件列表' : `再显示 ${number.format(files.length - 3)} 个文件`}
         <ChevronDown size={14} aria-hidden="true" className={expanded ? 'rotated' : undefined}/>
       </button>}
     </div>
+  </section>;
+}
+
+type HistoryDetail = TurnFile & {patch: string; text: string | null; binary?: string};
+export function FileHistoryPanel({cid, files, selected, select, openFile}: {
+  cid: string; files: TurnFile[]; selected: string; select: (id: string) => void; openFile: (path: string) => void;
+}) {
+  const [response, setResponse] = useState<{cid: string; id: string; detail?: HistoryDetail; failure?: string} | null>(null), [revision, retry] = useState(0);
+  const current = response?.cid === cid && response.id === selected ? response : null;
+  const detail = current?.detail, failure = current?.failure;
+  useEffect(() => {
+    let alive = true;
+    setResponse(null);
+    if (selected) void rpc<HistoryDetail>('workspace.file_history', {conversation_id: cid, id: selected}).then(
+      value => {if (alive) setResponse({cid, id: selected, detail: value});}, error => {if (alive) setResponse({cid, id: selected, failure: error.message});},
+    );
+    return () => {alive = false;};
+  }, [cid, selected, revision]);
+  return <section className="workspace-changes" aria-label="本轮文件记录">
+    <header className="file-toolbar"><span>{files.length} 个文件 · 只读</span><time>{files[0] && new Date(files[0].created_at * 1000).toLocaleString('zh-CN')}</time></header>
+    <div className="workspace-change-list">{files.map(file => <div className="workspace-change" key={file.id}>
+      <div className="workspace-change-row"><button className="workspace-change-path" aria-expanded={selected === file.id} onClick={() => select(selected === file.id ? '' : file.id)}>
+        {selected === file.id ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span className="change-path" title={file.path}>{file.name}</span>
+      </button><ChangeCounts added={file.added} removed={file.removed}/></div>
+      {selected === file.id && <div className="turn-file-detail">
+        <div className="file-toolbar"><span>{file.status === 'deleted' ? '本轮删除' : file.status === 'added' ? '本轮新增' : '本轮修改'}</span><button className="secondary" onClick={() => openFile(file.path)}>打开当前文件</button></div>
+        {failure ? <div className="inline-error" role="alert"><p>历史记录读取失败：{failure}</p><button onClick={() => retry(revision + 1)}>重试</button></div> : !detail ? <p className="workspace-diff-empty" role="status">正在读取记录…</p> : <>
+          {historyReasons[detail.state] && <p className="workspace-diff-empty" role="status">{historyReasons[detail.state]}</p>}
+          {detail.patch ? <DiffCode patch={detail.patch} name={file.name}/> : detail.text != null ? <pre className="turn-file-content" tabIndex={0}>{detail.text || '（空文件）'}</pre> : null}
+          {detail.binary && <a className="turn-file-download" download={file.name.split(/[\\/]/).pop()} href={'data:application/octet-stream;base64,' + detail.binary}>下载本轮副本</a>}
+        </>}
+      </div>}
+    </div>)}</div>
   </section>;
 }
 
@@ -112,6 +156,13 @@ function diffLines(patch: string): DiffLine[] {
     }
   }
   return lines;
+}
+
+export function DiffCode({patch, name}: {patch: string; name: string}) {
+  const lines = useMemo(() => diffLines(patch), [patch]);
+  return <div className="workspace-diff-scroll" tabIndex={0} aria-label={name + ' 的文本差异'}><div className="workspace-diff-code">{lines.map(({kind, text, before, after}, index) => <div key={index} className={'diff-line diff-' + kind}>
+    {kind === 'range' || kind === 'note' ? <span>{text}</span> : <><span className="diff-line-number">{before}</span><span className="diff-line-number">{after}</span><span className="diff-marker">{kind === 'added' ? '+' : kind === 'removed' ? '−' : ' '}</span><code>{text || ' '}</code></>}
+  </div>)}</div></div>;
 }
 
 type Patch = {patch: string; too_large?: boolean};

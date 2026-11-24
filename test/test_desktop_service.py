@@ -57,6 +57,15 @@ class Provider(BaseHTTPRequestHandler):
                 self.wfile.write(b'data: {"id":"fixture","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n')
                 self.wfile.flush()
                 return
+            file_task = any('TURN-FILE-TEST' in str(m.get('content')) for m in messages if m['role'] == 'user')
+            if file_task and not any(m['role'] == 'tool' for m in messages):
+                chunk = {'id': 'fixture', 'choices': [{'index': 0, 'delta': {'tool_calls': [{'index': 0,
+                    'id': 'file-test-call', 'type': 'function', 'function': {'name': 'apply_patch',
+                    'arguments': json.dumps({'patch': '*** Begin Patch\n*** Add File: result.txt\n+saved result\n*** End Patch'})}}]}, 'finish_reason': None}]}
+                self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
+                self.wfile.write(b'data: {"id":"fixture","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n')
+                self.wfile.flush()
+                return
             for text in (["阶段输出。"] * 12 if guidance_check else ["已收到。", "这是本地流式验证。"] if not slow else ["保留这部分回答。"] + ["继续输出。"] * 200):
                 chunk = {"id": "fixture", "object": "chat.completion.chunk", "created": 1, "model": "fixture",
                          "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]}
@@ -273,6 +282,37 @@ class DesktopIntegrationTests(unittest.TestCase):
         params = dict(conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex, text=text, model_id=self.model_id)
         self.client.call("conversation.send", **params)
         return params
+
+    def test_turn_files_and_external_attachments_survive_followup_and_restart(self):
+        import base64
+        c = self.client
+        c.call('settings.permission', enabled=True)
+        project = Path(self.temp.name) / 'project'
+        project.mkdir()
+        cid = c.call('conversation.create', workspace_dir=str(project))['id']
+        attachment = c.call('workspace.attach_data', conversation_id=cid, name='reference.txt', base64=base64.b64encode(b'reference').decode())
+        self.assertFalse(Path(attachment['path']).is_relative_to(project))
+        first = dict(conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex,
+                     text='TURN-FILE-TEST', model_id=self.model_id, attachments=[attachment])
+        c.call('conversation.send', **first)
+        c.wait_run(cid)
+        value = c.call('conversation.get', conversation_id=cid)
+        self.assertEqual(value['run']['status'], 'completed', value['run'])
+        records = [file for message in value['render_messages'] for file in message.get('turn_files', [])]
+        self.assertEqual(len(records), 1, value)
+        detail = c.call('workspace.file_history', conversation_id=cid, id=records[0]['id'])
+        self.assertIn('+saved result', detail['patch'])
+        self.assertEqual(records[0]['run_id'], first['request_id'])
+        self.assertTrue(any(attachment['path'] in (message.get('meta') or {}).get('user_added_files', []) for message in value['messages'] if message['role'] == 'user'), value['messages'])
+        self.submit(cid, '解释刚才的结果')
+        c.wait_run(cid)
+        Path(project / 'result.txt').write_bytes(b'current changed externally\n')
+        c.close()
+        self.client = ServiceClient(self.temp.name)
+        reopened = self.client.call('conversation.get', conversation_id=cid)
+        self.assertEqual([file for message in reopened['render_messages'] for file in message.get('turn_files', [])], records)
+        self.assertEqual(self.client.call('workspace.file_history', conversation_id=cid, id=records[0]['id']), detail)
+        self.assertNotIn('turn_files', json.dumps(reopened['messages']))
 
     def test_sidebar_groups_and_pins_persist_without_changing_workspaces(self):
         client = self.client

@@ -242,6 +242,8 @@ export function interleaveGuidance(messages: Message[], events: RuntimeEvent[]):
         ordered.push({time:piece.time, order, message:{...message,
           id:beforeGuidance ? `${message.id}:before:${guidance[part].id}` : message.id,
           content:piece.content, reasoning_content:piece.thinking,
+          turn_files:part === last ? message.turn_files : undefined,
+          file_history_error:part === last ? message.file_history_error : undefined,
           tool_calls:piece.calls.map(call => message.tool_calls?.find(item => item.id === call.id) || call),
           live:message.live && !beforeGuidance,
           meta:{...message.meta, ui_source_message_id:message.meta?.ui_source_message_id || message.id,

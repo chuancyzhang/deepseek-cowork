@@ -191,7 +191,7 @@ class DesktopWorkbench:
 
 
 class DesktopFiles:
-    methods = frozenset(['workspace.list', 'workspace.changes', 'workspace.diff', 'workspace.attach', 'workspace.attach_data', 'workspace.create', 'file.describe', 'file.open', 'file.save', 'file.save_copy',
+    methods = frozenset(['workspace.list', 'workspace.changes', 'workspace.diff', 'workspace.file_history', 'workspace.attach', 'workspace.attach_data', 'workspace.create', 'file.describe', 'file.open', 'file.save', 'file.save_copy',
                          'file.render', 'file.render_result', 'file.install_renderer', 'file.preview'])
 
     def __init__(self, storage, config, jobs=None):
@@ -199,8 +199,20 @@ class DesktopFiles:
         self.file_sessions = {}
         self.jobs = jobs
 
+    def history_store(self):
+        from core.turn_files import TurnFileStore
+        return TurnFileStore(self.config.get_chat_history_dir())
+
+    def attachment_root(self, cid):
+        from core.turn_files import attachment_root
+        self.workspace(cid)
+        return attachment_root(self.config, cid)
+
     def dispatch(self, method, p):
         cid = str(p.get("conversation_id") or "")
+        if method == "workspace.file_history":
+            self.workspace(cid)
+            return self.history_store().read(cid, str(p.get("id") or ""))
         if method == "file.install_renderer":
             self.workspace(cid)
             from core.libreoffice_component import install
@@ -267,7 +279,7 @@ class DesktopFiles:
                     break
             return {"root": str(root), "folder": str(folder), "files": result}
         if method == "workspace.attach_data":
-            root = self.checked_file(cid, "attachments")
+            root = self.attachment_root(cid)
             name = str(p.get("name") or "粘贴图片.png")
             if name in {".", ".."} or any(char in name for char in '/\\\x00:'):
                 raise ValueError("附件文件名无效，请重新粘贴或通过添加文件选择。")
@@ -281,7 +293,7 @@ class DesktopFiles:
                 raise ValueError("粘贴附件内容无效，请重新复制后粘贴。") from exc
             if not content or len(content) > maximum:
                 raise ValueError("粘贴附件为空或超过 40 MiB，请保存为文件后添加。")
-            root.mkdir(exist_ok=True)
+            root.mkdir(parents=True, exist_ok=True)
             target = root / (uuid.uuid4().hex + "-" + name)
             log.info("attachment_save_start session=%s bytes=%s", cid, len(content))
             try:
@@ -296,8 +308,8 @@ class DesktopFiles:
             log.info("attachment_save_completed session=%s bytes=%s", cid, len(content))
             return {"name": name, "path": str(target), "size": len(content)}
         if method == "workspace.attach":
-            root = self.workspace(cid) / "attachments"
-            root.mkdir(exist_ok=True)
+            root = self.attachment_root(cid)
+            root.mkdir(parents=True, exist_ok=True)
             sources = [Path(source_name).resolve() for source_name in p["paths"]]
             if any(not source.is_file() or source.stat().st_size > 50 * 1024 * 1024 for source in sources):
                 raise ValueError("附件不存在或超过 50 MiB。")
@@ -452,6 +464,17 @@ class DesktopFiles:
         from core.deliverable_preview import iter_local_file_references, normalize_workspace_file, DELIVERABLE_TYPES
         root = self.workspace(conversation_id)
         projected = []
+        history, history_error = None, ""
+        run_files = {}
+        if self.config:
+            try:
+                history = self.history_store()
+                runs = {str((message.get("meta") or {}).get("turn_id") or (message.get("meta") or {}).get("ui_turn_id") or "") for message in messages}
+                for item in history.list(conversation_id, runs):
+                    run_files.setdefault(item["run_id"], []).append(item)
+            except Exception:
+                log.exception("turn_file_list_failed session=%s", conversation_id)
+                history, history_error = None, "文件记录暂时无法读取，聊天内容已保留。"
         for message in messages:
             content = message.get("content") or ""
             if isinstance(content, list):
@@ -469,7 +492,20 @@ class DesktopFiles:
                         files[key] = {"path": path, "url": target.as_uri(), "name": target.relative_to(root).as_posix(),
                                       "kind": kind, "label": label, "references": []}
                     files[key]["references"].append(reference.strip("<>"))
-            projected.append({**message, "file_references": list(files.values())})
+            references = list(files.values())
+            if history and message.get("role") == "assistant" and message.get("id"):
+                try:
+                    references = history.references(conversation_id, message["id"], references)
+                except Exception:
+                    log.exception("turn_file_references_failed session=%s", conversation_id)
+                    history, history_error = None, "文件清单暂时无法保存或恢复，聊天内容已保留。"
+            projected.append({**message, "file_references": references})
+        for message in reversed(projected):
+            run = str((message.get("meta") or {}).get("turn_id") or (message.get("meta") or {}).get("ui_turn_id") or "")
+            if message.get("role") in {"assistant", "tool"} and run in run_files:
+                message["turn_files"] = run_files.pop(run)
+            if message.get("role") in {"assistant", "tool"} and history_error:
+                message["file_history_error"], history_error = history_error, ""
         log.debug("message_file_references session=%s messages=%s files=%s", conversation_id, len(projected),
                   sum(len(message["file_references"]) for message in projected))
         return projected
@@ -478,6 +514,10 @@ class DesktopFiles:
         root = self.workspace(conversation_id)
         target = Path(path).expanduser()
         target = (root / target).resolve() if not target.is_absolute() else target.resolve()
+        if self.config:
+            own_uploads = self.attachment_root(conversation_id)
+            if target.is_relative_to(own_uploads.parent.parent) and "uploads" in target.relative_to(own_uploads.parent.parent).parts and not target.is_relative_to(own_uploads):
+                raise ValueError("附件不属于当前对话。")
         if not target.is_file():
             raise ValueError("文件不存在或已被移动，请恢复原文件后重新打开。")
         log.info("file_preview_open session=%s outside_workspace=%s", conversation_id, not target.is_relative_to(root))
@@ -492,6 +532,7 @@ class DesktopFiles:
         draft_root = (draft_base / conversation_id).resolve() if draft_base else None
         if draft_root and draft_root.parent != draft_base:
             draft_root = None
-        if not target.is_relative_to(root) and not (draft_root and target.is_relative_to(draft_root)):
+        uploads = self.attachment_root(conversation_id) if self.config else None
+        if not target.is_relative_to(root) and not (draft_root and target.is_relative_to(draft_root)) and not (uploads and target.is_relative_to(uploads)):
             raise ValueError("文件不属于当前工作目录，请先切换工作目录。")
         return target

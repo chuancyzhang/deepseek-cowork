@@ -77,7 +77,9 @@ class ManagementTests(unittest.TestCase):
         self.assertEqual(value["messages"], before)
         self.assertEqual(storage.get_messages(cid), before)
         document.unlink()
-        self.assertEqual(c.call("conversation.get", conversation_id=cid)["render_messages"][1]["file_references"], [])
+        self.assertEqual(c.call("conversation.get", conversation_id=cid)["render_messages"][1]["file_references"], files)
+        with self.assertRaisesRegex(RuntimeError, '不存在或已被移动'):
+            c.call('file.open', conversation_id=cid, path=str(document))
 
     def test_visualization_state_is_bound_to_conversation_and_file_hash(self):
         import hashlib

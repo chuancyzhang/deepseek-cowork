@@ -31,7 +31,7 @@ app.setPath('userData', path.join(dataDir, 'desktop-browser'));
 const entry = pathToFileURL(path.join(__dirname, '../dist/index.html')).href;
 const allowed = new Set(['app.bootstrap', 'conversation.create', 'conversation.list', 'conversation.get', 'conversation.rename',
   'conversation.archive', 'conversation.send', 'conversation.stop', 'conversation.steer', 'draft.save', 'view.save', 'view.get', 'interaction.respond',
-  'settings.get', 'settings.save_model', 'settings.select_model', 'settings.permission', 'settings.theme', 'settings.context', 'workspace.list', 'workspace.changes', 'workspace.diff',
+  'settings.get', 'settings.save_model', 'settings.select_model', 'settings.permission', 'settings.theme', 'settings.context', 'workspace.list', 'workspace.changes', 'workspace.diff', 'workspace.file_history',
   'workspace.create', 'workspace.attach', 'workspace.attach_data', 'file.open', 'file.save', 'skills.list', 'workbench.result']);
 for (const method of ['project.list', 'project.save', 'project.edit', 'project.archive', 'project.restore', 'conversation.search',
   'sidebar.create_group', 'sidebar.move', 'sidebar.pin_project',

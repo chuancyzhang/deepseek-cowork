@@ -2717,6 +2717,11 @@ class LLMWorker(TaskWorker):
         return projected
 
     def _call_run_tool(self, name, args, context):
+        from core.turn_files import capture_owner
+        with capture_owner(self.config_manager, self.session_id, self.request_id or self.turn_id, self.workspace_dir):
+            return self._invoke_run_tool(name, args, context)
+
+    def _invoke_run_tool(self, name, args, context):
         guard = getattr(self, "_team_space_guard", None)
         if guard is not None:
             guard()

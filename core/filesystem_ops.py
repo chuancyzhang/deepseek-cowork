@@ -1,5 +1,6 @@
 import codecs
 from .file_write_locks import locked_path, file_write_lock
+from .turn_files import capture_mutation
 import fnmatch
 import hashlib
 import os
@@ -806,12 +807,15 @@ def _atomic_write_bytes(abs_path, data, *, existed_before, expected_sha256=None)
                 raise RuntimeError("File changed before commit.")
             mode_bits = stat.S_IMODE(os.stat(abs_path).st_mode)
             os.chmod(temp_path, mode_bits)
-            os.replace(temp_path, abs_path)
+            with capture_mutation(abs_path):
+                os.replace(temp_path, abs_path)
         elif os.name == "nt":
-            os.rename(temp_path, abs_path)
+            with capture_mutation(abs_path):
+                os.rename(temp_path, abs_path)
         else:
-            os.link(temp_path, abs_path)
-            os.unlink(temp_path)
+            with capture_mutation(abs_path):
+                os.link(temp_path, abs_path)
+                os.unlink(temp_path)
         temp_path = ""
     finally:
         if temp_path and os.path.exists(temp_path):
@@ -853,7 +857,8 @@ def rename_path(workspace_dir, old_path, new_path, context=None, action="rename_
 
     try:
         with file_write_lock(abs_old, abs_new):
-            os.rename(abs_old, abs_new)
+            with capture_mutation(abs_old, abs_new):
+                os.rename(abs_old, abs_new)
             state = _get_file_state(context)
             reads = state.get("reads", {})
             if isinstance(reads, dict):
@@ -905,15 +910,20 @@ def delete_path(workspace_dir, path, recursive=False, confirm_callback=None, con
     try:
         with file_write_lock(abs_path):
             if os.path.isfile(abs_path):
-                os.remove(abs_path)
+                with capture_mutation(abs_path):
+                    os.remove(abs_path)
                 clear_read_state(abs_path, context, recursive=False)
                 removed = "file"
             elif os.path.isdir(abs_path):
                 if recursive_flag:
-                    shutil.rmtree(abs_path)
+                    # Recursive deletion can partially succeed before raising;
+                    # retain its pending record if the operation cannot confirm completion.
+                    with capture_mutation(abs_path, partial=True):
+                        shutil.rmtree(abs_path)
                     removed = "directory_recursive"
                 else:
-                    os.rmdir(abs_path)
+                    with capture_mutation(abs_path):
+                        os.rmdir(abs_path)
                     removed = "directory"
                 clear_read_state(abs_path, context, recursive=True)
             else:

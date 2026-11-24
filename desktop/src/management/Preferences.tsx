@@ -297,7 +297,7 @@ function General({ settings, onError, onDirty }: Props) {
   const [value, setValue] = useState<any>(null), [failure, setFailure] = useState('');
   useEffect(() => { void rpc('settings.general').then(setValue).catch(error => setFailure(error.message)); }, []);
   return <><PageHead compact title="工作偏好" detail="选择工作文件的位置，管理本机数据。"/>{failure && <ErrorState message={failure}/>}{value && <GeneralForm initial={value} onDirty={onDirty} onError={onError}/>}
-    <section className="settings-section"><h3>本机数据</h3><p>正式版沿用原有数据目录；开发版使用隔离目录。</p><code className="data-path">{settings?.data_dir}</code><button className="secondary" onClick={() => void rpc('app.logs')}>打开诊断日志</button></section></>;
+    <section className="settings-section"><h3>本机数据</h3><p>正式版沿用原有数据目录；开发版使用隔离目录。</p><code className="data-path">{settings?.data_dir}</code><p>聊天附件保存在项目外，随聊天保留。文件记录与当时统计持续保留；历史正文单个版本最多 2 MiB，每轮最多 16 MiB，总配额 256 MiB。超额时优先清理最早已结束任务的正文，旧记录会说明清理原因。附件、交付物和备份原件不在清理范围内。</p><button className="secondary" onClick={() => void rpc('app.logs')}>打开诊断日志</button></section></>;
 }
 function GeneralForm({ initial, onDirty, onError }: any) {
   const form = useFormDraft('general', initial, onDirty), v = form.value;

@@ -394,3 +394,183 @@ def test_workspace_changes_read_index_and_saved_files_inside_conversation_direct
     with pytest.raises(WorkbenchError, match='文件不属于当前工作目录'):
         read('workspace.diff', path=str(outside))
     assert (root / '.git' / 'index').read_bytes() == index
+
+
+def test_turn_file_history_uses_actual_write_baseline_and_survives_next_turn(tmp_path):
+    from core.turn_files import TurnFileStore, capture_owner
+    from core.filesystem_ops import _atomic_write_bytes
+    from core.desktop_workbench import DesktopFiles
+    import copy
+    import pytest
+    root = tmp_path / 'project'
+    root.mkdir()
+    history = tmp_path / 'history'
+    config = SimpleNamespace(get_chat_history_dir=lambda: str(history))
+    source = root / 'task.py'
+    source.write_bytes(b'user uncommitted\n')
+    with capture_owner(config, 'a', 'first', root):
+        _atomic_write_bytes(str(source), b'first result\n', existed_before=True)
+        _atomic_write_bytes(str(source), b'final result\n', existed_before=True)
+    store = TurnFileStore(history)
+    first = store.list('a')[0]
+    detail = store.read('a', first['id'])
+    assert '-user uncommitted' in detail['patch'] and '+final result' in detail['patch']
+    assert 'first result' not in detail['patch']
+    assert first['added'] == first['removed'] == 1
+    with capture_owner(config, 'a', 'second', root):
+        _atomic_write_bytes(str(source), b'next turn\n', existed_before=True)
+    assert store.read('a', first['id']) == detail
+    with capture_owner(config, 'b', 'other', root):
+        _atomic_write_bytes(str(source), b'other conversation\n', existed_before=True)
+    assert len(store.list('b')) == 1 and len(store.list('a')) == 2
+    with pytest.raises(ValueError, match='不属于'):
+        store.read('b', first['id'])
+    files = DesktopFiles(SimpleNamespace(get_conversation_record=lambda cid: {'meta': {'workspace_dir': str(root)}}), config)
+    messages = [{'id': 'reply', 'role': 'assistant', 'content': '[脚本](task.py)', 'meta': {'turn_id': 'first'}}]
+    original = copy.deepcopy(messages)
+    displayed = files.message_files('a', messages)
+    assert displayed[0]['turn_files'][0]['id'] == first['id']
+    assert len(displayed[0]['file_references']) == 1
+    source.unlink()
+    reopened = DesktopFiles(files.storage, config).message_files('a', messages + [{'id': 'new', 'role': 'user', 'content': '解释一下'}])
+    assert reopened[0]['file_references'] == displayed[0]['file_references']
+    assert reopened[0]['turn_files'] == displayed[0]['turn_files']
+    assert messages == original  # Provider history never acquires UI records.
+
+
+def test_turn_history_partial_patch_and_move_delete_are_recorded(tmp_path):
+    from core.turn_files import TurnFileStore, capture_owner
+    from core.apply_patch import apply_patch
+    from core.filesystem_ops import read_text_file, rename_path, delete_path
+    config = SimpleNamespace(get_chat_history_dir=lambda: str(tmp_path / 'history'), get_god_mode=lambda: True)
+    root = tmp_path / 'project'
+    root.mkdir()
+    source = root / 'old.txt'
+    source.write_bytes(b'old\n')
+    context = {'config_manager': config}
+    read_text_file(str(root), 'old.txt', context=context)
+    with capture_owner(config, 'a', 'run', root):
+        result = apply_patch(str(root), '*** Begin Patch\n*** Update File: old.txt\n@@\n-old\n+new\n*** Add File: backup.txt\n+old\n*** End Patch', context=context)
+        assert result['ok'], result
+        assert rename_path(str(root), 'old.txt', 'moved.txt', context=context)['ok']
+        assert delete_path(str(root), 'backup.txt', context=context, confirm_callback=lambda *_: True)['ok']
+    records = TurnFileStore(tmp_path / 'history').list('a')
+    assert {item['name']: item['status'] for item in records} == {'old.txt': 'deleted', 'moved.txt': 'added'}
+
+
+def test_turn_file_reverted_writes_have_no_net_change(tmp_path):
+    from core.turn_files import TurnFileStore, capture_owner
+    from core.filesystem_ops import _atomic_write_bytes
+    config = SimpleNamespace(get_chat_history_dir=lambda: str(tmp_path / 'history'))
+    source = tmp_path / 'file.txt'
+    source.write_bytes(b'original\n')
+    with capture_owner(config, 'chat', 'run', tmp_path):
+        _atomic_write_bytes(str(source), b'changed\n', existed_before=True)
+        _atomic_write_bytes(str(source), b'original\n', existed_before=True)
+    store = TurnFileStore(tmp_path / 'history')
+    assert store.list('chat') == []
+    with capture_owner(config, 'chat', 'run', tmp_path):
+        _atomic_write_bytes(str(source), b'final\n', existed_before=True)
+    record = store.list('chat')[0]
+    assert '-original' in store.read('chat', record['id'])['patch']
+
+
+def test_turn_file_capture_does_not_attribute_failed_operations_or_shell_output(tmp_path):
+    import pytest
+    from core.turn_files import TurnFileStore, capture_owner, capture_mutation
+    from core.filesystem_ops import _atomic_write_bytes
+    config = SimpleNamespace(get_chat_history_dir=lambda: str(tmp_path / 'history'))
+    source = tmp_path / 'file.txt'
+    source.write_bytes(b'before\n')
+    with capture_owner(config, 'a', 'run', tmp_path):
+        with pytest.raises(OSError), capture_mutation(source):
+            raise OSError('denied before commit')
+        # Opaque scripts do not opt in, so a path or a timestamp is not evidence.
+        source.write_bytes(b'opaque script or external edit\n')
+    store = TurnFileStore(tmp_path / 'history')
+    assert store.list('a') == []
+    with capture_owner(config, 'a', 'run', tmp_path):
+        _atomic_write_bytes(str(source), b'known write\n', existed_before=True)
+    source.write_bytes(b'external concurrent edit\n')
+    with capture_owner(config, 'a', 'run', tmp_path):
+        _atomic_write_bytes(str(source), b'known write again\n', existed_before=True)
+    record = store.list('a')[0]
+    assert record['state'] == 'baseline_missing' and record['added'] is None
+    assert store.read('a', record['id'])['patch'] == ''
+
+
+def test_history_quota_reclaims_only_finished_bodies_and_preserves_statistics(tmp_path):
+    from core.turn_files import TurnFileStore, capture_owner
+    from core.filesystem_ops import _atomic_write_bytes
+    config = SimpleNamespace(get_chat_history_dir=lambda: str(tmp_path / 'history'))
+    original = tmp_path / 'original.txt'
+    original.write_bytes(b'unrelated attachment')
+    source = tmp_path / 'new.txt'
+    with capture_owner(config, 'a', 'old', tmp_path):
+        _atomic_write_bytes(str(source), b'first\n', existed_before=False)
+    store = TurnFileStore(tmp_path / 'history', total_limit=1)
+    first = store.list('a')[0]
+    store.finish('a', 'different')
+    assert store.read('a', first['id'])['state'] == 'available'
+    store.finish('a', 'old')
+    purged = store.read('a', first['id'])
+    assert purged['state'] == 'purged' and purged['added'] == 1 and purged['patch'] == ''
+    assert original.read_bytes() == b'unrelated attachment' and source.read_bytes() == b'first\n'
+    # A later task can still capture fresh content using the normal budget.
+    with capture_owner(config, 'a', 'new', tmp_path):
+        _atomic_write_bytes(str(source), b'second\n', existed_before=True)
+    assert len(store.list('a')) == 2
+    assert store.list('a')[-1]['state'] == 'available'
+
+
+def test_new_attachments_live_outside_projects_and_reject_other_conversations(tmp_path):
+    import base64
+    import pytest
+    from pathlib import Path
+    from core.desktop_workbench import DesktopFiles
+    project = tmp_path / 'project'
+    project.mkdir()
+    config = SimpleNamespace(get_chat_history_dir=lambda: str(tmp_path / 'history'))
+    files = DesktopFiles(SimpleNamespace(get_conversation_record=lambda cid: {'meta': {'workspace_dir': str(project)}}), config)
+    pasted = files.dispatch('workspace.attach_data', {'conversation_id': 'a', 'name': '截图.png', 'base64': base64.b64encode(b'image').decode()})
+    source = tmp_path / 'report.txt'
+    source.write_bytes(b'report')
+    uploaded = files.dispatch('workspace.attach', {'conversation_id': 'a', 'paths': [str(source)]})[0]
+    assert list(project.iterdir()) == []
+    for item in (pasted, uploaded):
+        assert not Path(item['path']).is_relative_to(project)
+        assert files.checked_file('a', item['path']) == Path(item['path'])
+        assert files.preview_file('a', item['path']) == Path(item['path'])
+        with pytest.raises(ValueError):
+            files.checked_file('b', item['path'])
+        with pytest.raises(ValueError, match='不属于'):
+            files.preview_file('b', item['path'])
+    legacy = project / 'attachments' / 'old.txt'
+    legacy.parent.mkdir()
+    legacy.write_bytes(b'old')
+    assert files.preview_file('a', str(legacy)) == legacy
+
+
+def test_file_history_failure_preserves_chat_and_committed_file(tmp_path, monkeypatch):
+    from core.turn_files import TurnFileStore, capture_owner
+    from core.filesystem_ops import _atomic_write_bytes
+    from core.desktop_workbench import DesktopFiles
+    config = SimpleNamespace(get_chat_history_dir=lambda: str(tmp_path / 'history'))
+    source = tmp_path / 'result.txt'
+    complete = TurnFileStore.complete
+    monkeypatch.setattr(TurnFileStore, 'complete', Mock(side_effect=OSError('disk unavailable')))
+    with capture_owner(config, 'chat', 'run', tmp_path):
+        _atomic_write_bytes(str(source), b'committed once\n', existed_before=False)
+    assert source.read_bytes() == b'committed once\n'
+    monkeypatch.setattr(TurnFileStore, 'complete', complete)
+    store = TurnFileStore(tmp_path / 'history')
+    pending = store.list('chat')[0]
+    assert pending['state'] == 'pending'
+    assert store.read('chat', pending['id'])['patch'] == ''
+    files = DesktopFiles(SimpleNamespace(get_conversation_record=lambda cid: {'meta': {'workspace_dir': str(tmp_path)}}), config)
+    monkeypatch.setattr(files, 'history_store', Mock(side_effect=OSError('unreadable index')))
+    message = {'id': 'answer', 'role': 'assistant', 'content': '已保存 result.txt'}
+    displayed = files.message_files('chat', [message])[0]
+    assert displayed['content'] == message['content']
+    assert '聊天内容已保留' in displayed['file_history_error']
+    assert 'file_history_error' not in message

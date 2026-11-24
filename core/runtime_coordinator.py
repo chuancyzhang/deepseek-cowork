@@ -198,6 +198,12 @@ class RuntimeCoordinator:
             run = self.runtime_journal.update_run(session_id, run_id, {"status": status, "terminal_error": str(error)})
             if hasattr(self, "desktop_store"):
                 self.desktop_store.set_run(run_id, run["status"], run.get("terminal_error", ""))
+            if run["status"] in RUN_TERMINAL_STATUSES:
+                from core.turn_files import TurnFileStore
+                try:
+                    TurnFileStore(self.config_manager.get_chat_history_dir()).finish(session_id, run_id)
+                except Exception as exc:
+                    _log_daemon(f"turn_file_retention_failed session_id={session_id} run_id={run_id} error={type(exc).__name__}")
             return run
 
     def recover_runs(self):

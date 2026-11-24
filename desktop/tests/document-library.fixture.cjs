@@ -181,7 +181,9 @@ async function run(){
   await read('document.querySelector(".library-menu [role=menuitem]").click()');
   await until('document.querySelector(".library-notice")?.textContent.includes("已添加 2 份资料")');
   const chat=await rpc('conversation.get',{conversation_id:cid});
-  assert.equal((await fs.readdir(path.join(chat.meta.workspace_dir,'attachments'))).length,2);
+  const uploads=path.join(process.env.COWORK_APP_DATA_DIR,'chat_history','attachments',cid,'uploads');
+  assert.equal((await fs.readdir(uploads)).length,2);
+  assert.equal(await fs.access(path.join(chat.meta.workspace_dir,'attachments')).then(()=>true,()=>false),false);
   await click('将所选项移到回收站');
   await until('document.querySelector("dialog[open]")?.textContent.includes("移到回收站")');
   await click('移到回收站');

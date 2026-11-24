@@ -178,6 +178,7 @@ def _review_request(context, batch, images, constraints, deadline):
         stream = provider.chat_stream(messages, tools=[], prompt_cache_key=None, request_context={
             'client_request_id': request_id, 'run_id': context.get('run_id'), 'conversation_id': context.get('session_id'),
             'tools_disabled': True, 'max_output_tokens': 4096, 'max_retries': 0,
+            'defer_text_until_completed': True,
             'abort_check': aborted, 'register_stream': register, 'release_stream': release, 'validate_request': validate,
             'chat_audit_version': context.get('document_review_audit_version', 0),
             'capture_request': (lambda protocol, params: audit(protocol, params, request_id)) if callable(audit) else None})

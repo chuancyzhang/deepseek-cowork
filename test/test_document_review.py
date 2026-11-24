@@ -36,6 +36,7 @@ class EchoReviewer:
         self.calls.append(copy.deepcopy(messages))
         assert len(messages)==2 and not tools and prompt_cache_key is None
         assert request_context['max_retries']==0
+        assert request_context['defer_text_until_completed'] is True
         parts=messages[1]['content_parts']
         wire={'images':['data:image/png;base64,'+base64.b64encode(Path(p['path']).read_bytes()).decode() for p in parts]}
         request_context['validate_request']('chat_completions',{} if self.mode=='missing' else wire)

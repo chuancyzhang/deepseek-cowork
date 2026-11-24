@@ -516,6 +516,35 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
                 self.assertEqual(next(chunk["status"] for chunk in chunks if chunk["type"] == "provider_terminal"),
                                  "completed")
 
+    def test_responses_deferred_text_accepts_only_matching_completed_response(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1", model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        text = '{"pages":[{"page":1,"summary":"完整可读","issues":[]}]}'
+        created = SimpleNamespace(type="response.created", response=SimpleNamespace(id="resp-review"))
+        delta = SimpleNamespace(type="response.output_text.delta", delta=text[:-1]+',"z_end_turn_review":"')
+        output = [{"id":"msg-review","type":"message","role":"assistant","status":"completed",
+                   "content":[{"type":"output_text","text":text}]}]
+        completed = SimpleNamespace(type="response.completed", response=SimpleNamespace(id="resp-review",output=output,usage=None))
+        context = {"defer_text_until_completed":True,"tools_disabled":True,"max_retries":0}
+        for ending in (completed, None, SimpleNamespace(type="response.completed", response=SimpleNamespace(id="resp-other",output=output,usage=None))):
+            with self.subTest(ending=getattr(getattr(ending,"response",None),"id",None)):
+                client.responses.create.return_value = [created,delta]+([ending] if ending else [])
+                chunks=list(provider.chat_stream([{"role":"user","content":"review"}],request_context=context))
+                contents=[c["content"] for c in chunks if c["type"]=="content"]
+                if ending is completed:
+                    self.assertEqual(contents,[text])
+                    self.assertEqual(next(c for c in chunks if c["type"]=="provider_terminal")["status"],"completed")
+                else:
+                    self.assertEqual(contents,[])
+                    self.assertTrue(any(c["type"]=="error" for c in chunks))
+                    self.assertFalse(any(c["type"]=="provider_terminal" and c.get('status')=='completed' for c in chunks))
+        deferred_params=client.responses.create.call_args.kwargs
+        client.responses.create.return_value=[completed]
+        list(provider.chat_stream([{"role":"user","content":"review"}],request_context={"tools_disabled":True,"max_retries":0}))
+        self.assertEqual(client.responses.create.call_args.kwargs,deferred_params,'local buffering must not alter model requests or prompt prefix')
+
     def test_responses_final_conflicts_preserve_streamed_text_and_require_manual_retry(self):
         provider, client = self._build_provider(
             base_url="https://api.openai.com/v1", model_name="gpt-5.6",

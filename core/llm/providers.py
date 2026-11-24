@@ -884,6 +884,9 @@ class OpenAIProvider(LLMProvider):
     def _responses_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
         request_context = request_context if isinstance(request_context, dict) else {}
         client_request_id = str(request_context.get("client_request_id") or "")[:512]
+        # Auxiliary structured requests consume only the committed final text.
+        # Ordinary chat still publishes and protects its incremental content.
+        defer_text = request_context.get("defer_text_until_completed") is True
         params = {
             "model": self.model_name,
             "input": self._prepare_responses_input(messages),
@@ -954,7 +957,8 @@ class OpenAIProvider(LLMProvider):
                             text_delta = "".join(leading_whitespace) + text_delta
                             leading_whitespace.clear()
                     streamed_output_text += text_delta
-                    yield {"type": "content", "content": text_delta}
+                    if not defer_text:
+                        yield {"type": "content", "content": text_delta}
                 continue
             if event_type in {
                 "response.reasoning_summary_text.delta",
@@ -1072,7 +1076,18 @@ class OpenAIProvider(LLMProvider):
                                 str(part.get("refusal") or part.get("text") or "")
                             )
                 completed_output_text = "".join(completed_text_parts)
-                if streamed_output_text and not completed_output_text.startswith(streamed_output_text):
+                if defer_text:
+                    completed_id = str(self._object_value(response, "id", "") or "")
+                    if response_id and completed_id != response_id:
+                        raise RuntimeError("服务完成回执不属于当前响应，未接受最终正文。")
+                    if streamed_output_text and completed_output_text != streamed_output_text:
+                        log.info(
+                            "responses_deferred_text_completed request_id=%s response_id=%s streamed_chars=%s completed_chars=%s",
+                            client_request_id, completed_id, len(streamed_output_text), len(completed_output_text),
+                        )
+                    if completed_output_text:
+                        yield {"type": "content", "content": completed_output_text}
+                elif streamed_output_text and not completed_output_text.startswith(streamed_output_text):
                     raise RuntimeError(
                         "服务返回的最终正文与已接收内容不一致，已有内容已保留，请重试。"
                     )

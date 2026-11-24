@@ -11,7 +11,7 @@ const preview = (text:string) => new TextDecoder().decode(new TextEncoder().enco
 export function ToolProcess({cid,runId,callId,title,name,state,running,result,failed,details,children,readOnly=false}: {
   cid:string;runId?:string;callId:string;title:string;name:string;state:string;running:boolean;result?:string;failed:boolean;details:()=>void;children?:ReactNode;readOnly?:boolean;
 }) {
-  const [expanded,setExpanded] = useHostField('tool-expanded:'+cid+':'+(runId || '')+':'+callId, running);
+  const [expanded,setExpanded] = useHostField('tool-expanded:'+cid+':'+(runId || '')+':'+callId, false);
   const [output,setOutput] = useState<Output|null>(null), [failure,setFailure]=useState(''), [revision,setRevision]=useState(0);
   const root=useRef<HTMLDivElement>(null), [visible,setVisible]=useState(false);
   useEffect(()=>{

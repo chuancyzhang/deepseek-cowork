@@ -73,7 +73,7 @@
 .process-tool-heading>.process-tool{flex:1;min-width:0}
 .process-tool-heading>.process-tool>span{color:var(--chat-text,var(--text));overflow-wrap:anywhere;min-width:0}
 .process-tool-heading>.process-tool-detail{flex-shrink:0;min-height:28px;color:var(--muted);padding:3px 4px}
-.tool-output-preview{--tool-log-height:calc(19px * var(--font-scale,1));height:calc(var(--tool-log-height) * 8);overflow:hidden;margin:6px 0 4px;padding:0 8px;background:var(--soft);border-radius:5px;font:calc(12px * var(--font-scale,1))/var(--tool-log-height) var(--mono-font);color:var(--muted);user-select:text}
+.tool-output-preview{--tool-log-height:calc(19px * var(--font-scale,1));max-height:calc(var(--tool-log-height) * 8 + 12px);overflow:hidden;margin:6px 0 4px;padding:6px 8px;background:var(--soft);border-radius:5px;font:calc(12px * var(--font-scale,1))/var(--tool-log-height) var(--mono-font);color:var(--muted);user-select:text}
 .tool-output-line{height:var(--tool-log-height);line-height:var(--tool-log-height);white-space:pre;overflow:hidden;text-overflow:ellipsis}
 .tool-output-detail{min-width:0;margin-block:14px}
 .tool-output-detail .context-heading{display:flex;gap:8px;align-items:center;flex-wrap:wrap}

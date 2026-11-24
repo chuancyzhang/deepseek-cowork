@@ -107,7 +107,11 @@ class OutputLog:
             self.handle.write(record)
             self.meta['bytes'] += len(record)
             self.meta['sequence'] += 1
-            self.meta['preview'] = bounded('\n'.join((self.meta['preview'] + text).replace('\r\n', '\n').replace('\r', '\n').split('\n')[-8:]), PREVIEW_BYTES)
+            lines = (self.meta['preview'] + text).replace('\r\n', '\n').replace('\r', '\n').split('\n')
+            # A final separator ends the last line; keep it for the next chunk
+            # without charging its empty split item against the eight-line tail.
+            limit = 9 if lines[-1] == '' else 8
+            self.meta['preview'] = bounded('\n'.join(lines[-limit:]), PREVIEW_BYTES)
             self.checkpoint()
 
     def finish(self, status):

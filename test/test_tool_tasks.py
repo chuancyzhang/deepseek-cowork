@@ -803,6 +803,23 @@ class ToolOutputTest(unittest.TestCase):
             self.assertGreater(page['cursor'],cursor)
             cursor=page['cursor']
 
+    def test_preview_keeps_eight_lines_when_line_endings_arrive_in_later_chunks(self):
+        from core.tool_output import OutputLog, read_output
+        output = OutputLog(self.root, 'session', 'run', 'task', 'call')
+        self.addCleanup(lambda: output.finish('succeeded'))
+        for index in range(12):
+            expected = [f'line {number}' for number in range(max(0, index - 7), index + 1)]
+            output.append('stdout', f'line {index}')
+            self.assertEqual(output.meta['preview'].splitlines(), expected)
+            output.append('stdout', '\n')
+            self.assertEqual(output.meta['preview'].splitlines(), expected)
+            self.assertTrue(output.meta['preview'].endswith('\n'))
+        output.finish('succeeded')
+        page = read_output(self.root, 'session', 'run', 'call', cursor=0)
+        self.assertEqual(page['preview'], ''.join(f'line {number}\n' for number in range(4, 12)))
+        self.assertEqual(''.join(record['text'] for record in page['records']),
+                         ''.join(f'line {number}\n' for number in range(12)))
+
     def test_process_output_decodes_bom_and_native_encoding_across_chunks(self):
         from core.tool_output import capture_process
         for encoding in ('utf-8-sig', 'cp936'):

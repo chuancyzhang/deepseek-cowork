@@ -245,21 +245,32 @@ class MediaRuntime:
         if method == "media.save":
             return self.save_config(p)
         if method == "media.tasks":
-            return [self.public(item) for item in self.host.records(str(p.get("conversation_id") or ""))]
+            return [self.host.desktop_task(item) for item in self.host.records(str(p.get("conversation_id") or ""), versioned=True)]
         cid = str(p.get("conversation_id") or "")
         if not cid:
             raise ValueError("缺少对话身份。")
+        identity = str(p["id"])
+        if method == "media.preview":
+            record = self.get(identity, cid)
+            path = self.video_file(record, p.get("path"))
+            return (self.s.files.dispatch("file.open", {"conversation_id": cid, "path": str(path)})
+                    if path.is_file() else {"missing": True})
         if method == "media.resume":
             if p.get("remote_id"):
                 raise ValueError("只使用原任务的服务回执恢复，不接受手填编号。")
-            return self.public(self.resume(str(p["id"]), cid))
-        if method == "media.retry":
-            return self.public(self.retry(str(p["id"]), cid, p.get("updated_at")))
-        if method == "media.continue":
-            return self.public(self.continue_pending(str(p["id"]), cid))
-        if method == "media.stop":
-            return self.public(self.stop(str(p["id"]), cid))
-        raise ValueError("不支持此多媒体操作。")
+            self.resume(identity, cid, missing_file=p.get("missing_file"))
+        elif method == "media.retry":
+            self.retry(identity, cid, p.get("updated_at"), expected_revision=p.get("expected_revision"))
+        elif method == "media.continue":
+            self.continue_pending(identity, cid)
+        elif method == "media.stop":
+            self.stop(identity, cid)
+        elif method == "media.refresh":
+            self.refresh(identity, cid)
+        else:
+            raise ValueError("不支持此多媒体操作。")
+        state = self.s.store.versioned_state("media:" + identity)
+        return self.host.desktop_task(state["value"], state["revision"])
 
     def get(self, identity, cid=""):
         record = self.s.store.get_state("media:" + identity)
@@ -272,7 +283,7 @@ class MediaRuntime:
         from core.desktop_media import DesktopMedia
         return DesktopMedia.public(record)
 
-    def save(self, record, **changes):
+    def save(self, record, *, expected_revision=None, **changes):
         with self.lock:
             latest = self.s.store.get_state("media:" + record["id"], {})
             if latest.get("job_id"):
@@ -280,8 +291,9 @@ class MediaRuntime:
             if latest.get("stop_requested"):
                 record["stop_requested"] = True
             record.update(changes, updated_at=time.time())
-            self.s.store.put_state("media:" + record["id"], record)
-            self.s.publish({"event": "media_task", "conversation_id": record["conversation_id"], "data": self.public(record)})
+            receipt = self.s.store.put_state("media:" + record["id"], record, expected_revision)
+            data = self.host.desktop_task(record, receipt["revision"])
+            self.s.publish({"event": "media_task", "conversation_id": record["conversation_id"], "data": data})
         log.info("media_task_state id=%s session=%s run=%s capability=%s adapter=%s phase=%s", record["id"], record["conversation_id"],
                  record.get("run_id", ""), record["capability"], record.get("profile", {}).get("adapter", ""), record["status"])
 
@@ -332,6 +344,8 @@ class MediaRuntime:
                       "run_id": str(context.get("run_id") or context.get("turn_id") or
                                     getattr(context.get("execution_authorization"), "run_id", "")),
                       "created_at": time.time(), "status": "queued", "message": "等待提交", "files": []}
+            if capability == "video_generate" and context.get("tool_call_id"):
+                record["tool_call_id"] = str(context["tool_call_id"])
             if not profile:
                 record.update(status="needs_configuration", message="需求已保留。请在多媒体技能中选择模型，返回后点击继续任务。")
             self.save(record)
@@ -461,7 +475,8 @@ class MediaRuntime:
                 receipt_path = destination / "receipt.json"
                 Adapter.write_bytes(receipt_path, json.dumps(receipt, ensure_ascii=False).encode())
                 self.save(record, receipt=str(receipt_path), status="running" if receipt.get("remote_id") else "downloading",
-                          message="服务已接受，等待生成…" if receipt.get("remote_id") else "正在保存成果…", error_detail=None)
+                          message="服务已接受，等待生成…" if receipt.get("remote_id") else "正在保存成果…",
+                          video_phase="accepted" if receipt.get("remote_id") else None, error_detail=None)
             if record.get("remote_id") and not record.get("sources"):
                 stage = "query"
                 deadline, errors = time.monotonic() + 600, 0
@@ -488,7 +503,9 @@ class MediaRuntime:
                     if result["status"] == "generated":
                         self.save(record, sources=result["sources"], status="downloading", message="生成完成，正在保存成果…", error_detail=None)
                         break
-                    self.save(record, status="running", progress=result.get("progress"), message="正在生成视频…", error_detail=None)
+                    message = "服务排队中…" if result.get("phase") == "queued" else "正在生成视频…"
+                    self.save(record, status="running", video_phase=result.get("phase"), progress=result.get("progress"),
+                              message=message, error_detail=None)
                     progress(record["message"])
                     self.retry_wait(2, cancelled, job_cancelled)
             stage = "download"
@@ -497,6 +514,7 @@ class MediaRuntime:
                 Adapter.write_bytes(target, record["text"].encode("utf-8"))
                 record["files"] = [str(target)]
             for source in record.get("sources", []):
+                renewed = False
                 for attempt in range(len(DOWNLOAD_BACKOFF) + 1):
                     if stop():
                         return
@@ -504,6 +522,19 @@ class MediaRuntime:
                         path = adapter.download(source, destination)
                         break
                     except MediaError as exc:
+                        if (not renewed and attempt < len(DOWNLOAD_BACKOFF) and record["capability"] == "video_generate"
+                                and record.get("remote_id") and source.get("url") and exc.http_status in {403, 410}):
+                            renewed = True
+                            result = adapter.poll(record["remote_id"])
+                            replacement = next((item for item in result.get("sources", [])
+                                                if item["name"] == source["name"] and item.get("url") != source["url"]), None)
+                            if replacement:
+                                source.clear()
+                                source.update(replacement)
+                                self.report_retry(record, exc, stage, progress, "已获取新的下载地址，正在保存成片…")
+                                continue
+                            raise MediaError("下载地址暂时不可用，请核对原服务的访问权限或成片有效期。",
+                                             http_status=exc.http_status) from None
                         if not exc.retryable or attempt == len(DOWNLOAD_BACKOFF):
                             raise
                         self.report_retry(record, exc, stage, progress, "正在重试保存成果…")
@@ -606,10 +637,13 @@ class MediaRuntime:
                 log.warning("media_recovery_failed id=%s session=%s status=%s error_type=%s",
                             identity, record["conversation_id"], status, type(exc).__name__)
 
-    def retry(self, identity, cid, updated_at):
+    def retry(self, identity, cid, updated_at=None, *, expected_revision=None):
         with self.lock:
             record = self.get(identity, cid)
-            if identity in self.active or record["status"] != "not_submitted" or record["updated_at"] != updated_at:
+            if identity in self.active or record["status"] != "not_submitted":
+                return record
+            state = self.s.store.versioned_state("media:" + identity)
+            if (state["revision"] != expected_revision if expected_revision is not None else record["updated_at"] != updated_at):
                 return record
             if not self.host.enabled:
                 raise ValueError("请先启用多媒体，原需求已保留。")
@@ -619,12 +653,64 @@ class MediaRuntime:
             adapter = self.original_adapter(record)
             prepared = self.prepare(adapter, record["request"], root)
             log.info("media_retry_requested id=%s session=%s", identity, cid)
-            return self.restart_job(record, adapter, prepared, profile=self.saved_profile(adapter.profile), submit_retries=0, error_detail=None)
+            return self.restart_job(record, adapter, prepared, expected_revision=state["revision"],
+                                    profile=self.saved_profile(adapter.profile), submit_retries=0, error_detail=None,
+                                    video_phase=None, progress=None)
 
-    def resume(self, identity, cid=""):
+    def refresh(self, identity, cid):
         with self.lock:
             record = self.get(identity, cid)
-            if identity in self.active or record["status"] not in RESUMABLE:
+            if identity in self.active or not self.host.can_refresh_video(record):
+                return
+            self.task_workspace(record)
+            record.update(self.read_receipt(record))
+            if not record.get("remote_id"):
+                raise ValueError("缺少可查询的服务回执，请到服务端核对。")
+            revision = self.s.store.versioned_state("media:" + identity)["revision"]
+            adapter = self.original_adapter(record)
+        log.info("media_refresh_requested id=%s session=%s revision=%s", identity, cid, revision)
+        try:
+            result = adapter.poll(record["remote_id"], timeout=(5, 10))
+        except MediaError as exc:
+            log.info("media_refresh_failed id=%s session=%s status=%s", identity, cid, exc.http_status)
+            raise
+        with self.lock:
+            if identity in self.active or self.s.store.versioned_state("media:" + identity)["revision"] != revision:
+                return
+            if result["status"] == "failed":
+                self.save(record, expected_revision=revision, status="failed", message="服务未能生成成果，需求已保留。",
+                          error_detail={"stage": "query", "message": result["error"]})
+            elif result["status"] == "generated":
+                self.save(record, expected_revision=revision, status="paused", message="视频已生成，可以下载成片。",
+                          video_phase="generated", sources=result["sources"], error_detail=None)
+            else:
+                message = "服务排队中，可以继续等待。" if result["phase"] == "queued" else "服务正在生成，可以继续等待。"
+                self.save(record, expected_revision=revision, status="paused", message=message,
+                          video_phase=result["phase"], progress=result["progress"], error_detail=None)
+
+    @staticmethod
+    def video_file(record, path):
+        if record["capability"] != "video_generate" or path not in record.get("files", ()):
+            raise ValueError("未找到该视频任务的成片。")
+        return Path(path)
+
+    def resume(self, identity, cid="", *, missing_file=None):
+        with self.lock:
+            record = self.get(identity, cid)
+            if identity in self.active:
+                return record
+            if missing_file and record["status"] == "completed":
+                path = self.video_file(record, missing_file)
+                if path.is_file():
+                    return record
+                self.task_workspace(record)
+                source = next((item for item in record.get("sources", []) if item.get("path") == str(path)), None)
+                if not source or not (source.get("url") or source.get("api_path")):
+                    raise ValueError("原服务未保留可下载的成片。")
+                source.pop("path")
+                log.info("media_missing_file_recovery id=%s session=%s", identity, cid)
+                return self.restart_job(record, self.original_adapter(record))
+            if record["status"] not in RESUMABLE:
                 return record
             self.task_workspace(record)
             record.update(self.read_receipt(record))

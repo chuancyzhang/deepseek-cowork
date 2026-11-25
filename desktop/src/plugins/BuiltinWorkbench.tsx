@@ -23,9 +23,11 @@ import { themeStyle } from '../theme';
 import ThemePreview from '../ThemePreview';
 import {enterpriseExpertModel, type EnterpriseCapability} from '../enterpriseCapabilities';
 import {conversationAt} from '../host/conversations';
+import {readVideoTaskLayout, videoPathKey} from '../host/videoTasks';
 const Library = lazy(() => import('../management/Library'));
 const Management = lazy(() => import('../Management'));
 const ChatMediaTasks = lazy(() => import('./multimedia/ChatTasks'));
+const VideoTasks = lazy(() => import('./multimedia/ChatTasks').then(module => ({default: module.VideoTasks})));
 const CodeEditor = lazy(() => import('../CodeEditor'));
 const managementNames: Record<string, string> = { settings: '设置', capabilities: '能力', library: '资料库', favorites: '常用任务', team: '团队空间' };
 
@@ -136,6 +138,24 @@ export default function BuiltinWorkbench() {
   const activeRunId = current?.run?.status === 'running' ? current.run.id : undefined;
   const timings = useMemo(() => turnTimings(events), [events]);
   const groups = useMemo(() => messageGroups(messages, questions), [messages, questions]);
+  const cid = current?.id || '';
+  const mediaKey = host.sessionKey('media_tasks', cid);
+  const readVideos = useMemo(() => readVideoTaskLayout(host, cid, groups), [host, cid, groups]);
+  const videoLayout = useSyncExternalStore(useCallback(listener => host.subscribe(mediaKey, listener), [host, mediaKey]), readVideos);
+  const openChatFile = !videoLayout.files.size ? onMessageFile : (path: string) => {
+    const owner = videoLayout.files.get(videoPathKey(path, current?.meta.workspace_dir || current?.meta.workspace_path));
+    if (!owner) {onMessageFile(path); return;}
+    if (!owner.groupId) {
+      setWorkspaceOpen(true);
+      changeWorkspace({selected: 'tasks', tasksPinned: true, tasksOpen: false,
+        task: {...workspaceView.task, section: 'calls', callId: undefined, agentId: undefined, runId: undefined}});
+    }
+    host.set(host.sessionKey('videoPreview:' + owner.taskId, cid), owner.path);
+  };
+  const mediaProps = {cid, configured: settings?.media_capabilities || [], openFile: onMessageFile, configure: () => void goRoute('multimedia')};
+  const videoCards = (ids: string[] | undefined, visible = true, heading = false) => ids?.length
+    ? <Suspense fallback={null}><VideoTasks {...mediaProps} ids={ids} visible={visible} heading={heading} videoFiles={videoLayout.files}/></Suspense>
+    : undefined;
   const runLabel = current?.run?.status === 'stopping' ? '正在停止，保留已完成内容…' : interaction ? '等待你的回答' : '正在处理';
   const reviewTask = activeReview(current?.reviews || [], current?.run, current?.id || '');
   const latestGroup = groups.at(-1);
@@ -302,9 +322,10 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
       onInteractionDone={requestId => finishInteraction(current!.id, requestId)}
       onHistory={(files, selected) => void openFileHistory(files, selected)}
       onHistoryRetry={() => void loadConversation(current!.id, true).catch(failure => error(failure.message))}
-      messages={group.messages} cid={current!.id} active={active} onAction={onMessageAction} onFile={onMessageFile}/>
+      messages={group.messages} cid={current!.id} active={active} onAction={onMessageAction} onFile={openChatFile}
+      videoFiles={videoLayout.files.size ? videoLayout.files : undefined} videoTasks={videoCards(videoLayout.groups.get(group.id), chatVisible)}/>
       : <MessageBubble key={current!.id + ':' + message.id} cid={current!.id} message={message} active={active} onAction={onMessageAction} onFile={onMessageFile}/>;}) }
-            {current && Boolean(current.media_tasks?.length) && <Suspense fallback={null}><ChatMediaTasks key={current.id} cid={current.id} tasks={current.media_tasks || []} configured={settings?.media_capabilities||[]} openFile={path=>void openFile(path)} configure={()=>void goRoute('multimedia')}/></Suspense>}
+            {videoLayout.hasOtherTasks && <Suspense fallback={null}><ChatMediaTasks key={cid} {...mediaProps}/></Suspense>}
             {active && !activeGroup && (reviewTask ? <GenerationTaskStatus task={reviewTask} statusLabel={runLabel} waiting={current?.run?.status === 'queued'}/> : <RunStatus label={runLabel}/>)}
             {userStopped && !stoppedGroup && <RunStatus label="已停止"/>}
             {failedRun && <div className="run-error">
@@ -342,6 +363,7 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
         {workspaceOpen && current && <div className="workspace-divider" role="separator" tabIndex={0} aria-label="调整工作区宽度" aria-orientation="vertical" aria-valuemin={25} aria-valuemax={100} aria-valuenow={workspaceExpanded ? 100 : workspaceView.width || 46} onPointerDown={event => {event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId);}} onPointerMove={event => {if (event.currentTarget.hasPointerCapture(event.pointerId)) resizeWorkspace(event.clientX);}} onPointerUp={event => event.currentTarget.releasePointerCapture(event.pointerId)} onKeyDown={event => {if (['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) {event.preventDefault(); if (event.key === 'End') setWorkspaceExpanded(true); else {setWorkspaceExpanded(false); changeWorkspace({width: event.key === 'Home' ? 46 : Math.max(25, Math.min(95, (workspaceExpanded ? 100 : workspaceView.width || 46) + (event.key === 'ArrowLeft' ? 5 : -5)))});}}}}/>}
         {workspaceOpen && current && <PluginSlot kind="panel" target="workspace" scope={{conversationId:current.id}}><Workspace key={current.id} conversation={current} value={workspaceView} change={value => {if (selectedId.current === current.id) changeWorkspace(value);}} expanded={workspaceExpanded} expand={() => setWorkspaceExpanded(!workspaceExpanded)} close={closeWorkspace} obscured={Boolean(projectDialog || projectMenuOpen || showHistory || ask || historyEdit || showSkills || pluginPreview || themePreview || creationOpen && creationTab!=='design')} dark={theme === 'dark'} editors={editors} fileTree={fileTree} preserve={saveView} openReview={openReview} registerEditorFlush={registerEditorFlush} selectFile={activateFile} openFile={openFile} closeFile={closeEditor} refreshFiles={refreshFiles} createDocument={createDocument}
           canViewChanges={Boolean(changes?.repository || workspaceChanges?.error)} openChanges={() => void openChanges()}
+          videoTasks={videoCards(videoLayout.unplaced, true, true)}
           historyContent={workspaceView.fileHistory && <FileHistoryPanel cid={current.id} {...workspaceView.fileHistory}
             select={selected => changeWorkspace({fileHistory: {...workspaceView.fileHistory!, selected}})} openFile={onMessageFile}/>}
           changesContent={<ChangesPanel cid={current.id} read={workspaceChanges} selection={selectedChange} select={selectChange}

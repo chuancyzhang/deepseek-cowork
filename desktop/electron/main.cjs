@@ -202,6 +202,11 @@ else {
     ipcMain.handle('cowork:call', async (event, method, params = {}) => {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame.url !== entry) throw new Error('无效的界面连接。');
       if (typeof method !== 'string' || typeof params !== 'object' || params === null) throw new Error('无效请求。');
+      if (method === 'media.preview') {
+        const file = await backend.call(method, params);
+        return file.missing ? file : fileHost.register(file, true);
+      }
+      if (method === 'media.release_preview') return fileHost.release(params.url);
       if (['file.open', 'file.save_copy', 'workspace.create', 'file.render_result', 'file.review_image', 'file.preview', 'reviews.open'].includes(method)) return fileHost.register(await backend.call(method, params));
       if (method === 'library.read_result' || (['library.read', 'library.edit_open'].includes(method) && params.source === 'local')) return fileHost.register(await backend.call(method, params));
       if (method === 'project.open_folder') {

@@ -1,6 +1,6 @@
 // Explicit renderer RPC capabilities. Keep in sync with the desktop adapters.
 module.exports = [
-  "media.config", "media.validate", "media.save", "media.tasks", "media.resume", "media.retry", "media.continue", "media.stop",
+  "media.config", "media.validate", "media.save", "media.tasks", "media.resume", "media.retry", "media.continue", "media.stop", "media.refresh",
   "updates.get", "updates.check", "updates.local", "updates.cancel", "updates.dismiss",
   "settings.page",
   "settings.page_save",

@@ -193,6 +193,7 @@ export function useWorkbenchController() {
         if (!previous || previous.id !== conversation.id) return previous;
         const prepend = (old: Message[] = [], recent: Message[] = []) => [...old.filter(item => !recent.some(next => next.id === item.id)), ...recent];
         return { ...previous, before: older.before, has_more: older.has_more, messages: prepend(older.messages, previous.messages),
+          media_tasks: older.media_tasks,
           render_messages: prepend(older.render_messages, previous.render_messages), message_positions: { ...older.message_positions, ...previous.message_positions } };
       });
       setEvents(previous => mergeEvents(unwrapEvents(older.events || []), previous));
@@ -493,7 +494,7 @@ export function useWorkbenchController() {
     const timer = setTimeout(() => { void saveView().catch(failure => error('工作区草稿尚未保存：' + failure.message)); }, 500);
     return () => clearTimeout(timer);
   }, [editors, activeFile, workspaceOpen, workspaceView, creationOpen, creationTab, creationScope, saveView, error, loading]);
-  useLayoutEffect(() => { if (nearBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [events, current?.messages, current?.media_tasks, interaction, workspaceChanges?.data]);
+  useLayoutEffect(() => { if (nearBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [events, current?.messages, interaction, workspaceChanges?.data]);
 
   useEffect(() => window.cowork.onEvents((batch: HostEvent[]) => {
     receiveEvents(host,batch);

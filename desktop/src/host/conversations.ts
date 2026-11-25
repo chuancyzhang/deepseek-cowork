@@ -19,9 +19,23 @@ export function presentOpenedBrowser(store:HostStore,event:HostEvent,initial:()=
 }
 
 export function mergeMediaTasks(previous:MediaTask[], incoming:MediaTask[]) {
-  const merged=new Map(previous.map(item=>[item.id,item]));let changed=false;
-  for(const item of incoming)if(!merged.has(item.id)||item.updated_at>(merged.get(item.id)?.updated_at||0)){merged.set(item.id,item);changed=true;}
-  return changed?[...merged.values()].sort((a,b)=>a.created_at-b.created_at).slice(-100):previous;
+  const merged = new Map(previous.map(item => [item.id, item]));
+  let changed = false;
+  for (const item of incoming) {
+    const prior = merged.get(item.id);
+    const newer = item.revision != null ? prior?.revision == null || item.revision > prior.revision
+      : prior?.revision == null && item.updated_at > (prior?.updated_at ?? 0);
+    if (!prior || newer) {
+      merged.set(item.id, item);
+      changed = true;
+    }
+  }
+  return changed ? [...merged.values()].sort((a,b) => a.created_at - b.created_at) : previous;
+}
+
+export function receiveMediaTasks(store:HostStore, cid:string, tasks:MediaTask[]) {
+  store.set<MediaTask[]>(store.sessionKey('media_tasks', cid), previous =>
+    mergeMediaTasks(previous || [], tasks.filter(task => task.conversation_id === cid)));
 }
 
 /** Backend snapshots and durable increments enter the same host projection. */
@@ -41,7 +55,7 @@ export function receiveConversation(store:HostStore,id:string,update:Update<Conv
   if(value.run===null&&!isActive(previous?.run?.status))store.set<Record<string,Run>>('runs',runs=>Object.fromEntries(Object.entries(runs).filter(([key])=>key!==id)));
   if('run' in value)receiveRun(store,value.run||null,id);
   const {run,reviews,media_tasks,...body}=value;
-  if(media_tasks)store.set<MediaTask[]>(store.sessionKey('media_tasks',id),previous=>mergeMediaTasks(previous||[],media_tasks));
+  if(media_tasks)receiveMediaTasks(store,id,media_tasks);
   if(reviews)store.set<ReviewSummary[]>(store.sessionKey('reviews',id),previous=>mergeReviews(previous||[],reviews));
   store.set(store.sessionKey('current',id),body);
 }
@@ -50,7 +64,7 @@ export function receiveEvents(store:HostStore,batch:HostEvent[]) {
   for(const event of batch){
     const id=event.conversation_id;if(!id)continue;
     if(event.run)receiveRun(store,event.run,id);
-    if(event.event==='media_task' && event.data?.id && event.data.conversation_id===id)store.set<MediaTask[]>(store.sessionKey('media_tasks',id),previous=>mergeMediaTasks(previous||[],[event.data]));
+    if(event.event==='media_task' && event.data?.id)receiveMediaTasks(store,id,[event.data]);
     if(event.event==='review_changed' && event.data?.id)store.set<ReviewSummary[]>(store.sessionKey('reviews',id),previous=>mergeReviews(previous||[],[event.data]));
     if(event.event!=='runtime')continue;
     if(!grouped.has(id))grouped.set(id,[]);grouped.get(id)!.push(event.data);

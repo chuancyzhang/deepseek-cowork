@@ -1,12 +1,13 @@
-import { createContext, useContext, memo, useRef, useState, useEffect, type ReactNode } from 'react';
-import ReactMarkdown, {type Components} from 'react-markdown';
+import { createContext, useContext, memo, useRef, useState, useEffect, useLayoutEffect, type ReactNode } from 'react';
+import ReactMarkdown, {type Components, type UrlTransform} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Copy, ExternalLink, FileText, GitBranch, Image as ImageIcon, Link, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Puzzle, RefreshCw, Sparkles, Trash2, Users, Wrench } from 'lucide-react';
 import {agentRecords, agentTools} from './subagents';
-import type { FileReference, MediaTask, Message, TurnFile } from './types';
+import type { FileReference, Message, TurnFile } from './types';
 import {FileSummary} from './WorkspaceChanges';
 import { messageText, toolErrorText, messageTime, replyParts, elapsedTime, thinkingTime, formatDuration, type TurnTiming, type QuestionRecord } from './runtime';
-import {useHost, useHostField} from './host/context';
+import {useHostField} from './host/context';
+import {videoPathKey} from './host/videoTasks';
 import InlineVisualization from './InlineVisualization';
 import { markdownFilePath, markdownUrl, messageAttachments, remarkFileReferences } from './attachments';
 import Interaction from './Interaction';
@@ -16,11 +17,39 @@ import ImageAttachments, {ImagePreviewLink, isImageAttachment} from './ImageAtta
 import {reviewTitle, type ReviewSummary} from './reviews';
 import {ToolProcess} from './ToolOutput';
 
-export function MediaResult({file,cid,onFile,onPlayable}:{file:FileReference;cid:string;onFile:(path:string)=>void;onPlayable?:(playable:boolean)=>void}) {
-  const [url,setUrl]=useState(''),[failure,setFailure]=useState('');
-  useEffect(()=>{let live=true;setUrl('');setFailure('');void window.cowork.call('file.open',{conversation_id:cid,path:file.path}).then(result=>{if(live)setUrl(result.payload.url);}).catch(error=>{if(live)setFailure(error.message);});return()=>{live=false;};},[cid,file.path]);
+export function MediaResult({file,cid,onFile,onPlayable,taskId,onMissing}: {
+  file: FileReference; cid: string; onFile: (path: string) => void; onPlayable?: (playable: boolean) => void;
+  taskId?: string; onMissing?: () => void;
+}) {
+  const [url, setUrl] = useState(''), [failure, setFailure] = useState('');
+  const video = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    let live = true, granted = '';
+    setUrl(''); setFailure('');
+    const release = () => {
+      if (taskId && granted) void window.cowork.call('media.release_preview', {url: granted})
+        .catch(error => console.warn('video_preview_release_failed', taskId, error.message));
+    };
+    void window.cowork.call(taskId ? 'media.preview' : 'file.open', {
+      conversation_id: cid, path: file.path, ...(taskId ? {id: taskId} : {}),
+    }).then(result => {
+      if (result.missing) {
+        if (live) onMissing?.();
+        return;
+      }
+      granted = result.payload.url;
+      if (live) setUrl(granted);
+      else release();
+    }).catch(error => { if (live) setFailure(error.message); });
+    return () => { live = false; release(); };
+  }, [cid, file.path, taskId, onMissing]);
+  useLayoutEffect(() => {
+    const player = video.current;
+    if (!taskId || !url || !player) return;
+    return () => { player.pause(); player.removeAttribute('src'); player.load(); };
+  }, [taskId, url]);
   const playbackError = () => {setFailure('此格式无法在应用内播放，请打开文件查看。'); onPlayable?.(false);};
-  return <figure>{url&&(file.kind==='video'?<video src={url} controls preload={onPlayable ? 'auto' : 'metadata'} aria-label={file.name} onLoadedData={()=>onPlayable?.(true)} onError={playbackError}/>:<audio src={url} controls preload="metadata" aria-label={file.name} onError={playbackError}/>)}<figcaption><button className="text-link" onClick={()=>onFile(file.path)}>{file.name}</button></figcaption>{failure&&<p role="alert" className="error-text">{failure}</p>}</figure>;
+  return <figure>{url&&(file.kind==='video'?<video ref={video} src={url} controls preload={onPlayable ? 'auto' : 'metadata'} aria-label={file.name} onLoadedData={()=>onPlayable?.(true)} onError={playbackError}/>:<audio src={url} controls preload="metadata" aria-label={file.name} onError={playbackError}/>)}<figcaption><button className="text-link" onClick={()=>onFile(file.path)}>{file.name}</button></figcaption>{failure ? <p role="alert" className="error-text">{failure}</p> : taskId && !url && <p role="status">正在打开成片…</p>}</figure>;
 }
 
 function CodeBlock({ children }: { children?: React.ReactNode }) {
@@ -78,7 +107,10 @@ const markdownComponents: Components = {
     return <button className="text-link" onClick={() => {
       if (!href) return;
       if (external) void window.cowork.call('external.open', {url:href});
-      else onFile?.(markdownFilePath(href));
+      else {
+        const video = files?.find(file => file.kind === 'video' && (file.url === href || file.references.includes(href)));
+        onFile?.(video?.path ?? markdownFilePath(href));
+      }
     }}>{children}{external && <ExternalLink size={12}/>}</button>;
   },
   img: function MarkdownImage({src, alt}) {
@@ -90,7 +122,20 @@ const markdownComponents: Components = {
 };
 
 export function Markdown({ text, onFile, files = [], streaming = false, previewScope = '', cid }: { text: string; onFile?: (path: string) => void; files?: FileReference[]; streaming?: boolean; previewScope?: string; cid?: string }) {
-  return <MarkdownContext.Provider value={{previewScope, cid, files, onFile}}><ReactMarkdown urlTransform={markdownUrl}
+  const resolveUrl: UrlTransform = (url, key, node) => {
+    if (key === 'href' && /^[a-z]:(?:%5c|%2f)/i.test(url)) {
+      const path = videoPathKey(markdownFilePath(url));
+      // Markdown escapes punctuation, including the backslash before a dotted Windows directory.
+      const source = node.position && text.slice(node.position.start.offset, node.position.end.offset);
+      const destination = source?.match(/\]\(\s*(?:<([^>]+)>|([^\s)]+))/);
+      const reference = destination?.[1] || destination?.[2];
+      const video = files.find(file => file.kind === 'video' &&
+        (videoPathKey(file.path) === path || reference && file.references.includes(reference)));
+      if (video) return video.url || video.path;
+    }
+    return markdownUrl(url);
+  };
+  return <MarkdownContext.Provider value={{previewScope, cid, files, onFile}}><ReactMarkdown urlTransform={resolveUrl}
     remarkPlugins={[remarkGfm, [remarkFileReferences, files], [remarkDiagramState, {streaming}]]} components={markdownComponents}>{text}</ReactMarkdown></MarkdownContext.Provider>;
 }
 
@@ -113,15 +158,8 @@ function ViewedImages({cid, callId, images, onFile, onDetails}: {cid: string; ca
   </div>;
 }
 
-function MessageVideo({file, cid, onFile}: {file: FileReference; cid: string; onFile: (path: string) => void}) {
-  const host = useHost();
-  const [tasks] = useHostField<MediaTask[]>(host.sessionKey('media_tasks', cid), []);
-  if (tasks.some(task => task.conversation_id === cid && task.capability === 'video_generate' && task.files?.includes(file.path))) return null;
-  return <MediaResult file={file} cid={cid} onFile={onFile}/>;
-}
-
-const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, active, cid, answerOnly = false, changeSummary, readOnly = false }: {
-  message: Message; active: boolean; cid: string; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; answerOnly?: boolean; changeSummary?: ReactNode; readOnly?: boolean;
+const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, active, cid, answerOnly = false, changeSummary, readOnly = false, videoFiles }: {
+  message: Message; active: boolean; cid: string; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; answerOnly?: boolean; changeSummary?: ReactNode; readOnly?: boolean; videoFiles?: ReadonlyMap<string, unknown>;
 }) {
   const [copied, setCopied] = useState(false);
   const [more, setMore] = useState(false), [failure, setFailure] = useState('');
@@ -139,14 +177,14 @@ const MessageBubble = memo(function MessageBubble({ message, onAction, onFile, a
   const context = message.role === 'user' ? message.meta?.ui_context || {} : {};
   const referencedFiles = (message.file_references || []).filter(file => file.references.some(reference => text.includes(reference)));
   const documents = referencedFiles.filter(file => !['image','audio','video'].includes(file.kind));
-  const media = referencedFiles.filter(file => ['audio','video'].includes(file.kind));
+  const media = referencedFiles.filter(file => file.kind === 'audio' || file.kind === 'video' && !videoFiles?.has(videoPathKey(file.path)));
   const imageFiles = message.role === 'user' ? files.filter(isImageAttachment) : referencedFiles.filter(file => file.kind === 'image');
   const otherFiles = files.filter((file: any) => !isImageAttachment(file));
   if (message.role === 'tool') return <button className="message-tool-link" onClick={() => onAction('tool', message)}><Wrench size={14}/><span>{message.meta?.tool_name || '工具结果'}</span><ChevronDown size={13}/></button>;
   return <article id={'message-' + message.id} className={`message ${message.role}`}>
     {message.role !== 'user' && imageFiles.length > 0 && <ImageAttachments cid={cid} files={imageFiles} onOpen={onFile}/>}
     <div className="message-body" hidden={!text && !imageFiles.length && !otherFiles.length && !references.length && !context.skills?.length && !context.knowledge?.length && message.role === 'user'}>
-    {media.length > 0 && <div className="message-media">{media.map(file => file.kind === 'video' ? <MessageVideo key={file.path} file={file} cid={cid} onFile={onFile}/> : <MediaResult key={file.path} file={file} cid={cid} onFile={onFile}/>)}</div>}
+    {media.length > 0 && <div className="message-media">{media.map(file => <MediaResult key={file.path} file={file} cid={cid} onFile={onFile}/>)}</div>}
     {(references.length > 0 || context.skills?.length > 0 || context.knowledge?.length > 0) && <div className="message-contexts" aria-label="发送时选中的上下文">
       {references.map((ref: any) => <span className="context-chip conversation-chip" key={ref.id || ref.session_id} title={'对话快照：' + ref.title}><MessageSquare size={13}/><span>对话 {ref.title}</span></span>)}
       {context.skills?.map((name: string) => <span className="context-chip skill-chip" key={name} title={name}>{name.startsWith('mcp-server-') ? <Link size={13}/> : <Puzzle size={13}/>}<span>{name.startsWith('mcp-server-') ? '连接器' : '技能'} {name}</span></span>)}
@@ -214,8 +252,9 @@ export function GenerationTaskStatus({task, statusLabel = '正在处理', durati
   </div>;
 }
 
-export function AssistantTurn({messages, cid, active, onAction, onFile, timing, activeRun, interactionRun = activeRun, showDuration = true, stopped = false, statusLabel = '正在处理', questions = [], onInteractionDone = () => {}, reviewTask, onHistory, onHistoryRetry, readOnly = false}: {
+export function AssistantTurn({messages, cid, active, onAction, onFile, timing, activeRun, interactionRun = activeRun, showDuration = true, stopped = false, statusLabel = '正在处理', questions = [], onInteractionDone = () => {}, reviewTask, onHistory, onHistoryRetry, readOnly = false, videoFiles, videoTasks}: {
   messages: Message[]; cid: string; active: boolean; onAction: (action: string, message: Message) => void; onFile: (path: string) => void; timing?: TurnTiming; activeRun?: string; interactionRun?: string; showDuration?: boolean; stopped?: boolean; statusLabel?: string; questions?: QuestionRecord[]; onInteractionDone?: (requestId: string) => void; reviewTask?: ReviewSummary; onHistory?: (files: TurnFile[], selected?: string) => void; onHistoryRetry?: () => void; readOnly?: boolean;
+  videoFiles?: ReadonlyMap<string, unknown>; videoTasks?: ReactNode;
 }) {
   const {answer, results, hasProcess: messageProcess} = replyParts(messages);
   const fileSummary = <FileSummary references={messages.flatMap(message => (message.file_references || []).filter(file => file.references.some(reference => messageText(message.content).includes(reference)))).filter(file => !['image','audio','video'].includes(file.kind))}
@@ -312,6 +351,7 @@ export function AssistantTurn({messages, cid, active, onAction, onFile, timing, 
     {!hasProcess && !task && (running || stopped
       ? <RunStatus label={running ? statusLabel : '已停止'} duration={durationLabel}/>
       : durationLabel && <div className="process-duration">{durationLabel}</div>)}
-    {answer ? <MessageBubble message={answer} cid={cid} active={active} onAction={onAction} onFile={onFile} answerOnly readOnly={readOnly} changeSummary={fileSummary}/> : fileSummary}
+    {answer ? <MessageBubble message={answer} cid={cid} active={active} onAction={onAction} onFile={onFile} answerOnly readOnly={readOnly} changeSummary={fileSummary} videoFiles={videoFiles}/> : fileSummary}
+    {videoTasks}
   </section>;
 }

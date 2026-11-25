@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, ArrowUp, Check, ChevronRight, Copy, ListChecks, LoaderCircle, Play, RefreshCw, Square, CircleAlert, Users, Wrench } from 'lucide-react';
 import MessageBubble, { AssistantTurn } from './MessageBubble';
 import {agentStatuses as statuses, childMessages} from './subagents';
@@ -9,12 +9,12 @@ import {ToolOutputDetail} from './ToolOutput';
 
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 export type TaskView = { section: 'calls' | 'agents' | 'context'; callId?: string; runId?: string; agentId?: string; scroll?: Record<string, number>; open?: Record<string, boolean>; drafts?: Record<string, {text: string; messageId?: string; submitted?: string}> };
-type Props = { cid: string; conversation: Conversation; value: TaskView; change: (value: Partial<TaskView>) => void; error: (message: string) => void; openReview?: (id: string) => void; openFile?: (path: string) => void };
+type Props = { cid: string; conversation: Conversation; value: TaskView; change: (value: Partial<TaskView>) => void; error: (message: string) => void; openReview?: (id: string) => void; openFile?: (path: string) => void; videoTasks?: ReactNode };
 const stringify = (value: any) => typeof value === 'string' ? value : JSON.stringify(value ?? null, null, 2);
 const mediaSnapshot = (item: any) => ['media_create', 'media_task'].includes(item?.name) && Boolean(item?.result?.task_id);
 const callStatus = (item: any) => mediaSnapshot(item) ? '已返回' : statuses[item?.status] || '';
 
-export default function TaskWorkspace({ openReview, openFile = () => {}, cid, conversation, value, change, error }: Props) {
+export default function TaskWorkspace({ openReview, openFile = () => {}, cid, conversation, value, change, error, videoTasks }: Props) {
   const agentsOnly = value.section === 'agents';
   const runId = agentsOnly ? undefined : value.runId || conversation.run?.id;
   const historical = Boolean(value.runId && value.runId !== conversation.run?.id);
@@ -115,6 +115,7 @@ export default function TaskWorkspace({ openReview, openFile = () => {}, cid, co
     {historical && <div className="task-scope"><span>正在查看历史任务</span><button className="text-link" onClick={() => change({runId: undefined, callId: undefined, agentId: undefined})}>返回当前任务</button></div>}
     {failure && <div className="inline-error" role="alert">{failure}<button onClick={() => setRevision(previous => previous + 1)}><RefreshCw size={13}/>重试</button></div>}
     <div className="task-scroll" ref={scroll} onScroll={event => { const top = event.currentTarget.scrollTop; change({scroll: {...value.scroll, [route]: top}}); }}>
+      {value.section === 'calls' && !value.callId && videoTasks}
       {!snapshot && !failure ? <div className="loading"><LoaderCircle size={18} className="spin"/>正在读取任务…</div> : value.callId ? selected ? <div className="call-detail">{reviewId(selected.result) && openReview && <button className="primary" onClick={()=>openReview!(reviewId(selected.result)!)}>打开草稿审阅</button>}{selected.error && <p className="run-error">{toolErrorText(selected.error)}</p>}{disclosure('arguments:' + selected.id, '参数', selected.arguments)}{!agentsOnly && <ToolOutputDetail key={cid+':'+runId+':'+selected.id} cid={cid} runId={runId} callId={selected.id} running={['running','queued','stopping'].includes(snapshot?.run?.status)}/>}{mediaSnapshot(selected) && <p className="muted">以下为调用返回时的记录。最新进度请看聊天中的任务卡。</p>}{disclosure('result:' + selected.id, mediaSnapshot(selected) ? '调用返回时的结果' : '返回值', selected.result ?? '尚未收到结果', true)}{disclosure('info:' + selected.id, '运行信息', {id: selected.id, run_id: snapshot.run?.id, started_at: selected.started_at, elapsed_ms: selected.elapsed_ms, waits: selected.waits})}</div> : <p className="task-empty">尚未找到这次调用的记录。<button onClick={() => setRevision(previous => previous + 1)}>重新读取</button></p> : value.agentId ? <>
         {selectedAgent?.control_error && <div className="inline-error">{selectedAgent.control_error}</div>}
         {selectedAgent?.last_error && <p className="run-error">{toolErrorText(selectedAgent.last_error)}</p>}

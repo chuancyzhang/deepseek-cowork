@@ -181,7 +181,7 @@ class DesktopService:
         return {**record, **window, "render_messages": self.files.message_files(conversation_id, rendered),
                 "run": self.public_run(run), "events": events,
                 "reviews": [self.reviews.summary(value) for value in self.reviews.entries(conversation_id).values()],
-                "media_tasks": [self.media.public(value) for value in self.media.records(conversation_id)],
+                "media_tasks": self.media.chat_tasks(conversation_id, rendered, include_recent=before is None),
                 "draft": draft["value"], "draft_revision": draft["revision"],
                 "view": view["value"], "view_revision": view["revision"]}
 

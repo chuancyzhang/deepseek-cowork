@@ -267,11 +267,57 @@ class MultimediaTests(unittest.TestCase):
             self.host.dispatch("media.retry", {**retry, "conversation_id": "two"})
         self.host.dispatch("media.retry", {**retry, "updated_at": task["updated_at"]})
         self.assertEqual(len(self.calls), len(SUBMIT_BACKOFF) + 1)
+        revision = self.host.chat_tasks("one")[0]["revision"]
+        retry = {"id": task["id"], "conversation_id": "one", "expected_revision": revision}
+        self.host.dispatch("media.retry", {**retry, "expected_revision": revision - 1})
+        self.assertEqual(len(self.calls), len(SUBMIT_BACKOFF) + 1)
         self.host.dispatch("media.retry", retry)
         self.host.dispatch("media.retry", retry)
         self.assertEqual(self.wait(task["id"])["status"], "completed")
+        self.assertGreater(self.host.chat_tasks("one")[0]["revision"], revision)
         self.assertEqual([item[2] for item in self.calls if item[0] == "POST"], [self.calls[0][2]] * (len(SUBMIT_BACKOFF) + 2))
         self.assertEqual([item["id"] for item in self.host.records("one")], [task["id"]])
+
+    def test_video_refresh_and_missing_file_use_saved_remote_job(self):
+        task = self.submit("video_generate")
+        record = self.wait(task["id"])
+        path = Path(record["files"][0])
+        path.unlink()
+        params = {"conversation_id": "one", "id": task["id"]}
+        self.assertTrue(self.host.chat_tasks("one")[0]["can_redownload"])
+        self.assertEqual(self.host.dispatch("media.preview", {**params, "path": str(path)}), {"missing": True})
+
+        self.runtime.save(record, status="unknown", files=[], sources=[])
+        self.query_responses = [({"status": "queued", "progress": 0}, 200)]
+        before = len(self.calls)
+        self.assertTrue(self.host.chat_tasks("one")[0]["can_refresh"])
+        pending = self.host.dispatch("media.refresh", params)
+        self.assertEqual((pending["status"], pending["phase"], pending["progress"]), ("paused", "queued", None))
+        self.assertEqual([call[0] for call in self.calls[before:]], ["GET"])
+
+        self.runtime.save(record, status="completed", files=[str(path)],
+                          sources=[{"path": str(path), "url": self.base + "/output.mp4?expired", "name": path.name}])
+        self.download_responses = [403]
+        before = len(self.calls)
+        self.host.dispatch("media.resume", {**params, "missing_file": str(path)})
+        self.assertEqual(self.wait(task["id"])["status"], "completed")
+        requests = [(method, urlsplit(url).path) for method, url, *_ in self.calls[before:]]
+        self.assertEqual(requests, [("GET", "/output.mp4"), ("GET", "/agnesapi"), ("GET", "/output.mp4")])
+        self.assertEqual(path.read_bytes(), b"video")
+        self.assertFalse(path.with_suffix(".mp4.part").exists())
+
+    def test_older_video_snapshot_includes_creation_anchor_beyond_recent_limit(self):
+        record = {"conversation_id": "one", "capability": "video_generate", "status": "completed",
+                  "files": [], "run_id": "old", "tool_call_id": "make-video"}
+        for index in range(101):
+            identity = str(index)
+            self.service.store.put_state("media:" + identity, {**record, "id": identity, "created_at": index,
+                                         "run_id": "old" if index == 0 else "new"})
+        self.assertNotIn("0", {task["id"] for task in self.host.chat_tasks("one")})
+        messages = [{"role": "assistant", "meta": {"turn_id": "old"},
+                     "tool_calls": [{"id": "make-video", "function": {"name": "media_create"}}]}]
+        self.assertEqual([(task["id"], task["tool_call_id"], task["revision"])
+                          for task in self.host.chat_tasks("one", messages, include_recent=False)], [("0", "make-video", 0)])
 
     def test_stop_during_safe_submit_backoff_does_not_restart(self):
         self.create_responses = [({"error": {"code": "video_queue_full"}}, 503)]
@@ -595,13 +641,17 @@ class MultimediaTests(unittest.TestCase):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 requests_seen.append(body)
                 tools = [message for message in body["messages"] if message["role"] == "tool"]
-                if not tools:
+                user = next(message for message in reversed(body["messages"]) if message["role"] == "user")
+                ordinary = "普通问题" in str(user["content"])
+                if ordinary:
+                    name, args = None, {}
+                elif not tools:
                     name, args = "tool_search", {"query": "media_create multimedia video generate"}
                 elif len(tools) == 1:
                     name, args = "media_create", {"capability": "video_generate", "prompt": "测试视频", "options": {"size": "720p"}}
                 else:
                     name, args = None, {}
-                delta = {"content": "视频正在后台生成，完成后在这里播放。"} if name is None else {"tool_calls": [{
+                delta = {"content": "普通回答。" if ordinary else "视频正在后台生成，完成后在这里播放。"} if name is None else {"tool_calls": [{
                     "index": 0, "id": "call-" + str(len(requests_seen)), "type": "function",
                     "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}]}
                 self.send_response(200)
@@ -635,7 +685,18 @@ class MultimediaTests(unittest.TestCase):
             event = next((value for value in client.events if accepted(value)), None) or client.until(accepted, timeout=5)
             pending = event["data"]
             self.assertEqual(pending["run_id"], result["run"]["id"])
+            calls = [call["id"] for message in result["render_messages"] for call in message.get("tool_calls") or []
+                     if call["function"]["name"] == "media_create"]
+            self.assertEqual(calls, [pending["tool_call_id"]])
+            self.assertIsInstance(pending["revision"], int)
             self.assertEqual(len(requests_seen), 3)
+            client.call("conversation.send", conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex,
+                        text="普通问题", model_id=settings["selected_model_id"])
+            next_run = client.wait_run(cid)
+            self.assertEqual(next_run["run"]["status"], "completed")
+            self.assertNotEqual(next_run["run"]["id"], pending["run_id"])
+            self.assertIn("普通回答", json.dumps(next_run["render_messages"], ensure_ascii=False))
+            self.assertEqual(next_run["media_tasks"][0]["status"], "running")
             self.assertEqual(len([item for item in self.calls if item[0] == "POST"]), 1)
         finally:
             client.close()

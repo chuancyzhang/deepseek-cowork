@@ -82,10 +82,10 @@ class Adapter:
             raise ValueError("此服务尚未填写 API Key，请到模型与服务中补充。")
         self.headers = {"Authorization": "Bearer " + profile["api_key"]}
 
-    def request(self, method, path, *, absolute=False, **kwargs):
+    def request(self, method, path, *, absolute=False, timeout=(15, 180), **kwargs):
         url = path if absolute else self.root + path
         try:
-            response = requests.request(method, url, headers=self.headers, timeout=(15, 180),
+            response = requests.request(method, url, headers=self.headers, timeout=timeout,
                                         allow_redirects=method == "GET", **kwargs)
         except requests.RequestException:
             raise MediaError("服务连接中断或超时。", uncertain=method == "POST", retryable=method != "POST") from None
@@ -281,15 +281,17 @@ class Adapter:
             raise MediaError(f"创建响应缺少 {key}。", uncertain=True)
         return {"remote_id": remote_id, "provider_task_id": str(result.get("id") or remote_id)}
 
-    def poll(self, remote_id):
+    def poll(self, remote_id, *, timeout=(15, 180)):
         identity = quote(remote_id, safe="")
         adapter = self.profile["adapter"]
         if adapter == "agnes":
             parsed = urlsplit(self.root)
             url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path.removesuffix("/v1") + "/agnesapi", "", ""))
-            result = self.json_request("GET", url, absolute=True, params={"video_id": remote_id, "model_name": self.profile["model"]})
+            result = self.json_request("GET", url, absolute=True, timeout=timeout,
+                                       params={"video_id": remote_id, "model_name": self.profile["model"]})
         else:
-            result = self.json_request("GET", ("/contents/generations/tasks/" if adapter == "ark" else "/videos/") + identity)
+            result = self.json_request("GET", ("/contents/generations/tasks/" if adapter == "ark" else "/videos/") + identity,
+                                       timeout=timeout)
         status = result.get("status")
         if status in {"failed", "cancelled", "canceled", "expired"}:
             error = result.get("error") or {}
@@ -304,8 +306,10 @@ class Adapter:
             raise MediaError("视频已生成，但服务没有返回下载地址。", retryable=True)
         if status not in {"queued", "pending", "running", "in_progress", "processing"}:
             raise MediaError("服务返回了未知的视频状态，请核对接入预设。")
+        queued = status in {"queued", "pending"}
         progress = result.get("progress")
-        return {"status": "running", "progress": max(0, min(100, progress)) if isinstance(progress, (float, int)) else None}
+        return {"status": "running", "phase": "queued" if queued else "generating",
+                "progress": progress if not queued and type(progress) in {float, int} and 0 <= progress <= 100 else None}
 
     @staticmethod
     def check_image(path):

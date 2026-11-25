@@ -19,7 +19,8 @@ def has_media_result(record):
 
 
 class DesktopMedia:
-    methods = frozenset({"media.config", "media.validate", "media.save", "media.tasks", "media.resume", "media.retry", "media.continue", "media.stop"})
+    methods = frozenset({"media.config", "media.validate", "media.save", "media.tasks", "media.resume", "media.retry",
+                         "media.continue", "media.stop", "media.refresh", "media.preview"})
 
     def __init__(self, service):
         self.s = service
@@ -76,7 +77,7 @@ class DesktopMedia:
                 self.release()
                 raise
 
-    def records(self, conversation_id="", limit=100, *, active=False):
+    def records(self, conversation_id="", limit=100, *, active=False, versioned=False, anchors=None):
         clauses, params = ["key LIKE 'media:%'"], []
         if active:
             clauses.append("json_extract(value, '$.status') IN (?, ?, ?, ?)")
@@ -84,13 +85,42 @@ class DesktopMedia:
         if conversation_id:
             clauses.append("json_extract(value, '$.conversation_id') = ?")
             params.append(conversation_id)
-        page = "" if active else " LIMIT ?"
-        if not active:
+        if anchors is not None:
+            turns, tasks = anchors
+            matches = []
+            if turns:
+                matches.append("json_extract(value, '$.run_id') IN (" + ",".join("?" for _ in turns) + ")")
+                params.extend(turns)
+            if tasks:
+                matches.append("key IN (" + ",".join("?" for _ in tasks) + ")")
+                params.extend("media:" + task for task in tasks)
+            if not matches:
+                return []
+            clauses.extend(["json_extract(value, '$.capability') = 'video_generate'", "(" + " OR ".join(matches) + ")"])
+        page = " LIMIT ?" if not active and anchors is None else ""
+        if page:
             params.append(max(1, min(500, int(limit))))
         with self.s.storage._connect() as db:
-            return [json.loads(row[0]) for row in db.execute(
-                "SELECT value FROM desktop_view_state WHERE " + " AND ".join(clauses) +
+            return [dict(json.loads(value), revision=revision) if versioned else json.loads(value)
+                    for value, revision in db.execute(
+                "SELECT value, revision FROM desktop_view_state WHERE " + " AND ".join(clauses) +
                 " ORDER BY json_extract(value, '$.created_at') DESC" + page, params)]
+
+    def chat_tasks(self, cid, messages=(), *, include_recent=True):
+        turns, tasks = set(), set()
+        for message in messages:
+            if any(((call.get("function") or {}).get("name") or call.get("name")) == "media_create"
+                   for call in message.get("tool_calls") or ()):
+                meta = message.get("meta") or {}
+                turn = meta.get("turn_id") or meta.get("ui_turn_id")
+                if turn:
+                    turns.add(turn)
+            result = message.get("result_obj")
+            if message.get("role") == "tool" and isinstance(result, dict) and isinstance(result.get("task_id"), str):
+                tasks.add(result["task_id"])
+        recent = self.records(cid, versioned=True) if include_recent else []
+        placed = self.records(cid, versioned=True, anchors=(turns, tasks))
+        return [self.desktop_task(record) for record in {item["id"]: item for item in [*recent, *placed]}.values()]
 
     def dispatch(self, method, p):
         runtime = self.acquire(existing=True)
@@ -179,3 +209,23 @@ class DesktopMedia:
             result["status"] = "unknown"
             result["message"] = UNCONFIRMED
         return result
+
+    @classmethod
+    def desktop_task(cls, record, revision=None):
+        result = cls.public(record)
+        if record["capability"] != "video_generate":
+            return result
+        result.update(revision=record.get("revision") if revision is None else revision,
+                      tool_call_id=record.get("tool_call_id"), phase=record.get("video_phase"),
+                      can_refresh=cls.can_refresh_video(record),
+                      can_redownload=any(source.get("url") or source.get("api_path") for source in record.get("sources", [])))
+        if record["status"] == "failed" and result.get("diagnostic", {}).get("http_status") == 429:
+            result.update(status="rate_limited", message="视频服务限制了调用频率，要求已保留。可在服务端核对用量。")
+        return result
+
+    @staticmethod
+    def can_refresh_video(record):
+        detail = record.get("error_detail") or {}
+        return (record["capability"] == "video_generate" and
+                (record["status"] == "unknown" or (record["status"] == "paused" and detail.get("stage") == "query")) and
+                bool(record.get("remote_id") or (Path(record["destination"]) / "receipt.json").is_file()))

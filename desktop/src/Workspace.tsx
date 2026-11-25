@@ -20,7 +20,7 @@ type Props = {
   selectFile: (path: string) => Promise<void>; openFile: (path: string) => Promise<void>; closeFile: (path: string) => Promise<void>;
   refreshFiles: (id?: string, path?: string) => Promise<void>; createDocument: () => Promise<void>;
   preserve: () => Promise<void>;
-  canViewChanges: boolean; openChanges: () => void; changesContent: ReactNode; historyContent?: ReactNode;
+  canViewChanges: boolean; openChanges: () => void; changesContent: ReactNode; historyContent?: ReactNode; videoTasks?: ReactNode;
   openReview: (id: string) => void; registerEditorFlush: (path: string, flush?: () => Promise<string>) => void;
   error: (message: string) => void; confirm: (title: string, detail: string, choices: string[]) => Promise<number>;
 };
@@ -147,7 +147,7 @@ export default function Workspace(props: Props) {
     ...(showNew ? [{id:'new',name:'新标签页',icon:<Plus size={14}/>,select:()=>change({selected:'new',newOpen:!!fallbackTab}),close:fallbackTab ? () => {change({newOpen:false});fallbackTab.select();} : undefined}] : []),
   ];
   const matchingTabs=tabItems.filter(tab=>(tab.name+' '+(tab.detail||'')).toLocaleLowerCase().includes(tabQuery.trim().toLocaleLowerCase()));
-  const taskContent = <PluginSlot kind="panel" target="tasks" scope={{conversationId:cid}}><TaskWorkspace key={cid+':tasks'} cid={cid} conversation={conversation} value={value.task} change={task => change({task: {...value.task, ...task}})} error={error} openReview={props.openReview} openFile={props.openFile}/></PluginSlot>;
+  const taskContent = <PluginSlot kind="panel" target="tasks" scope={{conversationId:cid}}><TaskWorkspace key={cid+':tasks'} cid={cid} conversation={conversation} value={value.task} change={task => change({task: {...value.task, ...task}})} error={error} openReview={props.openReview} openFile={props.openFile} videoTasks={props.videoTasks}/></PluginSlot>;
   const agentView = value.agents || {section:'agents' as const};
   const agentContent = <TaskWorkspace key={cid+':agents'} cid={cid} conversation={conversation} value={agentView} change={patch=>change({agents:{...agentView,...patch}})} error={error} openFile={props.openFile}/>;
   return <section className="workspace" ref={root} aria-label="工作区">

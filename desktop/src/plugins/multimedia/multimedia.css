@@ -25,3 +25,9 @@
 .chat-media-tasks{min-width:0;max-width:100%;margin:20px 0}.chat-media-tasks article{padding:16px 0;border-block-start:1px solid var(--line)}.chat-media-tasks p{font-size:13px;overflow-wrap:anywhere;margin:8px 0}.media-task-heading{display:flex;flex-wrap:wrap;gap:12px;font-size:13px;margin-bottom:6px}.media-task-heading span{color:var(--muted)}.chat-media-tasks .button-row{flex-wrap:wrap;margin:8px 0}.chat-media-tasks .image-attachment{max-width:260px}.chat-media-tasks .message-media{margin-top:12px}
 .media-task-diagnostic summary { cursor: pointer; color: var(--muted); }
 .chat-media-tasks .task-video video { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; }
+.chat-video-tasks { display: grid; gap: 8px; margin: 12px 0; }
+.assistant-turn > .message.assistant:has(+ .chat-video-tasks) { margin-bottom: 0; }
+.chat-video-tasks > article { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
+.chat-video-tasks h3 { font-size: 13px; font-weight: 600; margin: 0; }
+.video-result-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.video-result-row span { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }

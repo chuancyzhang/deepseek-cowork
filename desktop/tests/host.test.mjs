@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {HostStore} from '../src/host/store.ts';
 import {receiveConversation,receiveEvents,conversationAt,presentOpenedBrowser} from '../src/host/conversations.ts';
+import {readVideoTaskLayout, videoPathKey, videoTaskLayout} from '../src/host/videoTasks.ts';
 import {HostSDK} from '../src/host/sdk.ts';
 import {PluginRegistry} from '../src/plugins/registry.ts';
 import {SaveCoordinator} from '../src/host/saveCoordinator.ts';
-import {MessageProjection,mergeEvents} from '../src/runtime.ts';
+import {MessageProjection,mergeEvents,messageGroups} from '../src/runtime.ts';
 
 test('browser presentation opens once without overriding selection, closed panels or background chats',()=>{
   const host=new HostStore(),initial=()=>({selected:'new'});
@@ -41,6 +42,44 @@ test('media task state belongs to its conversation and newer events survive late
   assert.deepEqual(host.get(host.sessionKey('media_tasks','b'),[]),[]);
   receiveEvents(host,[{event:'media_task',conversation_id:'a',data:{...task,status:'completed',updated_at:4}}]);
   assert.equal(conversationAt(host,'a').media_tasks[0].status,'completed');
+});
+
+test('video cards follow their creation calls across pagination and versioned retries',()=>{
+  const host = new HostStore();
+  const firstPath = 'D:\\聊天目录\\media\\first\\video.mp4';
+  const secondPath = 'D:\\聊天目录\\media\\second\\video.mp4';
+  const task = {conversation_id:'chat', run_id:'same-run', capability:'video_generate', updated_at:1, status:'running', files:[]};
+  const video = (id, callId, files) => ({...task, id, tool_call_id:callId, files, revision:1, created_at:id==='first' ? 1 : 2});
+  const first = video('first','call-one',[firstPath]);
+  const second = video('second','call-two',[secondPath]);
+  const messages = [
+    {id:'reply-one',role:'assistant',meta:{turn_id:'same-run'},tool_calls:[{id:'call-one',function:{name:'media_create'}}]},
+    {id:'next-request',role:'user',content:'再生成一段'},
+    {id:'reply-two',role:'assistant',meta:{turn_id:'same-run'},tool_calls:[{id:'call-two',function:{name:'media_create'}}]},
+    {id:'normal-request',role:'user',content:'哪里的夜景好看？'},
+    {id:'normal-reply',role:'assistant',content:'南滨路。'},
+  ];
+  const event = data => receiveEvents(host,[{event:'media_task',conversation_id:'chat',data}]);
+  event(second); event(first);
+  let read = readVideoTaskLayout(host,'chat',messageGroups(messages.slice(1)));
+  assert.deepEqual(read().unplaced,['first']);
+  assert.deepEqual([...read().groups],[['reply-two',['second']]]);
+  read = readVideoTaskLayout(host,'chat',messageGroups(messages));
+  const layout = read();
+  assert.deepEqual([...layout.groups],[['reply-one',['first']],['reply-two',['second']]]);
+  assert.deepEqual(layout.unplaced,[]);
+  const parallel = {...messages[0],tool_calls:[...messages[0].tool_calls,...messages[2].tool_calls]};
+  assert.deepEqual([...videoTaskLayout([second,first],messageGroups([parallel]),'chat').groups],[['reply-one',['first','second']]]);
+  assert.equal(layout.files.get(videoPathKey('file:///d:/%E8%81%8A%E5%A4%A9%E7%9B%AE%E5%BD%95/media/first/video.mp4')).taskId,'first');
+  assert.equal(layout.files.get(videoPathKey('./media/second/video.mp4','D:\\聊天目录')).taskId,'second');
+  assert.notEqual(videoPathKey('D:\\a%20b\\video.mp4'),videoPathKey('file:///D:/a%20b/video.mp4'));
+  event({...second,status:'not_submitted',revision:2});
+  event({...second,status:'queued',revision:3,updated_at:0});
+  receiveConversation(host,'chat',{id:'chat',meta:{},media_tasks:[{...second,status:'not_submitted',revision:2,updated_at:999}]});
+  assert.equal(conversationAt(host,'chat').media_tasks.find(item=>item.id==='second').status,'queued');
+  assert.equal(read(),layout);
+  const historical = [{id:'old-result',role:'tool',tool_call_id:'call-one',meta:{turn_id:'same-run',tool_name:'media_create'},result_obj:{task_id:'first'}}];
+  assert.deepEqual([...videoTaskLayout([{...first,tool_call_id:undefined}],messageGroups(historical),'chat').groups],[['old-result',['first']]]);
 });
 import {activeReview,reviewTitle} from '../src/reviews.ts';
 

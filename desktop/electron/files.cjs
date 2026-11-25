@@ -7,12 +7,21 @@ const { pathToFileURL } = require('node:url');
 // path is accepted by the protocol handler; relative HTML assets stay scoped.
 class FileHost {
   constructor() { this.files = new Map(); }
-  register(file) {
+  register(file, transient = false) {
     const token = randomUUID();
     const preview = file.payload.preview_path || file.path;
-    this.files.set(token, { path: preview, generated: file.payload.preview_html, pdf: file.payload.preview_kind === 'pdf' });
+    this.files.set(token, { path: preview, generated: file.payload.preview_html, pdf: file.payload.preview_kind === 'pdf',
+      controller: transient ? new AbortController() : undefined });
     return { ...file, payload: { ...file.payload, preview_html: undefined, preview_path: undefined,
       url: `cowork-local://file/${token}/${encodeURIComponent(path.basename(preview))}` } };
+  }
+  release(url) {
+    const parsed = new URL(url);
+    const token = parsed.pathname.split('/')[1];
+    const entry = parsed.protocol === 'cowork-local:' && parsed.host === 'file' && this.files.get(token);
+    if (!entry?.controller) return;
+    this.files.delete(token);
+    entry.controller.abort();
   }
   draft(url, text) {
     const parsed = new URL(url);
@@ -52,7 +61,7 @@ class FileHost {
     if (!isDocument && !/\.(?:css|js|mjs|png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|mp4|webm|mp3|wav|json)$/i.test(target))
       return new Response('不支持的页面资源。', { status: 403 });
     if (isDocument && entry.generated) return new Response(entry.generated, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-    return fetch(pathToFileURL(target).href, { headers: request.headers });
+    return fetch(pathToFileURL(target).href, { headers: request.headers, signal: entry.controller?.signal });
   }
 }
 module.exports = { FileHost };

@@ -102,7 +102,7 @@ class DesktopTransport:
 
     def status(self):
         return {"event": "ready" if self.service is not None else "starting", "protocol": self.protocol,
-                "instance": self.instance, "message": self.startup_message}
+                "instance": self.instance, "message": self.startup_message, "deferred_skills": self.service is not None}
 
     def progress(self, message):
         if self.stop_requested.is_set():

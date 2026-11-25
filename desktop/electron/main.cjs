@@ -352,6 +352,9 @@ else {
       if (method === 'app.reconnect') { backend.ready = backend.start(); await backend.ready; await startup.flush(); publish({ event: 'service_reconnected' }); return { connected: true }; }
       if (method === 'app.ready') {
         startup.ready=true;
+        void backend.ready.then(ready => {
+          if (ready.deferred_skills) return backend.call('skills.preload');
+        }).catch(error => console.warn('skill_preload_request_failed', error.message));
         const result=await startup.flush();
         if (!result.acknowledged) return backend.call('updates.acknowledge',{host_version:app.getVersion()});
         return result;

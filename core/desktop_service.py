@@ -28,7 +28,7 @@ PROTOCOL_VERSION = 2
 
 
 class DesktopService:
-    def __init__(self, publish, startup=None):
+    def __init__(self, publish, startup=None, *, defer_skills=False):
         startup = startup or (lambda _message: None)
         startup("正在准备本地服务…")
         # Initialize the Office native extension chain before creating RPC
@@ -54,7 +54,7 @@ class DesktopService:
         self.storage.runtime_ledger = self.ledger
         journal = LedgerJournal(self.ledger)
         startup("正在恢复运行状态…")
-        self.state = RuntimeCoordinator(self.config, storage=self.storage, journal=journal)
+        self.state = RuntimeCoordinator(self.config, storage=self.storage, journal=journal, defer_skills=defer_skills)
         self.state.desktop_store = self.store
         startup("正在准备工作台…")
         self.lock = threading.RLock()
@@ -264,6 +264,9 @@ class DesktopService:
                     "active_runs": [self.public_run(run) for run in self.store.active_runs()],
                     "last_conversation": self.store.get_state("last_conversation", ""),
                     "home_draft": self.store.versioned_state("draft:", {"text": "", "attachments": []})}
+        if method == "skills.preload":
+            self.state.skill_catalog.start_preload()
+            return {"accepted": True}
         if method == "skills.list":
             snapshot = self.state.skill_catalog.snapshot()
             return [{key: skill.get(key) for key in ("name", "display_name", "description", "enabled", "source_kind")} for skill in snapshot.display_skills()]
@@ -347,7 +350,7 @@ def main():
         transport.start()
         publish = transport.publish
     try:
-        service = DesktopService(publish, startup=transport.progress if transport else None)
+        service = DesktopService(publish, startup=transport.progress if transport else None, defer_skills=args.serve)
         if transport:
             transport.progress("工作台已准备就绪")
     except BaseException as error:

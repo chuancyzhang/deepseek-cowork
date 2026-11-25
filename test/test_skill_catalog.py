@@ -4,6 +4,7 @@ import unittest
 import os
 import tempfile
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -25,6 +26,50 @@ class _Config:
 
 
 class TestSkillCatalogService(unittest.TestCase):
+    def test_deferred_preload_is_shared_by_early_readers(self):
+        config = _Config()
+        service = SkillCatalogService(config, deferred=True)
+        self.addCleanup(service.stop_watching)
+        entered, release = threading.Event(), threading.Event()
+        manager = MagicMock(skill_records={}, skills_dirs=[])
+
+        def build(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("test did not release catalog preload")
+            return manager
+
+        with patch("core.skill_catalog.SkillManager", side_effect=build) as factory, \
+                ThreadPoolExecutor(max_workers=2) as readers:
+            self.assertFalse(service.is_ready())
+            factory.assert_not_called()
+            preload = service.start_preload()
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertIs(service.start_preload(), preload)
+                first = readers.submit(service.snapshot)
+                second = readers.submit(service.snapshot)
+                self.assertFalse(service.is_ready())
+            finally:
+                release.set()
+            snapshot = preload.result(timeout=5)
+            self.assertIs(first.result(timeout=5), snapshot)
+            self.assertIs(second.result(timeout=5), snapshot)
+            self.assertIs(service.snapshot().manager, manager)
+            factory.assert_called_once()
+            self.assertEqual(config.loaded, 0)
+
+    def test_first_use_can_retry_a_failed_background_preload(self):
+        service = SkillCatalogService(_Config(), deferred=True)
+        self.addCleanup(service.stop_watching)
+        manager = MagicMock(skill_records={}, skills_dirs=[])
+        with patch("core.skill_catalog.SkillManager", side_effect=[OSError("目录无法读取"), manager]) as factory:
+            with self.assertRaisesRegex(RuntimeError, "目录无法读取"):
+                service.start_preload().result(timeout=5)
+            self.assertFalse(service.is_ready())
+            self.assertIs(service.snapshot().manager, manager)
+            self.assertEqual(factory.call_count, 2)
+
     def test_display_inventory_is_owned_and_changes_only_with_snapshot(self):
         first = MagicMock(skill_records={"alpha": {}}, skills_dirs=[])
         first.get_all_skills.return_value = [

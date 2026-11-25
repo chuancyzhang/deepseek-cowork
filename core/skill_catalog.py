@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import uuid
+from concurrent.futures import Future
 from dataclasses import dataclass
 
 from .skill_manager import SkillManager
@@ -62,13 +63,15 @@ class SkillCatalogSnapshot:
 class SkillCatalogService:
     """Owns process-level Skill snapshots and swaps them atomically after changes."""
 
-    def __init__(self, config_manager, workspace_dir=None, logger=None, dependency_coordinator=None):
+    def __init__(self, config_manager, workspace_dir=None, logger=None, dependency_coordinator=None, *, deferred=False):
         self.config_manager = config_manager
         self.workspace_dir = workspace_dir
         self.logger = logger
         self.dependency_coordinator = dependency_coordinator
         self._lock = threading.RLock()
         self._snapshot = None
+        self._deferred = deferred
+        self._initial_load = None
         self._revision = 0
         self._listeners = []
         self._reload_lock = threading.RLock()
@@ -87,17 +90,44 @@ class SkillCatalogService:
 
     def snapshot(self):
         with self._lock:
-            if self._snapshot is None:
+            if self._snapshot is not None:
+                return self._snapshot
+            if not self._deferred:
                 raise RuntimeError("Skill catalog is not ready.")
-            return self._snapshot
+            if self._initial_load is not None and self._initial_load.done():
+                self._initial_load = None  # The next use can retry a failed load.
+            load = self.start_preload()
+        return load.result()
+
+    def start_preload(self):
+        with self._lock:
+            if self._snapshot is None and self._initial_load is None:
+                self._initial_load = Future()
+                threading.Thread(target=self._load_initial, args=(self._initial_load,),
+                                 name="skill-catalog-preload", daemon=True).start()
+            return self._initial_load
+
+    def _load_initial(self, load):
+        try:
+            with self._reload_lock:
+                snapshot = self._snapshot
+                if snapshot is None:
+                    self._log("skill_catalog preload_started")
+                    # Desktop configuration was loaded at service startup. Reading
+                    # it from disk again here can overwrite a concurrent edit.
+                    snapshot = self.reload(reason="preload", refresh_config=False)
+            load.set_result(snapshot)
+        except BaseException as exc:
+            self._log(f"skill_catalog preload_failed error={exc}")
+            load.set_exception(RuntimeError(f"技能目录加载失败，请重试。{exc}"))
 
     def preload(self):
         return self.reload(reason="preload")
 
-    def reload(self, reason="manual", required_event=None):
+    def reload(self, reason="manual", required_event=None, *, refresh_config=True):
         started = time.time()
         with self._reload_lock:
-            if hasattr(self.config_manager, "load_config"):
+            if refresh_config and hasattr(self.config_manager, "load_config"):
                 self.config_manager.load_config()
             manager = SkillManager(
                 self.workspace_dir,
@@ -134,7 +164,10 @@ class SkillCatalogService:
             with self._lock:
                 self._revision = snapshot.revision
                 self._snapshot = snapshot
+                self._initial_load = None
                 self._filesystem_signature = filesystem_signature
+                if self._deferred and not self._watch_stop.is_set():
+                    self.start_watching()
         self._log(
             f"skill_catalog reload_done revision={snapshot.revision} reason={reason} "
             f"skills={len(manager.skill_records)} duration={time.time() - started:.3f}s"
@@ -205,7 +238,8 @@ class SkillCatalogService:
             self._watch_thread.start()
 
     def stop_watching(self):
-        self._watch_stop.set()
+        with self._lock:
+            self._watch_stop.set()
 
     def _watch_loop(self, interval_seconds):
         while not self._watch_stop.wait(interval_seconds):

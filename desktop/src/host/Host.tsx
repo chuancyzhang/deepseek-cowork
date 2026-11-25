@@ -1,4 +1,4 @@
-import {createContext,useContext,useEffect,useState,type ReactNode} from 'react';
+import {createContext,useContext,useEffect,useRef,useState,type ReactNode} from 'react';
 import {HostStore} from './store';
 import {StoreContext,useHostField} from './context';
 import {useWorkbenchController,type WorkbenchController} from './workbench';
@@ -21,6 +21,7 @@ function Runtime({children}:{children:ReactNode}) {
   const [retrying,setRetrying]=useState(false);
   const [startupMessage,setStartupMessage]=useState('正在恢复工作台…');
   const [exiting,setExiting]=useState(false);
+  const startupReady=useRef(false);
   async function exit(){
     setExiting(true);
     try {await window.cowork.call('app.quit');}
@@ -48,6 +49,16 @@ function Runtime({children}:{children:ReactNode}) {
     });
     return ()=>{alive=false;unregister();};
   },[host,registry,saves]);
+  useEffect(()=>{
+    if(!started||controller.loading||controller.serviceError||startupReady.current)return;
+    let frame=requestAnimationFrame(()=>{
+      frame=requestAnimationFrame(()=>{
+        startupReady.current=true;
+        void window.cowork.call('app.ready').catch(reason=>controller.error(reason.message));
+      });
+    });
+    return()=>cancelAnimationFrame(frame);
+  },[started,controller.loading,controller.serviceError,controller.error]);
   useEffect(()=>{
     let alive=true;
     void window.cowork.call<{message?:string}|null>('app.startup_status').then(value=>{if(alive&&value?.message)setStartupMessage(value.message);});

@@ -113,7 +113,7 @@ def _session_command(method):
 
 
 class RuntimeCoordinator:
-    def __init__(self, config_manager, *, storage=None, journal=None):
+    def __init__(self, config_manager, *, storage=None, journal=None, defer_skills=False):
         self.config_manager = config_manager
         history_dir = config_manager.get_chat_history_dir()
         db_path = os.path.join(history_dir, "chat_history.sqlite")
@@ -143,14 +143,16 @@ class RuntimeCoordinator:
             config_manager,
             logger=_log_daemon,
             dependency_coordinator=self.dependency_coordinator,
+            deferred=defer_skills,
         )
         self.skill_catalog_error = ""
-        try:
-            self.skill_catalog.preload()
-            self.skill_catalog.start_watching()
-        except Exception as exc:
-            self.skill_catalog_error = str(exc)
-            _log_daemon(f"skill_catalog preload_failed error={exc}")
+        if not defer_skills:
+            try:
+                self.skill_catalog.preload()
+                self.skill_catalog.start_watching()
+            except Exception as exc:
+                self.skill_catalog_error = str(exc)
+                _log_daemon(f"skill_catalog preload_failed error={exc}")
 
     def touch(self):
         self.last_activity = time.time()

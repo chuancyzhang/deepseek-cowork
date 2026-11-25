@@ -450,14 +450,16 @@ export function useWorkbenchController() {
       receiveSidebar(value.sidebar);
       setHasMoreConversations(value.conversations.length === 500);
       for(const run of value.active_runs)receiveRun(host,run,run.conversation_id);
-      const id = value.last_conversation;
+      const id = window.history.state?.conversationId;
       if (id && value.conversations.some((c: Conversation) => c.id === id && !c.meta.archived)) { selectedId.current = id; await loadConversation(id); }
       else { const entry = drafts.restore('', value.home_draft); applyDraft(entry.value, false); }
       setLoading(false);
-      requestAnimationFrame(() => { void call('app.ready').catch(failure => error(failure.message)); });
     }).catch(failure => { if (mounted) { setServiceError(failure.message); setLoading(false); } });
     return () => { mounted = false; };
   }, []);
+  useEffect(() => {
+    if (!loading && !serviceError) window.history.replaceState({conversationId: selectedConversationId}, '');
+  }, [loading, serviceError, selectedConversationId]);
   useEffect(() => {
     const media = matchMedia('(prefers-color-scheme: dark)');
     let mounted = true;

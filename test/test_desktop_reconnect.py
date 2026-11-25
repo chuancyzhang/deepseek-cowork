@@ -26,7 +26,7 @@ class SocketClient:
         self.thread = threading.Thread(target=self.read, daemon=True)
         self.thread.start()
         self.write({"token": descriptor["token"], "protocol": descriptor["protocol"]})
-        self.until(lambda value: value.get("event") == "ready")
+        self.ready = self.until(lambda value: value.get("event") == "ready")
 
     def read(self):
         try:
@@ -82,11 +82,17 @@ class DesktopReconnectTests(unittest.TestCase):
                         untrusted.sendall(b'{"protocol":1,"token":"wrong-token"}\n')
                         self.assertIn(b'error', untrusted.recv(4096))
                     client = SocketClient(descriptor)
+                    self.assertTrue(client.ready["deferred_skills"])
+                    self.assertEqual(client.call("app.bootstrap")["conversations"], [])
                     settings = client.call("settings.save_model", model_name="fixture", api_key="test-only", base_url=f"http://127.0.0.1:{server.server_address[1]}/v1")
                     cid = client.call("conversation.create")["id"]
+                    self.assertFalse(any("skill_catalog preload_started" in path.read_text(encoding="utf-8")
+                                         for path in (Path(directory) / "logs").glob("*/daemon-*.log")))
                     params = dict(conversation_id=cid, request_id=uuid.uuid4().hex, message_id=uuid.uuid4().hex, text="SLOW reconnect", model_id=settings["selected_model_id"])
                     client.call("conversation.send", **params)
                     client.until(lambda value: value.get("data", {}).get("type") == "content")
+                    skill_logs = "".join(path.read_text(encoding="utf-8") for path in (Path(directory) / "logs").glob("*/daemon-*.log"))
+                    self.assertEqual(skill_logs.count("skill_catalog preload_started"), 1)
                     client.close()
                     client = None
                     time.sleep(.4)

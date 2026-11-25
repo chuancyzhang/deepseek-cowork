@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 const require=createRequire(import.meta.url),desktop=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 
 test('real workbench keeps input locally across new chat, switching and reload', {skip:!process.env.COWORK_PYTHON,timeout:90000},async()=>{
-  const root=path.resolve(desktop,'../.tmp/nov17-draft-path/ui');await mkdir(root,{recursive:true});const data=await mkdtemp(path.join(root,'case-'));
+  const root=path.resolve(process.env.COWORK_QA_ROOT||path.resolve(desktop,'../.tmp/nov17-draft-path/ui'));await mkdir(root,{recursive:true});const data=await mkdtemp(path.join(root,'case-'));
   const fixture=String.raw`
 const {app,screen}=require('electron');
 const assert=require('node:assert/strict'),fs=require('node:fs/promises'),path=require('node:path');
@@ -28,6 +28,10 @@ app.whenReady().then(async()=>{
   const reload=async()=>{await new Promise(resolve=>{window.webContents.once('did-finish-load',resolve);window.webContents.reload();});await until('!!document.querySelector(\'textarea[aria-label="消息输入"]\')');};
   await until('!!document.querySelector(".new-chat")');
   if(process.env.COWORK_INPUT_RESTART){
+    await until('!!document.querySelector(".workbench-home [aria-label=消息输入]")');
+    await reload();
+    assert.ok(await read('!!document.querySelector(".workbench-home [aria-label=消息输入]")'));
+    await read('[...document.querySelectorAll(".history-select")].find(e=>e.textContent.includes("当前未发送")).click()');
     await until('document.querySelector(\'textarea[aria-label="消息输入"]\')?.value.includes("当前未发送")');
     const boot=await original.call(backend,'app.bootstrap',{});
     const restored=await read('JSON.parse(localStorage.getItem('+JSON.stringify('cowork-pending-draft:'+boot.last_conversation)+')).value');

@@ -1,0 +1,11 @@
+# Opt-in plain HTTP on the chosen server interface.
+services:
+  platform:
+    environment:
+      COWORK_PUBLIC_URL: "http://${COWORK_HOST:?Set COWORK_HOST to the server IPv4 address}:${COWORK_HTTP_PORT:-8788}"
+    ports:
+      - target: 8080
+        published: "${COWORK_HTTP_PORT:-8788}"
+        host_ip: "${COWORK_HOST:?Set COWORK_HOST to the server IPv4 address}"
+  proxy:
+    profiles: [https]

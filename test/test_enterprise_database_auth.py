@@ -1,6 +1,8 @@
 """Managed database accounts use the existing browser and desktop handoff contract."""
+import json
 import re
 import threading
+from dataclasses import replace
 from unittest.mock import patch
 
 import httpx
@@ -195,7 +197,8 @@ def test_admin_account_password_requires_founder(local_auth):
 
 
 @pytest.mark.parametrize("platform_url", ["https://localhost", "http://localhost:8788", "http://enterprise.example"])
-def test_login_entry_selection_and_existing_desktop_client(local_auth,tmp_path,platform_url):
+@pytest.mark.parametrize("packaged", [False, True], ids=["manual-personal", "preconfigured-package"])
+def test_login_entry_selection_and_existing_desktop_client(local_auth,tmp_path,monkeypatch,platform_url,packaged):
     client,app,settings,headers,source,account=local_auth
     enable(local_auth)
     assert client.put('/api/v1/admin/login-entry',headers=headers,json={'provider_id':'staff','revision':0}).status_code==200
@@ -210,8 +213,20 @@ def test_login_entry_selection_and_existing_desktop_client(local_auth,tmp_path,p
         return httpx.Response(response.status_code,headers=dict(response.headers),content=response.content)
     store=EnterpriseStore(tmp_path/'desktop',protector=TestProtector())
     enterprise=EnterpriseClient(store,transport=httpx.MockTransport(forward))
-    enterprise.bind(connection)
+    install = tmp_path/'install'
+    install.mkdir()
+    monkeypatch.setenv('COWORK_DESKTOP_INSTALL_DIR', str(install))
+    if packaged:
+        app.state.auth.settings = replace(settings, public_url=platform_url, allow_platform_http=True)
+        (install/'enterprise_connection.json').write_text(json.dumps(connection), encoding='utf-8')
+        assert store.connection_status() == {'connection': connection, 'connection_source': 'package'}
+        assert not store.path.exists()
+    else:
+        assert store.connection_status() == {}
+        enterprise.bind(connection)
+        assert store.connection_status()['connection'] == connection
     def open_browser(url):
+        assert url.startswith((platform_url if packaged else settings.public_url) + '/auth/start/')
         response=client.get(url,follow_redirects=False)
         form_url=response.headers['location']
         form=client.get(form_url)

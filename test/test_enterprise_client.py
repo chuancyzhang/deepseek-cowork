@@ -43,6 +43,57 @@ def test_guest_discovery_is_local_and_does_not_create_state(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_conflicting_package_does_not_use_or_overwrite_saved_identity_without_confirmation(tmp_path, monkeypatch):
+    from threading import Event
+
+    install = tmp_path / "install"
+    install.mkdir()
+    monkeypatch.setenv("COWORK_DESKTOP_INSTALL_DIR", str(install))
+    package = {**CONNECTION, "platform_url": "https://second.example/sub"}
+    (install / "enterprise_connection.json").write_text(json.dumps(package), encoding="utf-8")
+    store = ready_store(tmp_path)
+    seen = []
+    matching_platform = False
+
+    def endpoint(request):
+        assert request.url.host == "second.example"
+        assert "Authorization" not in request.headers
+        seen.append(request.url.path)
+        if request.url.path.endswith("platform-info"):
+            return httpx.Response(200, json={"platform_id": package["platform_id"] if matching_platform else "unexpected",
+                                             "supported_api_versions": [1]})
+        return httpx.Response(200, json={"items": []})
+
+    client = EnterpriseClient(store, transport=httpx.MockTransport(endpoint))
+    assert store.connection_status() == {"connection": package, "connection_source": "package", "previous_connection": CONNECTION}
+    assert store.read(secret=True) == {} and store.profiles() == []
+    with pytest.raises(EnterpriseError, match="确认切换"):
+        client.login(None, Event(), lambda _: pytest.fail("unexpected browser"))
+    with pytest.raises(EnterpriseError, match="确认切换"):
+        client.bind(use_package=True)
+    assert not seen
+    with pytest.raises(EnterpriseError, match="不匹配"):
+        client.bind(use_package=True, confirm_switch=True)
+    assert store.connection_status()["previous_connection"] == CONNECTION
+    assert store._saved()[0]["member"]["id"] == "member-one"
+
+    matching_platform = True
+    client.bind(use_package=True, confirm_switch=True)
+    assert store.connection_status()["connection"] == package
+    assert "previous_connection" not in store.connection_status()
+    assert "access_token" not in store.read(secret=True) and "member" not in store.read()
+
+
+def test_invalid_package_leaves_saved_identity_inactive(tmp_path, monkeypatch):
+    monkeypatch.setenv("COWORK_DESKTOP_INSTALL_DIR", str(tmp_path))
+    (tmp_path / "enterprise_connection.json").write_text("{}", encoding="utf-8")
+    store = ready_store(tmp_path)
+    assert store.connection_status()["connection_error"]
+    assert store.read(secret=True) == {} and store.profiles() == []
+    with pytest.raises(EnterpriseError, match="连接文件"):
+        store.connection()
+
+
 def test_enterprise_capability_keys_and_member_bearer_stay_scoped(tmp_path):
     from core.enterprise_capabilities import EnterpriseCapabilities, identity, selection_key
     store = ready_store(tmp_path)

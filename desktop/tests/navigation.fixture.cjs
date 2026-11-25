@@ -6,9 +6,10 @@ let selectedFolder;
 const dialog=Object.create(electron.dialog);
 dialog.showOpenDialog=(...args)=>selectedFolder
   ? Promise.resolve({canceled:false,filePaths:[selectedFolder]}) : electron.dialog.showOpenDialog(...args);
-const openedFolders=[];
+const openedFolders=[], openedBrowserUrls=[];
 const shell=Object.create(electron.shell);
 shell.openPath=async target=>{openedFolders.push(target);return '';};
+shell.openExternal=async url=>{openedBrowserUrls.push(url);};
 app.getVersion=()=>require('../package.json').version;
 class HiddenWindow extends electron.BrowserWindow {
   constructor(options){super({...options,show:false,webPreferences:{...options.webPreferences,offscreen:!process.env.COWORK_NAVIGATION_NATIVE,backgroundThrottling:false}});}
@@ -20,6 +21,7 @@ const {Backend}=require('../electron/backend.cjs'),originalCall=Backend.prototyp
 let window,backend,slowSearch,fastSearch,searchFailure=false,taskReadRelease,stopFailure=false,browserHost;
 let preparingSearch=false, retryRequested=false;
 let enterpriseSignedIn=false, enterpriseCredential=false, deferEnterpriseCatalog=false, staleEnterpriseCatalog;
+let enterpriseLoginStatus=null, enterpriseLoginJob=null;
 const businessCapabilities=[
   {id:'analysis',kind:'skill',name:'经营数据分析规范',description:'按销售、成本与利润三项指标完成经营分析。',version:2,selection_key:'enterprise.demo.analysis'},
   {id:'sales',kind:'mcp',name:'经营数据服务',description:'读取销售、成本和费用明细。',version:1,selection_key:'mcp-server-enterprise_demo_sales',requires_credential:true,endpoint_host:'data.example.test'},
@@ -31,6 +33,19 @@ const {BrowserHost}=require('../electron/browser.cjs'),originalShow=BrowserHost.
 BrowserHost.prototype.show=function(params){browserHost=this;return originalShow.call(this,params);};
 Backend.prototype.call=async function(method,p={}){
   backend=this;
+  if(method==='enterprise.status' && enterpriseLoginStatus!==null) return enterpriseLoginStatus;
+  if(method==='enterprise.bind' && enterpriseLoginStatus!==null) {
+    assert.equal(p.connection.platform_url,'https://personal.example.test');
+    enterpriseLoginStatus={connection:p.connection};return enterpriseLoginStatus;
+  }
+  if(method==='enterprise.login' && enterpriseLoginStatus!==null) {
+    assert.equal(p.provider,undefined);
+    assert.equal(p.username,undefined);
+    assert.equal(p.password,undefined);
+    enterpriseLoginJob={id:'package-login',status:'running',message:'请在浏览器完成登录',url:enterpriseLoginStatus.connection.platform_url+'/auth/start/fixture'};
+    return {job_id:enterpriseLoginJob.id};
+  }
+  if(method==='jobs.get' && p.id===enterpriseLoginJob?.id) return enterpriseLoginJob;
   if(method==='enterprise.capabilities') {
     const catalog={status:enterpriseSignedIn?'ready':'signed_out',platform_name:'示例企业',items:enterpriseSignedIn?businessCapabilities.map(item=>({...item,
       available:!item.requires_credential||enterpriseCredential,credential_configured:enterpriseCredential})):[]};
@@ -453,6 +468,38 @@ async function checkEnterpriseCapabilities() {
   await until('document.querySelector("[role=tabpanel]")?.textContent.includes("BrowserSkill")');
 }
 
+async function checkEnterpriseLogin() {
+  const personalForm='document.querySelector(".management-content .detail-form input[type=url]")';
+  enterpriseLoginStatus={connection_source:'package',connection:{platform_name:'示例企业',platform_url:'https://enterprise.example.test'}};
+  await read('document.querySelector(".sidebar-utilities button").click()');
+  await until('[...document.querySelectorAll(".management-nav button")].some(button=>button.textContent.trim()==="企业账号")');
+  await clickText('.management-nav button','企业账号');
+  await until('document.querySelector(".connection-form")?.textContent.includes("示例企业")');
+  assert.equal(await read(`Boolean(${personalForm})`),false);
+  assert.equal(await read('!!document.querySelector(".connection-form select")'),false);
+  await snap('enterprise-package-login');
+  await clickText('.connection-form button','登录企业账号');
+  await wait(()=>openedBrowserUrls.length===1);
+  assert.equal(openedBrowserUrls[0],'https://enterprise.example.test/auth/start/fixture');
+  window.webContents.send('cowork:events',[{event:'job',data:enterpriseLoginJob},{event:'job',data:enterpriseLoginJob}]);
+  await until('document.querySelector(".job-progress")?.textContent.includes("打开登录页")');
+  assert.equal(openedBrowserUrls.length,1);
+  enterpriseLoginStatus={...enterpriseLoginStatus,member:{name:'测试成员'},expires_at:Date.now()/1000+3600};
+  enterpriseLoginJob={...enterpriseLoginJob,status:'completed',result:enterpriseLoginStatus};
+  window.webContents.send('cowork:events',[{event:'job',data:enterpriseLoginJob},{event:'enterprise_changed'}]);
+  await until('document.querySelector(".enterprise-account")?.textContent.includes("测试成员")');
+
+  enterpriseLoginStatus={};
+  window.webContents.send('cowork:events',[{event:'enterprise_changed'}]);
+  await until(`Boolean(${personalForm})`);
+  await fill('.management-content .detail-form label:nth-child(1) input','个人接入测试');
+  await fill('.management-content .detail-form label:nth-child(2) input','personal');
+  await fill('.management-content .detail-form input[type=url]','https://personal.example.test');
+  await clickText('.management-content .detail-form button','连接企业');
+  await until('document.querySelector(".connection-form")?.textContent.includes("个人接入测试")');
+  assert.equal(await read('document.querySelector(".connection-form .primary").textContent'),'登录企业账号');
+}
+
 async function checkSidebar() {
   await until('document.querySelectorAll(".brand .navigation-tools button").length===2');
   command('sidebar');await until('document.querySelectorAll(".app-navigation .navigation-tools button").length===2');
@@ -518,6 +565,12 @@ app.once('browser-window-created',(_event,win)=>{
 });
 async function run(){
   await until('!!document.querySelector(".new-chat")');
+  if(process.env.COWORK_NAVIGATION_ENTERPRISE_LOGIN_ONLY){
+    await checkEnterpriseLogin();
+    assert.deepEqual(errors,[]);
+    console.log('ENTERPRISE_LOGIN_OK');
+    return;
+  }
   assert.deepEqual(Menu.getApplicationMenu().items.map(item=>item.label),['文件','编辑','视图','帮助']);
   assert.equal(Menu.getApplicationMenu().getMenuItemById('edit').submenu.items[0].role,'undo');
   assert.equal(window.isMenuBarVisible(),false);

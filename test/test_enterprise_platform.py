@@ -216,7 +216,7 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return item["id"]
 
-    def submission(self, text="只记录这一条新问题", submission_id="message-1", **changes):
+    def submission(self, text="员工新发的问题", submission_id="message-1", **changes):
         result = {"model": "test-model", "stream": True, "messages": [
             {"role": "system", "content": "stable system prefix"},
             {"role": "user", "content": "以前个人模型的历史，不得入库"},
@@ -265,7 +265,8 @@ class PlatformTests(unittest.TestCase):
         gateway["_cowork"]["chat_audit_version"] = 1
         response = self.client.post(f"/api/v1/gateway/models/{model_id}/chat/completions", headers=self.headers(), json=gateway)
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(self.client.get("/api/v1/admin/questions").json()["total"], 0)
+        with self.db.transaction() as db:
+            self.assertIsNone(db.scalar(select(Question)))
         self.assertNotIn("_cowork", self.requests[-1][1])
         self.assertEqual(self.requests[-1][1]["messages"], gateway["messages"])
 
@@ -311,8 +312,8 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v1/admin/chat-audit").status_code, 403)
 
     def test_guest_and_login_do_not_upload_history_or_grant_models(self):
-        self.assertEqual(self.client.get("/api/v1/platform-info").json()["question_scope"], "enterprise_models_only")
-        self.assertEqual(self.client.get("/api/v1/admin/questions").status_code, 401)
+        self.assertEqual(self.client.get("/api/v1/platform-info").json()["chat_audit"]["retention_days"], 30)
+        self.assertEqual(self.client.get("/api/v1/admin/chat-audit").status_code, 401)
         admin = self.web_login()
         self.assertEqual(admin["member"]["role"], "admin")
         self.assertEqual(admin["models"], [])
@@ -320,7 +321,7 @@ class PlatformTests(unittest.TestCase):
         employee = self.web_login("employee-subject")
         self.assertEqual(employee["member"]["role"], "member")
         self.assertEqual(employee["models"], [])
-        self.assertEqual(self.client.get("/api/v1/admin/questions").status_code, 403)
+        self.assertEqual(self.client.get("/api/v1/admin/chat-audit").status_code, 403)
         with self.db.transaction() as db:
             self.assertEqual(list(db.scalars(select(Question))), [])
 
@@ -352,7 +353,7 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/v1/admin/models", json={}).status_code, 403)
         self.assertEqual(self.client.post("/api/v1/auth/logout", headers={**self.headers(), "Origin": "https://other.invalid"}).status_code, 403)
 
-    def test_model_proxy_records_only_new_questions_once_without_rewriting_prefix(self):
+    def test_model_proxy_ignores_legacy_questions_without_rewriting_prefix(self):
         admin = self.web_login()
         model_id = self.model(admin["member"]["id"])
         body = self.submission()
@@ -363,13 +364,11 @@ class PlatformTests(unittest.TestCase):
         upstream_request, projected = self.requests[-1]
         self.assertEqual(projected, {key: value for key, value in body.items() if key != "_cowork"})
         self.assertEqual(upstream_request.headers["authorization"], "Bearer vendor-secret")
-        rows = self.client.get("/api/v1/admin/questions").json()["items"]
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["text"], "只记录这一条新问题")
-        self.assertAlmostEqual(rows[0]["expires_at"] - rows[0]["received_at"], 30 * 86400)
+        with self.db.transaction() as db:
+            self.assertIsNone(db.scalar(select(Question)))
         self.assertNotIn("vendor-secret", json.dumps(self.client.get("/api/v1/me").json()))
 
-    def test_desktop_login_assignment_sdk_stream_and_question_closed_loop(self):
+    def test_desktop_login_assignment_and_legacy_sdk_stream_without_question_records(self):
         from unittest.mock import patch
         from core.enterprise_client import EnterpriseClient, EnterpriseStore, submission
         from core.llm.enterprise import EnterpriseTransport
@@ -413,22 +412,28 @@ class PlatformTests(unittest.TestCase):
             self.assertTrue(any(x.get("content") == "OK" for x in chunks), chunks)
         finally:
             provider.client.close()
-        rows = self.client.get("/api/v1/admin/questions").json()["items"]
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["member_id"], identity["member"]["id"])
-        self.assertEqual(rows[0]["text"], "员工第一次企业提问")
+        self.assertEqual(self.requests[-1][1]["messages"], [{"role": "user", "content": "员工第一次企业提问"}])
+        self.assertNotIn("_cowork", self.requests[-1][1])
+        with self.db.transaction() as db:
+            self.assertIsNone(db.scalar(select(Question)))
         self.assertNotIn("vendor-secret", store.path.read_bytes().decode("utf-8", errors="ignore"))
 
-    def test_recorded_question_survives_upstream_failure_and_conflicting_retries_rejected(self):
+    def test_upstream_failure_remains_visible_without_recording_or_validating_legacy_questions(self):
         admin = self.web_login()
         model_id = self.model(admin["member"]["id"])
         self.upstream_failure = True
         response = self.client.post(f"/api/v1/gateway/models/{model_id}/chat/completions", json=self.submission(), headers=self.headers())
         self.assertEqual(response.status_code, 503)
         self.assertNotIn("vendor secret", response.text)
-        self.assertEqual(len(self.client.get("/api/v1/admin/questions").json()["items"]), 1)
-        response = self.client.post(f"/api/v1/gateway/models/{model_id}/chat/completions", json=self.submission("different"), headers=self.headers())
-        self.assertEqual(response.status_code, 409)
+        self.upstream_failure = False
+        retry = self.submission("different")
+        retry["_cowork"]["questions"][0]["sent_at"] -= 31 * 86400
+        response = self.client.post(f"/api/v1/gateway/models/{model_id}/chat/completions", json=retry, headers=self.headers())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("[DONE]", response.text)
+        self.assertEqual(self.requests[-1][1], {key: value for key, value in retry.items() if key != "_cowork"})
+        with self.db.transaction() as db:
+            self.assertIsNone(db.scalar(select(Question)))
 
     def test_revocation_is_checked_per_call_and_disabled_member_cannot_rejoin(self):
         admin = self.web_login()
@@ -445,22 +450,21 @@ class PlatformTests(unittest.TestCase):
             db.get(Member, employee["member"]["id"]).enabled = False
         self.assertEqual(self.client.get("/api/v1/me").status_code, 403)
 
-    def test_expiry_is_enforced_before_cleanup_and_physically_deleted(self):
+    def test_obsolete_question_apis_are_removed_and_existing_records_expire_on_schedule(self):
         admin = self.web_login()
         model_id = self.model(admin["member"]["id"])
-        self.client.post(f"/api/v1/gateway/models/{model_id}/chat/completions", json=self.submission(), headers=self.headers())
+        now = time.time()
         with self.db.transaction() as db:
-            question = db.scalar(select(Question))
-            question.expires_at = time.time() - 1
-            question_id = question.id
-        self.assertEqual(self.client.get("/api/v1/admin/questions").json()["total"], 0)
-        self.assertEqual(self.client.get("/api/v1/admin/questions/"+question_id).status_code, 404)
+            for identifier, expiration in (("expired", now - 1), ("retained", now + 60)):
+                db.add(Question(id=identifier, member_id=admin["member"]["id"], client_id="legacy-client",
+                                submission_id=identifier, model_id=model_id, body="旧提问",
+                                received_at=expiration - 30 * 86400, expires_at=expiration))
+        self.assertEqual(self.client.get("/api/v1/admin/questions").status_code, 404)
+        self.assertEqual(self.client.get("/api/v1/admin/questions/retained").status_code, 404)
         self.assertEqual(self.app.state.cleanup(), 1)
         with self.db.transaction() as db:
-            self.assertIsNone(db.get(Question, question_id))
-        old = self.submission()
-        old["_cowork"]["questions"][0]["sent_at"] -= 31 * 86400
-        self.assertEqual(self.client.post(f"/api/v1/gateway/models/{model_id}/chat/completions", json=old, headers=self.headers()).status_code, 409)
+            self.assertIsNone(db.get(Question, "expired"))
+            self.assertIsNotNone(db.get(Question, "retained"))
 
     def test_desktop_handoff_requires_proof_and_code_and_is_one_use(self):
         verifier = "v" * 43
@@ -630,7 +634,7 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v1/me", headers={"Authorization": "Bearer " + session["access_token"]}).status_code, 200)
         self.assertEqual(self.client.post(path, data=body).status_code, 409)
 
-    def test_32_streams_keep_questions_unique_and_cancellation_releases_capacity(self):
+    def test_32_streams_cancel_cleanly_without_writing_legacy_questions(self):
         admin = self.web_login()
         model_id = self.model(admin["member"]["id"])
         session = self.auth.session(admin["member"]["id"], "desktop")
@@ -681,23 +685,22 @@ class PlatformTests(unittest.TestCase):
         self.assertGreaterEqual(counts["peak"], 32)
         self.assertEqual(counts["active"], 0)
         self.assertEqual(self.app.state.model_slots._value, self.settings.max_model_concurrency)
-        rows = self.client.get("/api/v1/admin/questions").json()
-        self.assertEqual(rows["total"], 40)
-        self.assertEqual(len({q["id"] for q in rows["items"]}), 40)
+        with self.db.transaction() as db:
+            self.assertIsNone(db.scalar(select(Question)))
         print(f"\nEnterprise simulated streams: peak={counts['peak']}, requests=40, seconds={time.monotonic()-started:.2f}")
 
-    def desktop_package(self, version="99.0.0", extra=None):
-        from web.platform.server.releases import DESKTOP_REQUIRED_FILES, DESKTOP_ROOT
+    def desktop_package(self, version="99.0.0", extra=None, *, root=DESKTOP_ROOT):
+        from web.platform.server.releases import DESKTOP_REQUIRED_FILES
         package = io.BytesIO()
         with zipfile.ZipFile(package, "w") as archive:
             for name in DESKTOP_REQUIRED_FILES - {"desktop-release.json"}:
-                archive.writestr(DESKTOP_ROOT + "/" + name, b"fixture")
-            archive.writestr(DESKTOP_ROOT + "/desktop-release.json", json.dumps({
+                archive.writestr(root + "/" + name, b"fixture")
+            archive.writestr(root + "/desktop-release.json", json.dumps({
                 "schema_version": 1, "app_layout": "electron", "target": "windows-x64", "version": version}))
-            archive.writestr(DESKTOP_ROOT + "/resources/service/_internal/enterprise_capabilities.json", json.dumps({
+            archive.writestr(root + "/resources/service/_internal/enterprise_capabilities.json", json.dumps({
                 "supported_connection_schemas": [1], "supported_platform_api_versions": [1]}))
             for name, contents in (extra or {}).items():
-                archive.writestr(DESKTOP_ROOT + "/" + name, contents)
+                archive.writestr(root + "/" + name, contents)
         data = package.getvalue()
         return data, {"schema_version": 1, "version": version, "app_layout": "electron", "target_os": "windows", "arch": "x64",
             "filename": f"cowork-desktop-v{version}-windows-x64.zip", "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "notes": "测试更新"}
@@ -856,9 +859,10 @@ class PlatformTests(unittest.TestCase):
 
     def test_release_validation_publish_withdraw_and_immutable_config(self):
         import zipfile
+        from scripts.package_release import ARCHIVE_ROOT
         self.web_login()
         data, report = self.desktop_package("1.2.3", {"resources/service/_internal/config.json": json.dumps({
-            "api_key": "", "base_url": "https://api.deepseek.com", "disabled_skills": []})})
+            "api_key": "", "base_url": "https://api.deepseek.com", "disabled_skills": []})}, root=ARCHIVE_ROOT)
         release = self.client.post("/api/v1/admin/client-releases", json={"app_version": "1.2.3"}, headers=self.headers()).json()
         path = "/api/v1/admin/client-releases/"+release["id"]
         self.assertEqual(self.client.put(path+"/report", json=report, headers=self.headers()).status_code, 200)
@@ -871,7 +875,7 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v1/client-releases/"+release["id"]+"/download").status_code, 404)
         preview = self.client.get(path+"/download")
         with zipfile.ZipFile(io.BytesIO(preview.content)) as archive:
-            connection = json.loads(archive.read(DESKTOP_ROOT + "/enterprise_connection.json"))
+            connection = json.loads(archive.read(ARCHIVE_ROOT + "/enterprise_connection.json"))
             self.assertEqual(connection["platform_id"], "test-company")
             self.assertEqual(len(connection), 6)
             with zipfile.ZipFile(io.BytesIO(data)) as source:
@@ -941,6 +945,15 @@ class PlatformTests(unittest.TestCase):
                 with zipfile.ZipFile(io.BytesIO(data)) as archive:
                     with self.assertRaises(PlatformError):
                         inspect_archive(archive, self.settings)
+
+        from scripts.package_release import ARCHIVE_ROOT
+        data, _ = self.desktop_package(root=ARCHIVE_ROOT)
+        mixed = io.BytesIO(data)
+        with zipfile.ZipFile(mixed, "a") as archive:
+            archive.writestr(DESKTOP_ROOT + "/extra.txt", "conflicting archive directories")
+        with zipfile.ZipFile(mixed) as archive:
+            with self.assertRaises(PlatformError):
+                inspect_archive(archive, self.settings)
 
 
 if __name__ == "__main__":

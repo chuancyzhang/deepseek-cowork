@@ -5,6 +5,18 @@ if [ ! -f .env ]; then
     printf '%s\n' '缺少 .env。请先复制 .env.example 并按 README 完成首次配置。' >&2
     exit 1
 fi
+case "${1:-}" in
+    --http)
+        docker compose -f compose.yaml -f compose.http.yaml up -d --build --wait database platform
+        docker compose -f compose.yaml -f compose.http.yaml ps
+        exit 0
+        ;;
+    '') ;;
+    *)
+        printf '%s\n' '用法：sh start.sh [--http]' >&2
+        exit 2
+        ;;
+esac
 if [ ! -f certs/tls.crt ] || [ ! -f certs/tls.key ]; then
     printf '%s\n' '缺少 HTTPS 证书。请将证书和私钥放到 certs/tls.crt、certs/tls.key。' >&2
     exit 1

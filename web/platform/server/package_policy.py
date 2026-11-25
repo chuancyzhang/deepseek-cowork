@@ -1,6 +1,7 @@
 """Shared standard-package rules; only the Python standard library is required."""
 import json
 
+DESKTOP_ARCHIVE_ROOT = "Cowork"
 DEFAULT_CONFIG_PATH = "_internal/config.json"
 MAX_DEFAULT_CONFIG_BYTES = 8192
 

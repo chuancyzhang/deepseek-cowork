@@ -11,6 +11,7 @@
 | `server/` | 认证、模型网关、能力发布、聊天审计、团队空间、分发及命令入口 |
 | `ui/` | 平台管理页面 |
 | `compose.yaml` | Linux 服务、数据库与 HTTPS 代理 |
+| `compose.http.yaml` | Linux 内网 HTTP 端口映射 |
 | `compose.local.yaml` | Windows 本机 Docker 启动配置 |
 
 部署顺序是选择环境、准备服务与数据库、初始化账号和模型、分发客户端，最后安排备份与升级。桌面包与企业中心离线包是两个交付物：更新桌面版本不会自动升级中心。
@@ -18,7 +19,7 @@
 | 部署场景 | 阅读入口 |
 | --- | --- |
 | Windows 本机或离线交付 | [Windows Docker](#windows-本机-docker-启动) |
-| Linux 服务器与 HTTPS | [Linux 部署](#linux-部署) |
+| Linux 服务器与 HTTPS 或内网 HTTP | [Linux 部署](#linux-部署) |
 | 反向代理子路径或原生进程 | [其他部署方式](#子路径与原生进程部署) |
 | 服务已经启动 | [初始化与成员管理](#初始化与成员管理) |
 | 给员工发布桌面包 | [客户端分发](#客户端分发) |
@@ -51,7 +52,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\dist\enterprise-docker\sta
 
 ## Linux 部署
 
-将整个部署目录复制到服务器，例如 `/opt/cowork-platform/`。准备 Docker Compose、企业域名、认证和模型服务，以及受客户端信任的证书。以下命令均在部署目录执行：
+将整个部署目录复制到服务器，例如 `/opt/cowork-platform/`。准备 Docker Compose、认证和模型服务。HTTPS 部署使用企业域名和受客户端信任的证书。以下命令均在部署目录执行：
 
 ```bash
 cp .env.example .env
@@ -73,7 +74,7 @@ docker compose run --rm --no-deps platform python -m server generate-key
 | `COWORK_LOGIN_PROVIDER` | 员工默认登录来源，可由网页配置覆盖 |
 | `COWORK_SESSION_SECONDS` | 会话期限，默认 8 小时 |
 | `COWORK_MAX_MODEL_CONCURRENCY` | 模型并发配置，默认 64 |
-| `COWORK_CLEANUP_SECONDS` | 到期提问清理间隔，默认 60 秒 |
+| `COWORK_CLEANUP_SECONDS` | 到期审计记录清理间隔，默认 60 秒 |
 | `COWORK_MAX_SPACE_FILE_BYTES`、`COWORK_MAX_SPACE_BYTES` | 团队空间单文件及空间容量配置 |
 
 启动服务：
@@ -83,6 +84,20 @@ sh start.sh
 ```
 
 启动会检查数据库迁移。随后打开 `/app` 初始化管理员，配置认证、模型与成员授权。
+
+### 使用内网 IP 和 HTTP 端口
+
+在可信内网部署时，可以在 `.env` 中填入服务器实际的 IPv4 地址和员工可访问的端口，例如：
+
+```dotenv
+COWORK_HOST=192.168.1.50
+COWORK_HTTP_PORT=8788
+COWORK_ALLOW_PLATFORM_HTTP=1
+```
+
+沿用上面的数据库、平台标识和加密密钥配置，跳过证书步骤，执行 `sh start.sh --http`。此模式按 IP 和端口生成 `COWORK_PUBLIC_URL`，在此地址发布服务。请用 `http://192.168.1.50:8788/app` 初始化并管理平台。企业客户端封装时也使用这个地址。HTTP 会明文传输账号和请求，仅在可信内网使用。
+
+已部署的平台切换访问方式时，先用原启动配置停止服务，保留原数据库卷、平台标识与加密密钥。切换后重新生成并分发企业客户端包。
 
 ## 子路径与原生进程部署
 
@@ -110,13 +125,19 @@ python -m server serve --host 127.0.0.1 --port 8080
 
 ## 企业能力与聊天审计
 
-打开“企业能力”，按 Skill、MCP 或专家创建草稿，测试配置，发布版本，再分配给成员。Skill 可附带文本参考、脚本和资源。MCP 使用 Streamable HTTP，可指定允许调用的工具。使用 Bearer 认证时，由员工在桌面企业 MCP 标签页给该服务配置凭据。专家可指定默认企业模型并关联 Skill 和 MCP，员工需要分别具有相应的能力权限。
+在“企业能力”选择对应标签页，创建草稿、测试、发布，再分配给成员。
+
+- **Skill** 上传 ZIP。包内需有 `SKILL.md`，可附带 `references/`、`scripts/` 和 `assets/` 下的文本文件。
+- **专家** 上传 ZIP。包内包含 `expert.json`、`prompt.md` 和 1–8 个 `skills/<目录名>/SKILL.md`。导入会创建或更新包内的 Skill 草稿并关联给专家。先发布并授权这些 Skill，再发布、授权专家。专家也可关联已存在的 Skill 和 MCP，或指定默认企业模型。
+- **MCP** 通过表单填写 Streamable HTTP 服务地址和允许调用的工具。使用 Bearer 认证时，由员工在桌面企业 MCP 标签页给该服务配置凭据。
+
+Skill 和专家的上传页提供可直接导入的示例模板。包内文件使用 UTF-8 文本，压缩前和压缩后均有 4 MiB 上限。
 
 配置测试检查表单、脚本语法和所关联的能力。验证 MCP 是否可达、凭据是否有效及实际工具结果时，请让一名获授权的成员在桌面发起一次测试任务。员工发送消息时选定本轮使用的已发布版本。更新版本供后续轮次使用。停用或撤销授权会阻止之后的模型和工具调用，员工可以查看已有聊天和成果。
 
 “审计”中的聊天请求记录以成员和聊天为单位保存最近一次符合规则的请求，保留 30 天。连续对话更新同一条记录。请求中已有的文字上下文随之保存。审计副本省略认证凭据和内嵌文件数据，超过 4 MiB 时保留记录信息并标明正文未保存。管理操作独立保留 90 天。
 
-管理员可选择记录使用自配模型的企业任务请求，默认关闭，从后续任务生效。个人任务使用自配模型时仍按个人使用规则运行。旧客户端连接新版平台时，兼容入口继续记录企业模型的新提问，按原有 30 天规则清理。支持聊天审计的客户端使用按聊天保存的方式。
+管理员可选择记录使用自配模型的企业任务请求，默认关闭，从后续任务生效。个人任务使用自配模型时仍按个人使用规则运行。
 
 ### 平台账号密码
 
@@ -174,13 +195,13 @@ Windows 标准客户端按[构建说明](../../docs/technical-design.md#构建�
 1. 在“设置 → 客户端分发”新建发布，填写程序版本，上传 Electron 标准 ZIP 和同次构建的更新清单。
 2. 点击“校验并生成企业包”，等待可下载状态。
 3. 下载核对后发布，并设置为推荐版本。
-4. 员工下载并完整解压，启动后登录企业账号。
+4. 将生成的企业 ZIP 分发给员工。员工完整解压后打开 `deepseek-cowork.exe`，点击“登录企业账号”即可进入企业登录页。
 
 也可点击“从 GitHub 导入最新版”：中心读取正式 Release 的新版工作台清单，从固定版本标签下载标准 ZIP，验证并生成企业包。导入过程可取消，失败保留原因；完成后停在待发布状态，仍需管理员下载核验并发布推荐。
 
-企业包在 EXE 同目录增加公开的 `enterprise_connection.json`，封装后重新计算大小和 SHA-256。管理员及员工下载页同时提供对应企业 ZIP 的“下载校验清单”；离线更新把两者放在同一目录，不能搭配标准 ZIP 的原清单。
+平台把服务器地址写入 EXE 同目录的 `enterprise_connection.json`，员工首次打开时直接使用该地址。封装后重新计算 ZIP 大小和 SHA-256。管理员及员工下载页同时提供对应企业 ZIP 的“下载校验清单”，离线更新时将两者放在同一目录。
 
-企业包用于由管理员统一选择客户端推荐版本。个人包可登录企业使用获授权的资源，并继续从个人更新渠道检查更新。企业包即使暂未登录，也从企业中心检查更新。
+后续升级只需管理员重复上传、校验和发布推荐版本。企业客户端通过包内地址自动检查和下载，员工可在桌面“设置 → 更新与关于”手动检查，整个更新过程无需登录企业账号或打开平台网页。个人包继续从个人更新渠道检查更新，登录企业账号后也可以使用获授权的企业资源。
 
 当前只有 Windows x64 Electron 一个推荐版本。客户端启动约 15 秒后检查，之后每 24 小时检查，自动下载高于当前版本的推荐包；员工确认“重启并更新”后才安装。安装前重新确认推荐记录有效，已有任务须先结束。企业源失败不切换公共源。撤下只阻止新的在线下载和安装，不卸载已安装版本；离线副本无法确认撤回状态。后台目前不提供强制升级、设备清单或全员安装回执。
 
@@ -204,7 +225,7 @@ docker compose run --rm platform python -m server migrate
 
 ### 状态与日志
 
-Linux 部署启动或更新代码后运行 `sh start.sh`，使用以下入口查看状态和日志：
+Linux 部署更新代码后，使用原启动参数再次运行 `sh start.sh`。HTTPS 部署使用以下命令查看状态和日志。HTTP 部署在 `docker compose` 后加上 `-f compose.yaml -f compose.http.yaml`。
 
 ```bash
 docker compose ps
@@ -216,7 +237,7 @@ docker compose stop
 
 ### 业务备份
 
-业务数据库备份排除提问正文及聊天请求快照，避免正文随备份延长保存。停止写入后备份业务文件卷，独立保管加密密钥。
+业务数据库备份排除聊天请求快照和历史提问正文，避免正文随备份延长保存。停止写入后备份业务文件卷，独立保管加密密钥。
 
 ```bash
 docker compose exec -T database pg_dump -U cowork -d cowork -Fc --exclude-table-data=questions --exclude-table-data=chat_audit_requests > cowork-business.dump
@@ -242,4 +263,4 @@ docker compose --env-file .env.local -f compose.local.yaml stop platform
 docker compose --env-file .env.local -f compose.local.yaml up -d --no-deps --wait platform
 ```
 
-离线升级时将新包解压到新目录，把原 `.env.local` 原样复制过去；停止原平台并按“日常运维”备份后，运行新包 `start-local.ps1`。Compose 项目名和卷名保持一致，不新建账号库，不重置加密密钥。结构迁移到版本 4 后不能直接换回旧中心镜像；如需恢复，应配套恢复升级前数据库和文件卷。
+离线升级时将新包解压到新目录，把原 `.env.local` 原样复制过去；停止原平台并按“日常运维”备份后，运行新包 `start-local.ps1`。保持 Compose 项目名、卷名、账号库和加密密钥一致。回退到较早版本时，应配套恢复升级前的数据库和文件卷。

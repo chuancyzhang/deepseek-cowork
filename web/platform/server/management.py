@@ -1,20 +1,17 @@
-"""Member authorization, model configuration and short-lived question records."""
+"""Member authorization and model configuration."""
 from __future__ import annotations
 
-import re
 import time
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.exc import IntegrityError
 
 from .config import service_url
-from .database import AuthSource, LocalAdministrator, LoginSession, Member, Model, ModelGrant, Question
+from .database import LocalAdministrator, LoginSession, Member, Model, ModelGrant
 from .security import PlatformError, digest, encode, equal
 
 MODEL_OPTIONS = {"supports_vision", "supports_image_generation", "stream_usage_enabled", "deepseek_thinking_enabled",
                  "reasoning_effort", "reasoning_efforts", "prompt_cache_key_param", "context_window_tokens",
                  "max_output_tokens", "anthropic_auth"}
-RETENTION_SECONDS = 30 * 86400
 
 
 def member_view(member):
@@ -163,83 +160,3 @@ class Management:
             if not member or not member.enabled or not model or not model.enabled or not db.get(ModelGrant, (member_id, model_id)):
                 raise PlatformError("model_forbidden", "当前账号未获此模型授权，或模型已停用。", 403)
             return {**model_view(model, admin=True), "api_key": self.vault.open(model.secret)["api_key"]}
-
-    def record_questions(self, member_id, model_id, metadata):
-        if not isinstance(metadata, dict) or set(metadata) - {"client_id", "run_id", "questions", "model_revision"}:
-            raise PlatformError("invalid_submission", "缺少有效的企业调用关联信息。")
-        client_id = metadata.get("client_id", "")
-        questions = metadata.get("questions", [])
-        if (not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", client_id) or not isinstance(questions, list)
-                or len(questions) > 100 or not isinstance(metadata.get("run_id"), str)
-                or not 1 <= len(metadata["run_id"]) <= 512):
-            raise PlatformError("invalid_submission", "企业调用关联信息无效。")
-        now, validated = time.time(), []
-        for item in questions:
-            if not isinstance(item, dict) or set(item) != {"id", "text", "sent_at"}:
-                raise PlatformError("invalid_question", "提问记录仅接受提交标识、问题正文和发送时间。")
-            if (not isinstance(item["id"], str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", item["id"])
-                    or not isinstance(item["text"], str) or len(item["text"].encode("utf-8")) > 1024 * 1024
-                    or type(item["sent_at"]) not in {int, float}):
-                raise PlatformError("invalid_question", "问题正文或提交标识无效。")
-            if not now - RETENTION_SECONDS < item["sent_at"] <= now + 300:
-                raise PlatformError("submission_expired", "提交时间已过期或本机时钟不正确；输入已保留，请核对后重新提交。", 409)
-            question_id = digest(encode([self.settings.platform_id, member_id, client_id, item["id"]]))
-            validated.append((question_id, item))
-        with self.database.transaction() as db:
-            # Recheck inside the recording transaction, before upstream invocation.
-            member, model = db.get(Member, member_id), db.get(Model, model_id)
-            if not member or not member.enabled or not model or not model.enabled or not db.get(ModelGrant, (member_id, model_id)):
-                raise PlatformError("model_forbidden", "模型权限已变化，请刷新后重新选择。", 403)
-            if metadata.get("model_revision") != model.revision:
-                raise PlatformError("model_changed", "模型配置已变化，请刷新企业连接后重新发起本轮。", 409)
-            for question_id, item in validated:
-                existing = db.get(Question, question_id)
-                if existing:
-                    if existing.expires_at <= now:
-                        raise PlatformError("submission_expired", "此提交的中心留存期限已结束，不能通过重试重新记录。", 409)
-                    if existing.body != item["text"]:
-                        raise PlatformError("submission_conflict", "同一提交标识对应不同问题，请使用新提交。", 409)
-                    continue
-                try:
-                    with db.begin_nested():
-                        db.add(Question(id=question_id, member_id=member_id, client_id=client_id,
-                                        submission_id=item["id"], model_id=model_id, body=item["text"],
-                                        received_at=now, expires_at=now + RETENTION_SECONDS))
-                        db.flush()
-                except IntegrityError:
-                    existing = db.get(Question, question_id)
-                    if not existing or existing.body != item["text"] or existing.expires_at <= now:
-                        raise PlatformError("submission_conflict", "并发提交内容不一致。", 409) from None
-            if validated:
-                self.database.audit(db, "questions.received", member_id=member_id,
-                                    target=digest(metadata["run_id"]), outcome="accepted")
-
-    def questions(self, *, member_id="", keyword="", since=None, until=None, offset=0, limit=50):
-        if len(keyword) > 200 or offset < 0 or not 1 <= limit <= 100:
-            raise PlatformError("invalid_filter", "查询条件超出允许范围。")
-        now = time.time()
-        filters = [Question.expires_at > now]
-        if member_id:
-            filters.append(Question.member_id == member_id)
-        if since is not None:
-            filters.append(Question.received_at >= float(since))
-        if until is not None:
-            filters.append(Question.received_at < float(until))
-        if keyword:
-            filters.append(Question.body.contains(keyword, autoescape=True))
-        with self.database.transaction() as db:
-            total = db.scalar(select(func.count()).select_from(Question).where(*filters))
-            rows = db.execute(select(Question, Member.name, Model.name).join(Member, Member.id == Question.member_id)
-                              .join(Model, Model.id == Question.model_id).where(*filters)
-                              .order_by(Question.received_at.desc(), Question.id).offset(offset).limit(limit))
-            return {"items": [{"id": q.id, "member_id": q.member_id, "member_name": member_name, "model_name": model_name,
-                               "text": q.body, "received_at": q.received_at, "expires_at": q.expires_at}
-                              for q, member_name, model_name in rows], "total": total, "offset": offset, "limit": limit}
-
-    def question(self, question_id):
-        with self.database.transaction() as db:
-            q = db.get(Question, question_id)
-            if q is None or q.expires_at <= time.time():
-                raise PlatformError("not_found", "提问不存在或已到期删除。", 404)
-            return {"id": q.id, "member_id": q.member_id, "text": q.body,
-                    "received_at": q.received_at, "expires_at": q.expires_at}

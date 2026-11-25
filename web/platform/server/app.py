@@ -12,7 +12,7 @@ import time
 import uuid
 from urllib.parse import parse_qs
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
@@ -64,12 +64,13 @@ def create_app(settings=None, *, transport=None):
     chat_audit = ChatAudit(settings, database, vault, management)
     releases = Releases(settings, database)
     team_spaces = TeamSpaces(settings, database)
-    cleanup_state = {"last_success_at": None, "deleted": 0, "error": ""}
+    cleanup_state = {"last_success_at": None, "chats_deleted": 0, "error": ""}
     jobs = set()
 
     def cleanup():
         now = time.time()
         with database.transaction() as db:
+            # Existing question records still expire on their original schedule.
             count = db.execute(delete(Question).where(Question.expires_at <= now)).rowcount
             chat_count = chat_audit.cleanup(db, now)
             db.execute(delete(LoginSession).where(LoginSession.expires_at <= now))
@@ -77,7 +78,7 @@ def create_app(settings=None, *, transport=None):
             if count:
                 database.audit(db, "questions.expired", target=str(count))
         team_spaces.cleanup_uploads()
-        cleanup_state.update(last_success_at=now, deleted=count, chats_deleted=chat_count, error="")
+        cleanup_state.update(last_success_at=now, chats_deleted=chat_count, error="")
         return count
 
     async def cleanup_loop():
@@ -193,7 +194,6 @@ def create_app(settings=None, *, transport=None):
                               "source_sha256": os.environ.get("COWORK_BUILD_SOURCE", "")},
                     "team_spaces": {"version": 1, "minimum_client_version": 1},
                     "enterprise_capabilities": {"version": 1},
-                    "question_retention_days": 30, "question_scope": "enterprise_models_only",
                     "chat_audit": {"version": 1, "retention_days": 30, "platform_events_days": 90}}
 
     @app.get("/api/v1/auth/providers")
@@ -441,6 +441,7 @@ def create_app(settings=None, *, transport=None):
         if path != PROTOCOL_PATHS[model["protocol"]]:
             raise PlatformError("protocol_mismatch", "请求协议与企业模型配置不匹配。", 400)
         body = await read_json(request, settings.max_request_bytes)
+        # Older clients may include per-question metadata. It stays out of the supplier request and storage.
         metadata = body.pop("_cowork", None)
         if not isinstance(metadata, dict) or metadata.get("model_revision") != model["revision"]:
             raise PlatformError("model_changed", "企业模型配置已更新，请刷新企业连接后重新发起本轮。", 409)
@@ -462,9 +463,10 @@ def create_app(settings=None, *, transport=None):
             raise PlatformError("platform_busy", "企业模型当前繁忙，请稍后重试。", 429) from None
         upstream = None
         try:
-            if metadata.get("chat_audit_version") != 1:
-                await asyncio.to_thread(management.record_questions, actor["id"], model_id, metadata)
-            address, headers = upstream_parts(model)
+            current = await asyncio.to_thread(management.authorized_model, actor["id"], model_id)
+            if current["revision"] != model["revision"]:
+                raise PlatformError("model_changed", "企业模型配置已更新，请刷新企业连接后重新发起本轮。", 409)
+            address, headers = upstream_parts(current)
             for key in ("anthropic-version", "anthropic-beta"):
                 if model["protocol"] == "anthropic" and key in request.headers:
                     headers[key] = request.headers[key]
@@ -506,23 +508,6 @@ def create_app(settings=None, *, transport=None):
             headers["X-Upstream-Request-ID"] = upstream.headers["x-request-id"][:256]
         return StreamingResponse(stream_body(), status_code=upstream.status_code,
                                  media_type=upstream.headers.get("content-type", "application/json"), headers=headers)
-
-    @app.get("/api/v1/admin/questions")
-    def questions(request: Request, member_id: str = "", keyword: str = "", since: float | None = None,
-                  until: float | None = None, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)):
-        actor = principal(request, admin=True)
-        result = management.questions(member_id=member_id, keyword=keyword, since=since, until=until, offset=offset, limit=limit)
-        with database.transaction() as db:
-            database.audit(db, "questions.queried", member_id=actor["id"])
-        return result
-
-    @app.get("/api/v1/admin/questions/{question_id}")
-    def question(question_id: str, request: Request):
-        actor = principal(request, admin=True)
-        result = management.question(question_id)
-        with database.transaction() as db:
-            database.audit(db, "question.read", member_id=actor["id"], target=question_id)
-        return result
 
     @app.get("/api/v1/admin/settings")
     def admin_settings(request: Request):

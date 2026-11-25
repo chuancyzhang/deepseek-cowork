@@ -18,7 +18,7 @@ from core.app_version import APP_VERSION
 
 PLATFORM = ROOT / "web/platform"
 FILES = ("Dockerfile", "Dockerfile.dockerignore", "requirements.txt", "compose.local.yaml",
-         "compose.yaml", "Caddyfile", "start-local.ps1", "start.sh", ".env.example", "README.md")
+         "compose.yaml", "compose.http.yaml", "Caddyfile", "start-local.ps1", "start.sh", ".env.example", "README.md")
 GENERATED = {"images.tar", "deployment.json", "SHA256SUMS", "DEPLOYMENT.md"}
 
 

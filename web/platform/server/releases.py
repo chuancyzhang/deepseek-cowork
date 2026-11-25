@@ -14,7 +14,7 @@ import httpx
 from sqlalchemy import select, update
 
 from .connection_contract import CONNECTION_FILE, validate_connection
-from .package_policy import MAX_DEFAULT_CONFIG_BYTES, validate_default_config
+from .package_policy import DESKTOP_ARCHIVE_ROOT, MAX_DEFAULT_CONFIG_BYTES, validate_default_config
 from .database import ClientRelease, Operation, Platform, uid
 from .security import PlatformError, digest, encode
 
@@ -64,13 +64,15 @@ def sha256(path):
 def inspect_archive(archive, settings, *, enterprise=False, layout="electron", version=None):
     if layout != "electron":
         raise PlatformError("invalid_layout", "企业中心仅支持 Electron 工作台。")
-    root = DESKTOP_ROOT
     internal = "resources/service/_internal"
     default_config = internal + "/config.json"
     files, total, seen = {}, 0, set()
     infos = archive.infolist()
     if not infos or len(infos) > 50000:
         raise PlatformError("invalid_archive", "安装包为空或包含过多文件。")
+    root = infos[0].filename.partition("/")[0]
+    if root not in {DESKTOP_ARCHIVE_ROOT, DESKTOP_ROOT}:
+        raise PlatformError("unsafe_archive", "安装包顶层目录与标准客户端包不匹配。")
     for info in infos:
         name = info.filename
         parts = name.rstrip("/").split("/")
@@ -339,6 +341,7 @@ class Releases:
             source_hashes = {}
             with zipfile.ZipFile(source_path) as source:
                 files = inspect_archive(source, self.settings, layout=layout, version=version)
+                root = files["desktop-release.json"].filename.partition("/")[0]
                 self.stage(release_id, generation, "package")
                 with zipfile.ZipFile(candidate, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as output:
                     for index, (name, info) in enumerate(files.items()):
@@ -350,7 +353,7 @@ class Releases:
                                 hasher.update(block)
                                 writer.write(block)
                         source_hashes[name] = hasher.hexdigest()
-                    output.writestr(DESKTOP_ROOT + "/" + CONNECTION_FILE, encode(snapshot).encode("utf-8"))
+                    output.writestr(root + "/" + CONNECTION_FILE, encode(snapshot).encode("utf-8"))
             self.stage(release_id, generation, "recheck")
             with zipfile.ZipFile(candidate) as output:
                 files = inspect_archive(output, self.settings, enterprise=True, layout=layout, version=version)

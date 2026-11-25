@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 from cryptography.fernet import Fernet
+import pytest
 
 
 def test_platform_folder_runs_on_its_own(tmp_path):
@@ -48,6 +49,7 @@ def test_deployment_snapshot_excludes_credentials_and_changes_with_source(tmp_pa
     source = Path(__file__).resolve().parents[1] / "web/platform"
     copied = tmp_path / "source"
     original = copy_source(source, copied)
+    assert "compose.http.yaml" in original
     (copied / ".env.local").write_text("PRIVATE_CONFIGURATION=do-not-ship")
     (copied / "server/__pycache__").mkdir()
     (copied / "server/__pycache__/stale.pyc").write_bytes(b"stale")
@@ -61,6 +63,32 @@ def test_deployment_snapshot_excludes_credentials_and_changes_with_source(tmp_pa
     (clean / "server/releases.py").write_text("changed source")
     changed = copy_source(clean, tmp_path / "changed")
     assert source_digest(changed) != source_digest(original)
+
+
+def test_intranet_http_is_explicit_and_uses_the_configured_origin(tmp_path, monkeypatch):
+    from web.platform.server.config import Settings
+
+    values = {"DATABASE_URL": "postgresql+psycopg://cowork:example@database:5432/cowork",
+              "DATA_DIR": str(tmp_path), "PLATFORM_ID": "http-test", "PLATFORM_NAME": "内网验收",
+              "PUBLIC_URL": "http://192.168.1.50:8788", "ENCRYPTION_KEY": Fernet.generate_key().decode()}
+    for key, value in values.items():
+        monkeypatch.setenv("COWORK_" + key, value)
+    monkeypatch.setenv("COWORK_DEVELOPMENT", "0")
+    monkeypatch.setenv("COWORK_ALLOW_PLATFORM_HTTP", "0")
+    with pytest.raises(ValueError, match="COWORK_ALLOW_PLATFORM_HTTP=1"):
+        Settings.from_env()
+    monkeypatch.setenv("COWORK_ALLOW_PLATFORM_HTTP", "1")
+    settings = Settings.from_env()
+    assert settings.origin == settings.public_url == "http://192.168.1.50:8788"
+    assert not settings.secure_cookie and not settings.development and not settings.allow_model_http
+    monkeypatch.setenv("COWORK_PUBLIC_URL", "http://192.168.1.50:80")
+    assert Settings.from_env().origin == "http://192.168.1.50"
+    monkeypatch.setenv("COWORK_PUBLIC_URL", "http://0.0.0.0:8788")
+    with pytest.raises(ValueError, match="员工访问"):
+        Settings.from_env()
+    monkeypatch.setenv("COWORK_PUBLIC_URL", "https://cowork.example:443")
+    settings = Settings.from_env()
+    assert settings.secure_cookie and settings.origin == "https://cowork.example"
 
 
 def test_offline_start_verifies_bundle_before_import_and_never_creates_credentials(tmp_path):

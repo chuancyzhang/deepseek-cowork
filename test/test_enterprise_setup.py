@@ -62,6 +62,24 @@ def test_setup_validation_and_origin_protection(server):
         assert db.scalar(select(Member)) is None
 
 
+def test_intranet_http_initialization_keeps_origin_and_csrf_checks(tmp_path):
+    url = 'http://192.168.1.50:8788'
+    settings = Settings(database_url='sqlite:///' + str(tmp_path/'db.sqlite'), data_dir=tmp_path,
+                        platform_id='intranet', platform_name='内网平台', public_url=url,
+                        encryption_key=Fernet.generate_key().decode(), development=True, allow_platform_http=True)
+    with TestClient(create_app(settings), base_url=url) as client:
+        credentials = {'username': 'admin', 'password': 'unique administrator password'}
+        assert client.post('/api/v1/setup', json=credentials, headers={'Origin': 'http://192.168.1.50:8789'}).status_code == 403
+        created = client.post('/api/v1/setup', json=credentials, headers={'Origin': url})
+        assert created.status_code == 200
+        cookies = created.headers.get_list('set-cookie')
+        assert cookies and all('; secure' not in value.lower() for value in cookies)
+        assert client.get('/api/v1/admin/settings').status_code == 200
+        assert client.post('/api/v1/auth/logout', headers={'Origin': url}).status_code == 403
+        csrf = client.cookies['cowork_csrf']
+        assert client.post('/api/v1/auth/logout', headers={'Origin': url, 'X-CSRF-Token': csrf}).status_code == 200
+
+
 def test_consumed_setup_never_reopens(server):
     client, app, settings = server
     assert create_admin(client, settings).status_code == 200

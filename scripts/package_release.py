@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 from core.app_version import APP_VERSION  # noqa: E402
 from core.update_manifest import DESKTOP_FILES_NAME  # noqa: E402
 from web.platform.server.package_policy import (  # noqa: E402
+    DESKTOP_ARCHIVE_ROOT as ARCHIVE_ROOT,
     MAX_DEFAULT_CONFIG_BYTES, validate_default_config,
 )
 from scripts.bundled_runtime_checks import (  # noqa: E402
@@ -30,7 +31,6 @@ from scripts.bundled_runtime_checks import (  # noqa: E402
 
 
 DIST_ROOT = "DeepSeek Cowork-win32-x64"
-ARCHIVE_ROOT = "Cowork"
 MAX_ARCHIVE_PATH_UNITS = 185
 SERVICE_DIR = "resources/service"
 DEFAULT_CONFIG_PATH = SERVICE_DIR + "/_internal/config.json"

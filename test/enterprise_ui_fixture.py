@@ -11,8 +11,9 @@ from fastapi.responses import RedirectResponse
 import httpx
 import uvicorn
 from web.platform.server.app import create_app
+from web.platform.server.chat_audit import ChatAudit
 from web.platform.server.config import Settings
-from web.platform.server.database import AuthSource, Member, Model, ModelGrant, Question
+from web.platform.server.database import AuthSource, Member, Model, ModelGrant
 
 
 def main():
@@ -34,9 +35,12 @@ def main():
                                   base_url="https://model.example.invalid/v1", secret=app.state.vault.seal({"api_key": "fixture-only"}), options={}, enabled=True, revision=1, tested_revision=1)
                     db.add_all([source, admin, staff, model])
                     db.flush()
-                    db.add_all([ModelGrant(member_id=admin.id, model_id=model.id), ModelGrant(member_id=staff.id, model_id=model.id),
-                                Question(id="fixture-question", member_id=staff.id, client_id="fixture-installation", submission_id="fixture-submission", model_id=model.id,
-                                         body="请整理本周项目进展，列出已完成事项和待确认问题。", received_at=time.time(), expires_at=time.time() + 30 * 86400)])
+                    db.add_all([ModelGrant(member_id=admin.id, model_id=model.id), ModelGrant(member_id=staff.id, model_id=model.id)])
+                ChatAudit(settings, app.state.database, app.state.vault, app.state.management).receive(staff.id, {
+                    "conversation_id": "weekly-progress", "request_id": "fixture-request", "run_id": "fixture-run",
+                    "protocol": "chat_completions", "model_source": "enterprise", "model_id": model.id,
+                    "model_name": model.model_name, "captured_us": time.time_ns() // 1000,
+                    "parameters": {"messages": [{"role": "user", "content": "请整理本周项目进展。"}]}})
                 app.state.auth.save_source({"id": "staff", "name": "员工账号密码", "mode": "database",
                                             "config": {}, "secrets": {}, "enabled": False})
                 account = app.state.auth.accounts.save("staff", {"username": "chen.ning", "name": "陈宁",

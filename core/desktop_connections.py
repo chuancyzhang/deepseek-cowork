@@ -167,8 +167,8 @@ class Connections:
         if method.startswith("enterprise."):
             if action == "status":
                 from core.enterprise_chat_audit import pending_status
-                state = self.enterprise.store.read()
-                return {**state, "chat_audit_sync": pending_status(self.enterprise.store, state)} if state else state
+                state = self.enterprise.store.connection_status()
+                return {**state, "chat_audit_sync": pending_status(self.enterprise.store, state)} if state.get("member") else state
             if action == "capabilities":
                 from core.enterprise_capabilities import EnterpriseCapabilities
                 return EnterpriseCapabilities(self.enterprise).inventory()
@@ -179,7 +179,8 @@ class Connections:
                 return result
             def operation(cancelled, progress):
                 if action == "bind":
-                    self.enterprise.bind(p["connection"])
+                    self.enterprise.bind(p.get("connection"), use_package=p.get("use_package") is True,
+                                         confirm_switch=p.get("confirm_switch") is True)
                 elif action == "providers":
                     return self.enterprise.inspect(self.enterprise.store.connection())
                 elif action == "login":
@@ -198,7 +199,7 @@ class Connections:
                 if action in {"bind", "login", "refresh"}:
                     self.s.publish({"event": "enterprise_changed"})
                     self.s.publish({"event": "settings_changed"})
-                return self.enterprise.store.read()  # never persist bearer tokens in job results
+                return self.enterprise.store.connection_status()  # never persist bearer tokens in job results
             return self.s.jobs.submit("企业连接", operation)
         client = TeamSpaceClient(self.enterprise.store)
         space = str(p.get("space_id") or "")

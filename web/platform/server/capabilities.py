@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import logging
 import re
 import time
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from sqlalchemy import Boolean, Float, ForeignKey, JSON, String, Text, select, tuple_, update
 from sqlalchemy.orm import Mapped, defer, mapped_column
 from starlette.concurrency import run_in_threadpool
 
+from .capability_packages import MAX_ZIP_BYTES, capability_zip_template, invalid_package, read_capability_package
 from .database import Base, Member, Model, uid
 from .security import PlatformError
 
@@ -261,6 +263,44 @@ class Capabilities:
         log.info("capability.draft_saved id=%s actor=%s revision=%s", result["id"], actor, result["revision"])
         return result
 
+    def import_package(self, actor, kind, data, key=None, revision=None):
+        package = read_capability_package(kind, data)
+        with self.database.transaction() as db:
+            row = self.find(db, key) if key else None
+            if row and row.revision != revision:
+                raise PlatformError("capability_conflict", "此草稿已被更新。请打开最新版本后再上传 ZIP。", 409)
+            kind, name, description, config = self.definition(package.definition, row)
+            capability_id = row.id if row else uid()
+            bundled_skills = []
+            for folder, definition in package.bundled_skills.items():
+                skill_id = hashlib.sha256(f"expert-skill\0{capability_id}\0{folder}".encode()).hexdigest()[:32]
+                skill = db.get(Capability, skill_id)
+                _, skill_name, skill_description, skill_config = self.definition(definition, skill)
+                values = {"draft_name": skill_name, "draft_description": skill_description, "draft_config": skill_config}
+                if skill is None:
+                    skill = Capability(id=skill_id, kind="skill", **values)
+                    db.add(skill)
+                    db.flush()
+                elif any(getattr(skill, field) != value for field, value in values.items()):
+                    self.revise(db, skill, skill.revision, draft_tested=False, **values)
+                self.database.audit(db, "capability.zip_imported", member_id=actor, target=skill.id)
+                bundled_skills.append({"id": skill_id, "name": skill_name, "version": skill.current_version})
+            if bundled_skills:
+                config["skill_ids"] = string_list(sorted(set(config["skill_ids"]) | {skill["id"] for skill in bundled_skills}),
+                                                  "Skill", identifiers=True)
+            values = {"draft_name": name, "draft_description": description, "draft_config": config}
+            if row is None:
+                row = Capability(id=capability_id, kind=kind, **values)
+                db.add(row)
+                db.flush()
+            else:
+                self.revise(db, row, revision, draft_tested=False, **values)
+            self.database.audit(db, "capability.zip_imported", member_id=actor, target=row.id)
+            result = {**self.view_admin(row, configuration=False), "bundled_skills": bundled_skills}
+        log.info("capability.zip_imported id=%s actor=%s revision=%s bundled_skills=%s",
+                 result["id"], actor, result["revision"], len(bundled_skills))
+        return result
+
     def admin_action(self, actor, key, action, payload):
         if action not in {"test", "publish", "disable", "grant"}:
             raise PlatformError("unknown_capability_action", "此能力操作不可用。", 404)
@@ -395,6 +435,17 @@ class Capabilities:
 def capability_router(service, principal, read_json):
     router = APIRouter(prefix="/api/v1")
 
+    async def read_zip(request):
+        mime = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if mime not in {"application/zip", "application/octet-stream", "application/x-zip-compressed"}:
+            invalid_package("请直接上传 ZIP 文件。", 415)
+        data = bytearray()
+        async for chunk in request.stream():
+            if len(data) + len(chunk) > MAX_ZIP_BYTES:
+                invalid_package("请选择不超过 4 MiB 的 ZIP 文件。", 413)
+            data.extend(chunk)
+        return bytes(data)
+
     @router.get("/capabilities")
     def member_catalog(request: Request):
         return service.list_for_member(principal(request)["id"])
@@ -408,6 +459,23 @@ def capability_router(service, principal, read_json):
     def admin_catalog(request: Request):
         principal(request, admin=True)
         return service.admin_list()
+
+    @router.get("/admin/capabilities/zip-template/{kind}")
+    def package_template(kind: str, request: Request):
+        principal(request, admin=True)
+        data = capability_zip_template(kind)
+        return Response(data, media_type="application/zip", headers={
+            "Content-Disposition": f'attachment; filename="cowork-{kind}-template.zip"'})
+
+    @router.post("/admin/capabilities/zip/{kind}", status_code=201)
+    async def upload_package(kind: str, request: Request):
+        actor = principal(request, admin=True)["id"]
+        return await run_in_threadpool(service.import_package, actor, kind, await read_zip(request))
+
+    @router.put("/admin/capabilities/zip/{kind}/{key}")
+    async def update_package(kind: str, key: str, revision: int, request: Request):
+        actor = principal(request, admin=True)["id"]
+        return await run_in_threadpool(service.import_package, actor, kind, await read_zip(request), key, revision)
 
     @router.get("/admin/capabilities/{key}")
     def admin_detail(key: str, request: Request):

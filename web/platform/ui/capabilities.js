@@ -3,6 +3,8 @@
 const capabilityKinds = {skill:"Skill", mcp:"MCP", expert:"专家"};
 const capabilityApi = "/admin/capabilities";
 const capabilityPath = "/app/capabilities/";
+const capabilityZipLimit = 4 * 1024 * 1024;
+const capabilityUsesZip = kind => kind === "skill" || kind === "expert";
 
 async function capabilityRoute(route) {
   const [, , , category, key, view] = route.split("/");
@@ -12,13 +14,14 @@ async function capabilityRoute(route) {
   const item = key === "new" ? null : await api(capabilityApi + "/" + encodeURIComponent(key));
   if (item && item.kind !== kind) throw new Error("能力类型已变更，请返回列表。");
   if (item && view === "grants") return capabilityGrants(item);
+  if (capabilityUsesZip(kind) && (!item || view === "upload")) return capabilityUpload(kind, item);
   return capabilityEditor(kind, item);
 }
 
 async function capabilityList(kind) {
   const {items} = await api(capabilityApi);
   heading("企业能力", "发布 Skill、MCP 和专家，员工获得授权后可在客户端使用。");
-  content.querySelector(".page-title").append(button("新建 " + capabilityKinds[kind],
+  content.querySelector(".page-title").append(button(capabilityUsesZip(kind) ? "上传 ZIP" : "新建 MCP",
     () => navigate(capabilityPath + kind + "/new"), {primary:true}));
   content.insertAdjacentHTML("beforeend", `<div class="space-tabs" aria-label="企业能力类型">
     ${Object.entries(capabilityKinds).map(([key, label]) =>
@@ -26,7 +29,8 @@ async function capabilityList(kind) {
     </div>`);
   const rows = items.filter(item => item.kind === kind);
   if (!rows.length) {
-    content.insertAdjacentHTML("beforeend", empty("尚未创建 " + capabilityKinds[kind] + "。"));
+    content.insertAdjacentHTML("beforeend", empty(capabilityUsesZip(kind)
+      ? `暂无 ${capabilityKinds[kind]}。上传 ZIP 后会生成草稿。` : "暂无 MCP，请先添加服务配置。"));
     return;
   }
   content.insertAdjacentHTML("beforeend", `<div class="table-wrap"><table><thead><tr>
@@ -37,6 +41,68 @@ async function capabilityList(kind) {
     <td>${capabilityGrantLabel(item)}</td>
     <td><a data-route href="${base + capabilityPath + kind + "/" + esc(item.id)}/grants">分配员工</a></td></tr>`).join("")}
     </tbody></table></div>`);
+}
+
+function capabilityUpload(kind, item) {
+  const page = capabilityPath + kind;
+  const label = capabilityKinds[kind];
+  const structure = kind === "skill"
+    ? "ZIP 应包含 SKILL.md，可放在根目录或单一外层目录。参考资料、脚本和其他文本资源可分别放在 references/、scripts/、assets/。"
+    : "ZIP 根目录需有 expert.json 和 prompt.md。请在 skills/ 下放入 1–8 个 Skill，每个使用单独目录。";
+  heading(item ? `上传新版 ${label} ZIP` : `上传 ${label} ZIP`,
+    item ? `${item.name} · 上传只更新草稿，已发布版本仍可使用。` : "文件上传后保存为草稿，检查后即可发布。",
+    item ? `${page}/${item.id}` : page);
+  if (item) content.querySelector(".page-title a").textContent = "返回能力配置";
+  content.insertAdjacentHTML("beforeend", `<form class="form" id="capability-zip-form">
+    <label>${label} ZIP<input type="file" name="archive" accept=".zip,application/zip" required></label>
+    <p class="help">${structure} 支持 UTF-8 文本，ZIP 最大 4 MiB。</p>
+    ${kind === "expert" ? '<p class="help">随包导入的 Skill 会单独保存为草稿。请先发布并授权这些 Skill，再发布和分配专家。</p>' : ""}
+    <div class="actions-row"><button class="primary" type="submit">上传并保存草稿</button>
+    <a href="${base}/api/v1${capabilityApi}/zip-template/${kind}" download>下载 ZIP 模板</a></div>
+    <p id="capability-zip-status" role="status"></p></form>`);
+  const form = document.getElementById("capability-zip-form");
+  const fileInput = form.elements.archive, submit = form.querySelector('button[type="submit"]');
+  const status = document.getElementById("capability-zip-status");
+  watchForm(form);
+  fileInput.addEventListener("change", () => { status.textContent = ""; });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const zip = fileInput.files[0];
+    if (!zip) return;
+    if (zip.size > capabilityZipLimit) {
+      status.textContent = "ZIP 超过 4 MiB，请减小压缩包后重试。";
+      status.className = "danger";
+      return;
+    }
+    const generation = routeGeneration;
+    const endpoint = `${base}/api/v1${capabilityApi}/zip/${kind}${item ? `/${item.id}?revision=${item.revision}` : ""}`;
+    submit.disabled = fileInput.disabled = true;
+    status.textContent = "正在上传并检查 ZIP…";
+    status.className = "muted";
+    try {
+      let response;
+      try {
+        response = await fetch(endpoint, {method:item ? "PUT" : "POST", credentials:"same-origin", body:zip,
+          headers:{"Content-Type":"application/zip", "X-CSRF-Token":csrf()}});
+      } catch {
+        throw new Error("上传连接中断。文件选择已保留，请先查看列表确认草稿是否已保存。");
+      }
+      const result = await response.json().catch(() => ({}));
+      if (generation !== routeGeneration) return;
+      if (!response.ok) throw new Error(result.error?.message || `上传失败（${response.status}），文件选择已保留。`);
+      dirty = false;
+      history.replaceState({}, "", `${base}${page}/${result.id}`);
+      await render();
+      message(result.bundled_skills?.length ? `专家草稿已保存，已关联 ${result.bundled_skills.length} 个随包 Skill。` : "ZIP 已导入草稿。", "success");
+    } catch(error) {
+      if (form.isConnected) {
+        status.textContent = error.message;
+        status.className = "danger";
+      } else if (error.name !== "AbortError" && generation + 1 === routeGeneration) message(error.message, "error");
+    } finally {
+      if (form.isConnected) submit.disabled = fileInput.disabled = false;
+    }
+  };
 }
 
 function capabilityGrantLabel(item) {
@@ -70,7 +136,7 @@ function capabilityFields(kind, item, catalog, models) {
     if (!options.length) return "";
     return `<fieldset class="capability-dependencies"><legend>关联 ${capabilityKinds[dependencyKind]}</legend><div class="check-list">${options.map(candidate =>
       `<label><input type="checkbox" name="${dependencyKind}_ids" value="${esc(candidate.id)}" ${selected.has(candidate.id) ? "checked" : ""}>
-      ${esc(candidate.published_name || candidate.name)}${candidate.enabled ? "" : "（已停用）"}</label>`).join("")}</div></fieldset>`;
+      ${esc(candidate.published_name || candidate.name)}${candidate.enabled ? "" : candidate.version ? "（已停用）" : "（待发布）"}</label>`).join("")}</div></fieldset>`;
   };
   return instructions + `<label>默认模型<select name="default_model_id"><option value="">由员工选择</option>
     ${candidates.map(model => `<option value="${esc(model.id)}" ${model.id === selectedModel ? "selected" : ""}>${esc(model.name)}${model.enabled ? "" : "（已停用）"}</option>`).join("")}
@@ -100,6 +166,19 @@ async function capabilityEditor(kind, item) {
   heading(item?.name || "新建 " + capabilityKinds[kind], item?.version
     ? `${item.enabled ? "已发布" : "已停用"} v${item.version}${item.draft_pending ? " · 有未发布草稿" : ""} · ${capabilityGrantLabel(item)}`
     : "保存草稿后检查配置，再发布给员工。", page);
+  if (item && capabilityUsesZip(kind)) {
+    const upload = document.createElement("a");
+    upload.href = `${base}${page}/${item.id}/upload`;
+    upload.dataset.route = "";
+    upload.textContent = "上传新版 ZIP";
+    content.querySelector(".page-title").append(upload);
+  }
+  const pending = kind === "expert" && item ? catalog.items.filter(candidate => candidate.kind === "skill" && !candidate.enabled
+    && (item.config.skill_ids || []).includes(candidate.id)) : [];
+  if (pending.length) {
+    content.insertAdjacentHTML("beforeend", `<div class="note">请先发布或恢复关联的 Skill，才能检查并发布此专家。
+      <ul>${pending.map(skill => `<li><a data-route href="${base}${capabilityPath}skill/${esc(skill.id)}">${esc(skill.name)}</a></li>`).join("")}</ul></div>`);
+  }
   content.insertAdjacentHTML("beforeend", `<form class="form" id="capability-form">
     <label>名称<input required name="name" maxlength="128" value="${esc(item?.name)}"></label>
     <label>说明<input name="description" maxlength="2000" value="${esc(item?.description)}"></label>

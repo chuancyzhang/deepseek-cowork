@@ -43,7 +43,7 @@ async function spaceMutate(id, actionName, payload, key) {
     }
     throw new Error("原提交结果尚未确认；请恢复原内容后重试，或先刷新核对结果。草稿仍保留。");
   }
-  pending ||= {id:crypto.randomUUID(),payload};
+  pending ||= {id:operationId(),payload};
   spaceDraft(key,{...previous,pending});
   try {
     const status = await api("/team-space-operations/"+pending.id);
@@ -69,7 +69,20 @@ function spaceDesktop(id, plan="") {
   const box=document.createElement("div");box.className="note space-handoff";
   box.innerHTML='<p>在 Cowork 桌面的“团队空间 → 打开空间链接”继续。打开链接不会自动启动任务。</p>';
   const field=document.createElement("input");field.readOnly=true;field.value=link;field.setAttribute("aria-label","空间链接");
-  box.append(field,button("复制空间链接",async()=>{await navigator.clipboard.writeText(link);message("链接已复制，请在桌面端打开。","success");}));
+  box.append(field,button("复制空间链接",async()=>{
+    if(navigator.clipboard){
+      try {
+        await navigator.clipboard.writeText(link);
+        message("链接已复制，请在桌面端打开。","success");
+        return;
+      } catch {
+        // The link can still be copied from the field when the browser denies clipboard access.
+      }
+    }
+    field.focus();
+    field.select();
+    message("已选中空间链接，请按 Ctrl+C 复制。");
+  }));
   content.append(box);
 }
 function spaceHeader(space, tab="activity") {
@@ -199,5 +212,5 @@ async function spaceOwnerRecovery(member) {
   const data=await api("/admin/members/"+member.id+"/owned-spaces");
   heading("恢复空间所有权",`${member.name} 已停用。这里只提供必要标识和有效成员，不开放空间正文。`,"/app/members/"+member.id);
   if(!data.items.length){content.insertAdjacentHTML("beforeend",empty("该成员没有需要处理的空间。"));return;}
-  for(const space of data.items){const form=document.createElement("form");form.className="form section";form.innerHTML=`<h2>${esc(space.name)}</h2><label>新所有者<select name="member_id" required><option value="">选择已有有效成员</option>${space.candidates.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join("")}</select></label><label>恢复原因<textarea name="reason" required maxlength="2000"></textarea></label><button ${space.candidates.length?"":"disabled"}>恢复所有权</button>${space.candidates.length?"":"<p>没有其他有效成员，保留空间，等待原账号恢复。</p>"}`;content.append(form);watchForm(form);form.onsubmit=e=>{e.preventDefault();action(async()=>{const payload={...formData(form),revision:space.revision,operation_id:form.dataset.operation||crypto.randomUUID()};form.dataset.operation=payload.operation_id;await api("/admin/team-spaces/"+space.id+"/recover-owner",{method:"POST",body:payload});dirty=false;await spaceOwnerRecovery(member);message("所有权已恢复，未开放空间正文。","success");});};}
+  for(const space of data.items){const form=document.createElement("form");form.className="form section";form.innerHTML=`<h2>${esc(space.name)}</h2><label>新所有者<select name="member_id" required><option value="">选择已有有效成员</option>${space.candidates.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join("")}</select></label><label>恢复原因<textarea name="reason" required maxlength="2000"></textarea></label><button ${space.candidates.length?"":"disabled"}>恢复所有权</button>${space.candidates.length?"":"<p>没有其他有效成员，保留空间，等待原账号恢复。</p>"}`;content.append(form);watchForm(form);form.onsubmit=e=>{e.preventDefault();action(async()=>{const payload={...formData(form),revision:space.revision,operation_id:form.dataset.operation||operationId()};form.dataset.operation=payload.operation_id;await api("/admin/team-spaces/"+space.id+"/recover-owner",{method:"POST",body:payload});dirty=false;await spaceOwnerRecovery(member);message("所有权已恢复，未开放空间正文。","success");});};}
 }

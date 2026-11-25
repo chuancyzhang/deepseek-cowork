@@ -43,12 +43,23 @@ class Settings:
     cleanup_seconds: int = 60
     model_read_timeout: int = 660
     allow_model_http: bool = False
+    allow_platform_http: bool = False
     max_space_file_bytes: int = 128 * 1024 * 1024
     max_space_bytes: int = 5 * 1024 * 1024 * 1024
 
     def __post_init__(self):
         object.__setattr__(self, "data_dir", Path(self.data_dir).resolve())
-        object.__setattr__(self, "public_url", service_url(self.public_url, allow_local_http=self.development))
+        public_url = self.public_url.strip().rstrip("/")
+        parts = urlsplit(public_url)
+        loopback_development = self.development and parts.hostname in {"localhost", "127.0.0.1", "::1"}
+        if parts.scheme == "http" and not (self.allow_platform_http or loopback_development):
+            raise ValueError("平台地址默认要求 HTTPS。内网部署使用 HTTP 时请设置 COWORK_ALLOW_PLATFORM_HTTP=1。")
+        public_url = service_url(public_url, allow_http=self.allow_platform_http or loopback_development)
+        if parts.scheme == "http" and parts.hostname in {"0.0.0.0", "::"}:
+            raise ValueError("请将平台地址设为员工访问的服务器 IP 或域名。")
+        if parts.port == 0 or parts.netloc.endswith(":"):
+            raise ValueError("平台地址的端口必须在 1–65535 之间。")
+        object.__setattr__(self, "public_url", public_url)
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", self.platform_id):
             raise ValueError("platform_id 格式无效。")
         if not 1 <= len(self.platform_name.strip()) <= 80 or any(ord(c) < 32 for c in self.platform_name):
@@ -72,7 +83,12 @@ class Settings:
     @property
     def origin(self):
         p = urlsplit(self.public_url)
-        return f"{p.scheme}://{p.netloc}"
+        host = p.hostname
+        if ":" in host:
+            host = f"[{host}]"
+        default_port = 443 if p.scheme == "https" else 80
+        port = f":{p.port}" if p.port is not None and p.port != default_port else ""
+        return f"{p.scheme}://{host}{port}"
 
     @property
     def secure_cookie(self):
@@ -97,6 +113,7 @@ class Settings:
             max_model_concurrency=int(os.environ.get("COWORK_MAX_MODEL_CONCURRENCY", 64)),
             cleanup_seconds=int(os.environ.get("COWORK_CLEANUP_SECONDS", 60)),
             allow_model_http=os.environ.get("COWORK_ALLOW_MODEL_HTTP") == "1",
+            allow_platform_http=os.environ.get("COWORK_ALLOW_PLATFORM_HTTP") == "1",
             max_space_file_bytes=int(os.environ.get("COWORK_MAX_SPACE_FILE_BYTES", 128 * 1024 * 1024)),
             max_space_bytes=int(os.environ.get("COWORK_MAX_SPACE_BYTES", 5 * 1024 * 1024 * 1024)),
         )

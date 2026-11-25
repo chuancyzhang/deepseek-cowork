@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import contextmanager
+from functools import cached_property
 import hashlib
 import json
 import logging
@@ -11,7 +12,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -19,6 +20,12 @@ from core.enterprise_connection import read_connection, validate_connection, che
 
 log = logging.getLogger(__name__)
 MODEL_PREFIX = "enterprise:"
+_ANY_GENERATION = object()
+
+
+def _same_platform(left, right):
+    return (left["platform_id"] == right["platform_id"]
+            and left["platform_url"].rstrip("/") == right["platform_url"].rstrip("/"))
 
 
 class EnterpriseError(RuntimeError):
@@ -54,28 +61,56 @@ class EnterpriseStore:
             self.protector = WindowsDpapiProtector()
         return self.protector
 
-    def read(self, *, secret=False):
+    @cached_property
+    def package_connection(self):
+        try:
+            return read_connection(), ""
+        except (OSError, ValueError) as exc:
+            log.warning("enterprise.package_connection_error reason=%s", type(exc).__name__)
+            return None, str(exc) if isinstance(exc, ValueError) else "无法读取安装包的企业连接配置。"
+
+    def _saved(self):
         if not self.path.exists():
-            return {}
+            return {}, None
         with self.db() as db:
             row = db.execute("SELECT public, secret FROM connection WHERE id=1").fetchone()
-        if not row:
+        return (json.loads(row[0]), row[1]) if row else ({}, None)
+
+    def connection_status(self):
+        package, error = self.package_connection
+        if error:
+            return {"connection_source": "package", "connection_error": error}
+        saved, _ = self._saved()
+        if not package:
+            return saved
+        current = saved.get("connection")
+        if current and not _same_platform(current, package):
+            return {"connection": package, "connection_source": "package", "previous_connection": current}
+        return {**saved, "connection": package, "connection_source": "package"}
+
+    def read(self, *, secret=False):
+        package, error = self.package_connection
+        if error:
             return {}
-        value = json.loads(row[0])
-        if secret and row[1]:
+        value, encrypted = self._saved()
+        current = value.get("connection")
+        if package and current and not _same_platform(current, package):
+            return {}
+        if secret and encrypted:
             try:
-                value["access_token"] = self.crypt().unprotect(row[1]).decode("utf-8")
+                value["access_token"] = self.crypt().unprotect(encrypted).decode("utf-8")
             except Exception:
                 raise EnterpriseError("企业登录凭据无法读取，请重新登录。") from None
         return value
 
-    def write(self, value, token=None, *, expected_generation=None):
+    def write(self, value, token=None, *, expected_generation=_ANY_GENERATION):
         value = dict(value)
         value.pop("access_token", None)
         encrypted = self.crypt().protect(token.encode("utf-8")) if token else None
         with self.db() as db:
             row = db.execute("SELECT public, secret FROM connection WHERE id=1").fetchone()
-            if expected_generation is not None and (not row or json.loads(row[0]).get("generation") != expected_generation):
+            current_generation = json.loads(row[0]).get("generation") if row else None
+            if expected_generation is not _ANY_GENERATION and current_generation != expected_generation:
                 raise EnterpriseError("企业连接已改变，请重新操作。")
             db.execute("INSERT OR REPLACE INTO connection VALUES(1,?,?)",
                        (json.dumps(value, ensure_ascii=False), encrypted))
@@ -88,7 +123,14 @@ class EnterpriseStore:
                     db.execute("DELETE FROM chat_audit_pending WHERE (platform_id,member_id,generation) != (?,?,?)", identity)
 
     def connection(self):
-        return self.read().get("connection") or read_connection()
+        status = self.connection_status()
+        if status.get("connection_error"):
+            raise EnterpriseError(status["connection_error"])
+        if status.get("previous_connection"):
+            raise EnterpriseError("请先在企业账号设置中确认切换到安装包提供的企业。")
+        if not status.get("connection"):
+            raise EnterpriseError("请先连接企业平台。")
+        return status["connection"]
 
     def profiles(self):
         try:
@@ -138,7 +180,7 @@ class EnterpriseClient:
         try:
             with httpx.Client(transport=self.transport, timeout=20, follow_redirects=False,
                               trust_env=not loopback) as client:
-                response = client.request(method, connection["platform_url"] + path, json=payload,
+                response = client.request(method, connection["platform_url"].rstrip("/") + path, json=payload,
                                           headers={"Authorization": "Bearer " + token} if token else {})
             data = response.json()
         except (httpx.HTTPError, ValueError) as exc:
@@ -155,22 +197,45 @@ class EnterpriseClient:
             raise EnterpriseError("企业标识或接口版本不匹配，未连接此平台。")
         return self.request(connection, "GET", "/api/v1/auth/providers")["items"]
 
-    def bind(self, connection):
-        self.inspect(connection)
-        old = self.store.read()
+    def bind(self, connection=None, *, use_package=False, confirm_switch=False):
+        package, error = self.store.package_connection
+        if error:
+            raise EnterpriseError(error)
+        if use_package:
+            if not package:
+                raise EnterpriseError("未找到安装包提供的企业连接。")
+            connection = package
+        elif package:
+            raise EnterpriseError("此安装包已指定企业平台。")
+        connection = validate_connection(connection)
+        old, _ = self.store._saved()
         current = old.get("connection")
-        if current == connection:
-            return
-        if current and all(current[k] == connection[k] for k in ("platform_id", "platform_url")):
+        if current and _same_platform(current, connection):
+            if use_package or current == connection:
+                return False
             check_update_connection(current, connection)
+        elif current and use_package and not confirm_switch:
+            raise EnterpriseError("请先在企业账号设置中确认切换到安装包提供的企业。")
+        self.inspect(connection)
         self.store.write({"connection": connection, "generation": uuid.uuid4().hex,
-                          "client_id": old.get("client_id") or uuid.uuid4().hex})
+                          "client_id": old.get("client_id") or uuid.uuid4().hex},
+                         expected_generation=old.get("generation"))
+        return True
 
     def login(self, provider, cancel, open_browser, *, username="", password=""):
+        connection = self.store.connection()
+        if cancel.is_set():
+            raise EnterpriseError("企业登录已取消。")
         state = self.store.read()
-        connection = state["connection"]
+        verified = False
+        if not state:
+            verified = self.bind(use_package=True)
+            state = self.store.read()
+        if not state or not _same_platform(state["connection"], connection):
+            raise EnterpriseError("企业连接已改变，请重新操作。")
         generation = state["generation"]
-        self.inspect(connection)
+        if not verified:
+            self.inspect(connection)
         if cancel.is_set():
             raise EnterpriseError("企业登录已取消。")
         if provider and provider["mode"] == "ldap":
@@ -181,10 +246,17 @@ class EnterpriseClient:
             challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
             transaction = self.request(connection, "POST", "/api/v1/auth/transactions", payload={
                 "mode": "desktop", "provider_id": (provider or {}).get("id"), "code_challenge": challenge})
-            path = "/api/v1/auth/transactions/" + transaction["id"]
+            transaction_id = quote(transaction["id"], safe="")
+            path = "/api/v1/auth/transactions/" + transaction_id
             completed = False
             try:
-                open_browser(transaction["login_url"])
+                login_url = transaction.get("login_url", "")
+                browser_url = urlsplit(login_url)
+                if (browser_url.scheme not in {"http", "https"} or not browser_url.hostname
+                        or browser_url.username or browser_url.password or browser_url.query or browser_url.fragment
+                        or not browser_url.path.endswith("/auth/start/" + transaction_id)):
+                    raise EnterpriseError("企业平台返回的浏览器登录地址无效，请联系管理员检查登录配置。")
+                open_browser(login_url)
                 deadline = time.monotonic() + 600
                 while not cancel.wait(1.5) and time.monotonic() < deadline:
                     result = self.request(connection, "POST", path + "/status", payload={"verifier": verifier})
@@ -210,7 +282,7 @@ class EnterpriseClient:
         me = self.request(connection, "GET", "/api/v1/me", token=token)
         if me.get("platform_id") != connection["platform_id"]:
             raise EnterpriseError("企业身份校验失败。")
-        state.update(member=me["member"], models=me["models"], expires_at=result["expires_at"], generation=uuid.uuid4().hex,
+        state.update(connection=connection, member=me["member"], models=me["models"], expires_at=result["expires_at"], generation=uuid.uuid4().hex,
                      chat_audit_version=me.get("chat_audit_version", 0))
         try:
             self.store.write(state, token, expected_generation=generation)
@@ -223,6 +295,8 @@ class EnterpriseClient:
     def refresh(self):
         state = self.store.read(secret=True)
         token = state.get("access_token", "")
+        if not token:
+            raise EnterpriseError("请先登录企业账号。")
         me = self.request(state["connection"], "GET", "/api/v1/me", token=token)
         state.update(member=me["member"], models=me["models"], chat_audit_version=me.get("chat_audit_version", 0))
         self.store.write(state, token, expected_generation=state["generation"])
@@ -230,9 +304,12 @@ class EnterpriseClient:
 
     def logout(self):
         state = self.store.read(secret=True)
+        if not state.get("connection"):
+            raise EnterpriseError("当前没有可退出的企业账号。")
         token = state.get("access_token")
         # Invalidate local bindings immediately, even if the platform is unavailable.
-        self.store.write({"connection": state["connection"], "client_id": state["client_id"], "generation": uuid.uuid4().hex})
+        self.store.write({"connection": state["connection"], "client_id": state["client_id"], "generation": uuid.uuid4().hex},
+                         expected_generation=state["generation"])
         if token:
             try:
                 self.request(state["connection"], "POST", "/api/v1/auth/logout", token=token)

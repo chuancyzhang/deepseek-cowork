@@ -25,6 +25,6 @@ Append or replace the global summary with versioned storage.
 ## Current Runtime Notes
 - The always-on layer contains the soul prompt plus global/current-project summaries, captured for the current run; changes take effect next run.
 - The UI Memory Center owns generation review, summary editing, backups, and scoped `memories_update_state.json` tracking; use direct writes only when the user explicitly asks the model to remember something.
-- For autonomous verified lessons, use `update_experience` after reading these summaries. It updates only the experience section, without modifying Skills.
+- Use `update_experience` for autonomous verified lessons. Reuse the relevant entry already read in the same scope before requesting another read. The tool updates the experience section.
 - Do not store secrets, temporary debugging noise, or one-off implementation details.
 - Memory writes are not read-only and must not be run through `parallel_tools`.

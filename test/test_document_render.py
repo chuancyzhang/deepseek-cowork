@@ -1,6 +1,5 @@
 import hashlib
 import importlib.util
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -50,7 +49,7 @@ class DocumentRenderTests(unittest.TestCase):
         return documents.document_render(str(self.workspace), str(self.source), _context=self.context, **kwargs)
 
     def test_real_pdf_batch_is_versioned_bounded_and_viewable(self):
-        result = self.render()
+        result = self.render(pages="", source_version="old")
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["page_count"], 5)
         self.assertEqual(len(result["pages"]), 4)
@@ -70,14 +69,16 @@ class DocumentRenderTests(unittest.TestCase):
         other = self.render(pages="1")
         self.assertNotEqual(Path(other["pages"][0]["path"]).parts[2], Path(result["pages"][0]["path"]).parts[2])
 
-    def test_invalid_ranges_changed_source_and_missing_renderer_preserve_source(self):
+    def test_invalid_ranges_and_missing_renderer_preserve_source(self):
         for pages in ("0", "1-5", "3-2", "1;quit", "99"):
             with self.subTest(pages=pages):
                 self.assertFalse(self.render(pages=pages)["ok"])
-        self.assertEqual(self.render(source_version="old")["error"]["code"], "source_changed")
         source = self.workspace / "test.docx"
         source.write_bytes(b"original")
-        with patch.object(document_preview, "render_office_pdf", side_effect=document_preview.WorkbenchError("renderer_unavailable", "missing")):
+        with patch("core.office_renderers.select_renderer", return_value={"id": "office", "name": "Office"}), patch.object(
+            document_preview, "render_office_pdf",
+            side_effect=document_preview.WorkbenchError("renderer_unavailable", "missing"),
+        ):
             result = documents.document_render(str(self.workspace), str(source), _context=self.context)
         self.assertEqual(result["error"]["code"], "renderer_unavailable")
         self.assertEqual(source.read_bytes(), b"original")
@@ -103,7 +104,7 @@ class DocumentRenderTests(unittest.TestCase):
         self.assertTrue(any('未嵌入' in warning for warning in warnings))
         self.assertTrue(any('CoworkMissingFontFixture' in warning for warning in warnings))
 
-    def test_worker_cancellation_timeout_and_source_change_are_errors(self):
+    def test_worker_cancellation_timeout_and_captured_source(self):
         out = self.workspace / "out"
         out.mkdir()
         stop = threading.Event()
@@ -122,15 +123,27 @@ class DocumentRenderTests(unittest.TestCase):
             with self.assertRaises(document_preview.WorkbenchError) as caught:
                 document_preview.render_document_pages(self.source, out, timeout=-1)
             self.assertEqual(caught.exception.code, "renderer_timeout")
-        process.poll.return_value = 0
-        def changed(*args, **kwargs):
-            self.source.write_bytes(self.original + b"changed")
-            return json.dumps({"pages": [], "page_count": 5}).encode(), b""
-        process.communicate.side_effect = changed
-        with patch("core.process_utils.popen_external_program", return_value=process):
-            with self.assertRaises(document_preview.WorkbenchError) as caught:
-                document_preview.render_document_pages(self.source, out)
-            self.assertEqual(caught.exception.code, "source_changed")
+        from core.process_utils import popen_external_program
+
+        def start_after_edit(*args, **kwargs):
+            pdf = canvas.Canvas(str(self.source))
+            pdf.drawString(60, 720, "Revised")
+            pdf.save()
+            return popen_external_program(*args, **kwargs)
+
+        with patch("core.process_utils.popen_external_program", side_effect=start_after_edit), patch.object(
+            document_preview, "source_bytes", wraps=document_preview.source_bytes,
+        ) as read_source:
+            captured = self.render(pages="1")
+        self.assertTrue(captured["ok"], captured)
+        read_source.assert_called_once_with(self.source.resolve())
+        self.assertEqual(captured["page_count"], 5)
+        self.assertEqual(captured["source_version"], hashlib.sha256(self.original).hexdigest())
+
+        revised = self.render(pages="1", source_version=captured["source_version"])
+        self.assertTrue(revised["ok"], revised)
+        self.assertEqual(revised["page_count"], 1)
+        self.assertNotEqual(revised["source_version"], captured["source_version"])
 
     def test_stopped_run_does_not_start_worker_and_exact_handler_is_trusted(self):
         auth = ExecutionAuthorization("a", "run", False, str(self.workspace))

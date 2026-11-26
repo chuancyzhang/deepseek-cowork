@@ -17,8 +17,7 @@ from .filesystem_ops import (
     clear_read_state,
     decode_text_bytes,
     encode_text_bytes,
-    get_verified_read_state,
-    mark_file_written,
+    remember_text_encoding,
     resolve_path,
 )
 
@@ -66,7 +65,6 @@ class PreparedChange:
     data: bytes | None = None
     encoding: str = ""
     bom: bytes = b""
-    newline: str = "\n"
     move_path: str | None = None
     abs_move_path: str | None = None
     rel_move_path: str | None = None
@@ -484,7 +482,6 @@ def _prepare_patch(workspace_dir, operations, context, action):
                     rel_path=rel_path,
                     data=data,
                     encoding="utf-8",
-                    newline="\n",
                 )
             )
             continue
@@ -558,22 +555,12 @@ def _prepare_patch(workspace_dir, operations, context, action):
             claimed_paths.add(move_key)
 
         if operation.chunks:
-            read_state, error = get_verified_read_state(abs_path, rel_path, context, action)
-            if error:
-                err = error.get("error") or {}
-                raise PatchError(
-                    err.get("code") or "read_required",
-                    err.get("message") or "File must be fully read before modification.",
-                    line=operation.line,
-                    path=rel_path,
-                )
-            encoding = read_state.get("encoding") or "utf-8"
-            bom = bytes.fromhex(str(read_state.get("bom_hex") or ""))
-            newline = read_state.get("newline") or "\n"
+            read_state = _get_file_state(context)["reads"].get(_cache_key(abs_path), {})
+            selected_encoding = read_state.get("encoding") if read_state.get("sha256") == expected_sha256 else None
             try:
-                original, _encoding, _bom, _newline = decode_text_bytes(
+                original, encoding, bom, newline = decode_text_bytes(
                     raw,
-                    selected_encoding=encoding,
+                    selected_encoding=selected_encoding,
                 )
                 updated = _apply_chunks(original, operation.chunks, rel_path)
                 data = encode_text_bytes(updated, encoding, bom=bom, newline=newline)
@@ -593,7 +580,6 @@ def _prepare_patch(workspace_dir, operations, context, action):
         else:
             encoding = ""
             bom = b""
-            newline = "\n"
             data = raw
 
         prepared.append(
@@ -606,7 +592,6 @@ def _prepare_patch(workspace_dir, operations, context, action):
                 data=data,
                 encoding=encoding,
                 bom=bom,
-                newline=newline,
                 move_path=operation.move_path,
                 abs_move_path=abs_move_path,
                 rel_move_path=rel_move_path,
@@ -763,16 +748,9 @@ def apply_patch(workspace_dir, patch, *, context=None, confirm_delete=None, acti
                         )
                     _atomic_write_bytes(change.abs_path, change.data or b"", existed_before=False)
                     applied.append(_change_summary(change))
-                    failure_phase = "audit_state"
-                    mark_file_written(
-                        change.abs_path,
-                        context,
-                        data=change.data or b"",
-                        encoding="utf-8",
-                        newline="\n",
-                    )
+                    failure_phase = "encoding_state"
+                    clear_read_state(change.abs_path, context)
                 elif change.kind == "update":
-                    _assert_expected_file(change)
                     _atomic_write_bytes(
                         change.abs_path,
                         change.data or b"",
@@ -780,14 +758,13 @@ def apply_patch(workspace_dir, patch, *, context=None, confirm_delete=None, acti
                         expected_sha256=change.expected_sha256,
                     )
                     applied.append(_change_summary(change))
-                    failure_phase = "audit_state"
-                    mark_file_written(
+                    failure_phase = "encoding_state"
+                    remember_text_encoding(
                         change.abs_path,
                         context,
                         data=change.data or b"",
                         encoding=change.encoding,
                         bom=change.bom,
-                        newline=change.newline,
                     )
                 elif change.kind == "delete":
                     _assert_expected_file(change)
@@ -829,14 +806,13 @@ def apply_patch(workspace_dir, patch, *, context=None, confirm_delete=None, acti
                             raise
                         clear_read_state(change.abs_path, context)
                         applied.append(_change_summary(change))
-                        failure_phase = "audit_state"
-                        mark_file_written(
+                        failure_phase = "encoding_state"
+                        remember_text_encoding(
                             change.abs_move_path,
                             context,
                             data=change.data or b"",
                             encoding=change.encoding,
                             bom=change.bom,
-                            newline=change.newline,
                         )
                     else:
                         with capture_mutation(change.abs_path, change.abs_move_path):

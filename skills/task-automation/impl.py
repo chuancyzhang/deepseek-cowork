@@ -73,7 +73,7 @@ TASK_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {
     "schedule": SCHEDULE_SCHEMA,
 }}
 ID = {"type": "string", "description": "查询结果中的准确任务 ID，不使用名称代替。"}
-REVISION = {"type": "integer", "minimum": 1, "description": "最近查询返回的 revision；冲突后重新读取并合并。"}
+REVISION = {"type": "integer", "minimum": 1, "description": "复用本轮列表或详情返回的 revision。冲突后再查询并合并。"}
 
 
 def _tool(name, description, properties, required=(), read_only=False):

@@ -149,7 +149,7 @@ class TestSkillSystemV2(unittest.TestCase):
                 self.assertFalse(manager.is_skill_editable(name))
         for name, tools in {
             "visualize": {"run_visualization_python", "finalize_inline_visualization"},
-            "documents": {"document_read", "document_render"}, "view-image": {"view_image"},
+            "documents": {"document_read", "document_render", "document_copy"}, "view-image": {"view_image"},
             "workbench": {"browser_tabs", "browser_open", "browser_close", "terminal_read", "terminal_input", "terminal_resize", "terminal_interrupt", "browser_observe", "browser_navigate", "browser_action", "browser_read", "browser_wait", "browser_file"},
         }.items():
             self.assertEqual(set(manager.get_tools_for_skill(name)), tools)

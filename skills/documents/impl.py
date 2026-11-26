@@ -8,7 +8,7 @@ import tempfile
 import threading
 from contextlib import closing, contextmanager
 
-from core.filesystem_ops import _build_error, _build_ok, record_full_read_state, resolve_path
+from core.filesystem_ops import _build_error, _build_ok, resolve_path
 
 
 SUPPORTED_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".xls", ".pdf"}
@@ -285,8 +285,6 @@ def document_read(workspace_dir, path, sheet_name=None, pages=None, max_chars=12
                 result.update(truncated=False, has_more=False, next_cursor=None)
             if _fingerprint(abs_path) != identity:
                 raise DocumentChangedError("读取期间文件发生变化，请重新读取。")
-            if not cursor and not any(selection) and not result["has_more"]:
-                record_full_read_state(abs_path, _context)
             LOGGER.info("document_read stage=completed %s format=%s chars=%s has_more=%s", trace, ext,
                         len(json.dumps(result, ensure_ascii=False)), result["has_more"])
             return result
@@ -356,6 +354,7 @@ def document_copy(workspace_dir, path, _context=None):
 def document_render(workspace_dir, path, pages=None, source_version=None, renderer='auto', review=False,
                     constraints='', review_kind='details', excel_options=None, _context=None):
     """Create bounded page images for view_image without changing the document."""
+    # Older calls may still supply source_version. The rendered snapshot supplies the version.
     from core.document_preview import render_document_pages, session_preview_root
     context = _context or {}
     session = str(context.get("session_id") or context.get("conversation_id") or "")
@@ -392,7 +391,7 @@ def document_render(workspace_dir, path, pages=None, source_version=None, render
             return _build_error("document_render", "cancelled", "已停止页面渲染，源文件未修改。")
         os.makedirs(destination, exist_ok=True)
         output = tempfile.mkdtemp(prefix="pages-", dir=destination)
-        result = render_document_pages(source, output, pages=pages, source_version=source_version, cancel=cancelled,
+        result = render_document_pages(source, output, pages=pages, cancel=cancelled,
             renderer=renderer, pdf_root=session_preview_root(session) / 'pdf',timeout=timeout,kind=review_kind,excel_options=excel_options)
         check = None
         if review:
@@ -440,11 +439,10 @@ TOOL_EXPORTS = [{
     "read_only": True, "search_hint": "read docx pptx xlsx xls pdf office document structured batch range",
 }, {
     "name": "document_render", "handler": document_render,
-    "description": "Render Office/PDF pages without editing the source. review=true sends at most 4 images to a separate visual request and returns verified page coverage and findings, without images in chat history. Local Office/WPS or LibreOffice is required for Office. Keep source_version, renderer and exact layout constraints on later batches. Review budgets span all files and versions in the run; stop on a budget limit and deliver the latest draft with remaining issues.",
+    "description": "Render Office/PDF pages from the current file snapshot. Omit pages to select automatically. Use review=true when the task needs visual checking. It sends at most 4 images to a separate request and returns findings for the submitted pages. Local Office/WPS or LibreOffice is required for Office. Keep the renderer and exact layout constraints on later batches for the same task.",
     "parameters": {"type": "object", "properties": {
         "path": {"type": "string", "description": "Document path; relative to current workspace or an authorized absolute path."},
         "pages": {"type": "string", "description": "One-based pages/ranges, e.g. '2-4' or '1,8,16,24'; at most 4 details or 24 overview pages. Overview default samples across the entire document."},
-        "source_version": {"type": "string", "description": "Source hash returned by an earlier batch; rejects changed documents."},
         'renderer': {'type': 'string', 'enum': ['auto', 'office', 'wps', 'libreoffice'], 'description': 'Choose once per task. A failed selected renderer is never silently replaced.'},
         'review': {'type': 'boolean', 'description': 'Use true for independent visual review; false only renders images.'},
         'constraints': {'type': 'string', 'description': 'Short exact layout requirements, including fonts, sizes, colors, template and exceptions. Repeat unchanged across batches.'},

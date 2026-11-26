@@ -21,7 +21,7 @@ Use this when you need to calculate data, process text, or perform tasks where n
 ## Usage Guidelines
 - **Execution**: Code runs in the user's workspace using the application's runtime. This runtime is not an operating-system sandbox.
 - **Authorization**: With God Mode off, each code execution or installation requests one explicit execution-layer approval. Call the tool directly; do not request a separate generic confirmation. An approval covers that entire execution under the current OS user, not a technically enforced list of writable files. A rejection, timeout or cancellation means the action was not executed; do not bypass it or report success.
-- **Dependencies**: Only the standard library and packages verified in the active sandbox or Skill dependency environment may be assumed available. Validate the actual import or dependency result for the task.
+- **Dependencies**: Reuse declared dependencies and the active runtime. Check imports in the actual task script and use its result to identify a missing package.
 - **Availability**: This is a core built-in Skill. Its tools appear directly in the execution-mode tool list without a prior `tool_search`.
 - **Tool Choice**: Prefer `run_python_code` for data processing, calculations, structured text transforms, and lightweight file analysis; use `bash` only when the real shell or an existing CLI is needed.
 - **Parallelism**: Python execution and package installation are not read-only batch operations and must not be called through `parallel_tools`.

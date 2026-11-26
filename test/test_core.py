@@ -1338,6 +1338,9 @@ class _DaemonConfigStub:
 
 
 class _PromptSkillManagerStub:
+    def builtin_skill_catalog_prompt(self, *args, **kwargs):
+        return ""
+
     def get_tool_definitions(self, *args, **kwargs):
         return []
     def get_system_prompts(self, *args, **kwargs):
@@ -2512,6 +2515,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
                 {"type": "function", "function": {"name": "apply_patch"}},
                 {"type": "function", "function": {"name": "run_python_code"}},
                 {"type": "function", "function": {"name": "run_node_code"}},
+                {"type": "function", "function": {"name": "view_image"}},
             ]
             worker.parent_agent_id = ""
             worker.skill_manager = _PromptSkillManagerStub()
@@ -2536,9 +2540,8 @@ class TestAgentSystemPrompt(unittest.TestCase):
             self.assertIn("apply_patch", prompt)
             self.assertIn("文本内容", prompt)
             self.assertIn("唯一工具", prompt)
-            self.assertIn("offset=1", prompt)
-            self.assertIn("SHA-256", prompt)
-            self.assertIn("禁止用 'grep' 的匹配结果代替完整读取", prompt)
+            self.assertIn("读取相关段落", prompt)
+            self.assertIn("在提交时检测实际冲突", prompt)
             self.assertIn("*** Begin Patch", prompt)
             self.assertIn("*** End of File", prompt)
             self.assertIn("重复片段必须补足上下文", prompt)
@@ -2547,10 +2550,10 @@ class TestAgentSystemPrompt(unittest.TestCase):
             self.assertNotIn("text_file_" + "update", prompt)
             self.assertIn("documents", prompt)
             self.assertIn("document_read", prompt)
-            self.assertIn("使用现有 Python 库生成文件", prompt)
+            self.assertIn("用现有 Python 库编辑", prompt)
             self.assertIn("document_render", prompt)
             self.assertIn("view_image", prompt)
-            self.assertIn("文件生成、结构检查和视觉检查是不同结果", prompt)
+            self.assertIn("任务需要版式检查时", prompt)
             self.assertIn("run_python_code", prompt)
             self.assertIn("当前用户环境已检测到 Node.js（node.exe）", prompt)
             self.assertIn("JavaScript、JSON 和前端脚本可优先使用 'run_node_code'", prompt)

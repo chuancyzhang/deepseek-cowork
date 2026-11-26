@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .env_utils import get_app_data_dir
+from .file_write_locks import file_write_lock
 from .theme_presets import BUILTIN_THEMES, builtin_theme
 from .theme_package import (
     COMPONENT_CATALOG,
@@ -1163,7 +1164,8 @@ class ThemeRepository:
                     archive.writestr(path, data)
             with open(temp_path, "r+b") as stream:
                 os.fsync(stream.fileno())
-            os.replace(temp_path, self.preview_path)
+            with file_write_lock(self.preview_path):
+                os.replace(temp_path, self.preview_path)
         except Exception:
             try:
                 os.unlink(temp_path)
@@ -1365,25 +1367,30 @@ class ThemeRepository:
             return self._read_preview_package(default_tokens)
         return self.load_preview(), {}
 
-    def get_preview_assets(self, default_tokens: dict[str, Any]) -> dict[str, bytes]:
+    def load_preview_identity(self):
+        """Read the revision for choosing or discarding a preview without decoding assets."""
         if not os.path.exists(self.preview_path):
-            return {}
-        _preview, assets = self._read_preview_package(default_tokens)
-        return assets
+            return self.load_preview()
+        with zipfile.ZipFile(self.preview_path, "r") as archive:
+            metadata_file = archive.getinfo("preview.json")
+            if metadata_file.file_size > THEME_MAX_MANIFEST_BYTES:
+                raise ValueError("主题预览元数据过大。")
+            return json.loads(archive.read(metadata_file).decode("utf-8"))
 
     def clear_preview(self, preview_id: str = "", *, preview_revision: int | None = None) -> bool:
-        paths = [path for path in (self.preview_path, self.legacy_preview_path) if os.path.exists(path)]
-        if not paths:
-            return False
-        if preview_id or preview_revision is not None:
-            current = self.load_preview()
-            if current and preview_id and current.get("preview_id") != preview_id:
-                raise ValueError("预览 ID 与当前主题预览不匹配。")
-            if current and preview_revision is not None and int(current.get("revision") or 0) != int(preview_revision):
-                raise ValueError("主题候选已更新，请查看最新预览后再弃用。")
-        for path in paths:
-            os.unlink(path)
-        return True
+        with file_write_lock(self.preview_path):
+            paths = [path for path in (self.preview_path, self.legacy_preview_path) if os.path.exists(path)]
+            if not paths:
+                return False
+            if preview_id or preview_revision is not None:
+                current = self.load_preview_identity()
+                if current and preview_id and current.get("preview_id") != preview_id:
+                    raise ValueError("预览 ID 与当前主题预览不匹配。")
+                if current and preview_revision is not None and int(current.get("revision") or 0) != int(preview_revision):
+                    raise ValueError("主题候选已更新，请查看最新预览后再弃用。")
+            for path in paths:
+                os.unlink(path)
+            return True
 
     def commit_preview(
         self,
@@ -1395,27 +1402,28 @@ class ThemeRepository:
         activate: bool,
         default_tokens: dict[str, Any],
     ) -> dict[str, Any]:
-        preview = self.load_preview()
-        if not preview or preview.get("preview_id") != preview_id:
-            raise ValueError("主题预览不存在。")
-        if preview_revision is not None and int(preview.get("revision") or 0) != int(preview_revision):
-            raise RuntimeError("主题预览已更新，需要重新确认后才能保存。")
-        result = self.upsert_theme(
-            name=name or preview.get("name") or "自定义主题",
-            overrides=preview.get("overrides") or {},
-            default_tokens=default_tokens,
-            theme_id=theme_id,
-            assets=preview.get("assets") or {},
-            workspace_scene=preview.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE,
-            surfaces=preview.get("surfaces") or {},
-            components=preview.get("components") or {},
-            content=preview.get("content") or {},
-            asset_bytes=self.get_preview_assets(default_tokens),
-        )
-        if activate:
-            result["revision"] = self.activate_theme(result["theme"]["id"]).revision
-        self.clear_preview(preview_id)
-        return result
+        with file_write_lock(self.preview_path):
+            preview, asset_bytes = self.load_preview_bundle(default_tokens)
+            if not preview or preview.get("preview_id") != preview_id:
+                raise ValueError("主题预览不存在。")
+            if preview_revision is not None and int(preview.get("revision") or 0) != int(preview_revision):
+                raise RuntimeError("主题预览已更新，需要重新确认后才能保存。")
+            result = self.upsert_theme(
+                name=name or preview.get("name") or "自定义主题",
+                overrides=preview.get("overrides") or {},
+                default_tokens=default_tokens,
+                theme_id=theme_id,
+                assets=preview.get("assets") or {},
+                workspace_scene=preview.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE,
+                surfaces=preview.get("surfaces") or {},
+                components=preview.get("components") or {},
+                content=preview.get("content") or {},
+                asset_bytes=asset_bytes,
+            )
+            if activate:
+                result["revision"] = self.activate_theme(result["theme"]["id"]).revision
+            self.clear_preview()
+            return result
 
     def export_theme(self, theme_id: str, default_tokens: dict[str, Any], target_path: str = "") -> Any:
         theme = self.get_theme(theme_id)

@@ -140,8 +140,8 @@ TOOL_EXPORTS = [
         "name": "text_file_read",
         "handler": text_file_read,
         "description": (
-            "Strictly read up to 10 MiB of a plain-text file. A full read from offset 1 with no limit "
-            "establishes the SHA-256 write audit required by apply_patch. Refuses DOCX, PPTX, XLSX, XLS, and PDF."
+            "Strictly read up to 10 MiB of a plain-text file. Use offset and limit to read the lines relevant to the task. "
+            "Refuses DOCX, PPTX, XLSX, XLS, and PDF."
         ),
         "parameters": {
             "type": "object",
@@ -164,7 +164,7 @@ TOOL_EXPORTS = [
         "handler": apply_patch,
         "description": (
             "Create, update, move, or delete plain-text files with an exact structured patch. "
-            "Existing files with content changes must be fully read with text_file_read first. "
+            "Read the relevant lines and supply enough exact context to identify each change in the current file. "
             "The patch may contain at most 100 files and 12 MiB of UTF-8 input. Delete operations require user confirmation."
         ),
         "parameters": {

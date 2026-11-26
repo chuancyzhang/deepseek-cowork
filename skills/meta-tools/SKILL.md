@@ -33,7 +33,7 @@ Autonomously record a verified, reusable, non-sensitive lesson in project or glo
 
 - Record confirmed fixes, reproducible limitations with clear conditions, explicit lasting user corrections, or a validated method that reduces future trial and error.
 - A failure alone is not a lesson. Separate verified observations from an unknown root cause. Never store routine success, temporary outages, project progress, guesses, secrets, logs or whole conversations.
-- First call `read_memories`. Merge related lessons instead of appending near-duplicates; current user instructions and new evidence override old memory.
+- Reuse the exact text already read in this scope when merging a related lesson. Call `read_memories` when the relevant entry is missing or a conflict is reported. Current instructions and evidence take priority.
 - `scope`: required `project` or `global`. Project-specific rules belong to the current registered project; cross-project methods and stable environment constraints belong to global memory. The host chooses the actual project. No project is not a reason to write global memory.
 - `experience`: required concise single paragraph without line breaks; state applicability, action and necessary verification evidence.
 - `previous_experience`: optional exact old lesson text without its Markdown bullet, read from the same scope, to replace. Omit to add. A stale or ambiguous match fails; reread before merging.

@@ -18,7 +18,7 @@ allowed-tools: [run_visualization_python, finalize_inline_visualization]
 ## 内容与交互
 
 - 初始画面就有用，只提供对当前任务必要的控件，不机械加入搜索、重置、评分卡或装饰面板。
-- 数据分析先用 data-analysis 核验口径与结果，再传入绘图所需值。单位、时间范围、缺失和抽样如实呈现，不拿演示数据替代真实结果。
+- 图表直接复用已核对的数据结果。需要新分析时使用 data-analysis，按实际数据呈现单位、时间范围、缺失和抽样。
 - 每个控件真实更新图形和数值；筛选后的结论也要成立。空结果、零和缺失分别处理。
 - 图表、模拟或界面布局任务按需读取 [图表与交互指导](references/charts.md)，路径见 References。
 
@@ -26,7 +26,7 @@ allowed-tools: [run_visualization_python, finalize_inline_visualization]
 
 1. 通过 run_visualization_python 计算必要数据，并从环境变量 COWORK_VISUALIZATION_DIR 取得输出目录。
 2. 写入 ASCII 小写连字符命名的 .html 文件，只能是 HTML Fragment，不含 doctype、html、head、body。写真实换行和 HTML，安全序列化内联数据，不能留下字符串转义残片。
-3. 检查数据计算、DOM 引用、变量和主交互代码，再调用 finalize_inline_visualization。
+3. 调用 finalize_inline_visualization 发布片段。可以实际预览时走一次主交互，核对图形或数值是否按预期更新。
 4. 将返回 directive 原样单独放在最终回复的显示位置，不包装成代码块或链接。
 5. 修改后重新生成并发布，不覆盖已发布版本。发布只验证文件契约和资源限制，不等于完成交互或视觉检查。实际检查以当前可用预览为准，未运行不能声称运行通过。
 

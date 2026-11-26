@@ -409,12 +409,17 @@ def _build_skill_json(skill_name, description, tool_refs, source_path, reference
 
 
 def adapt_skill_directory(source_path, target_path, skill_name=None, source_format="auto", expected_sha256=""):
-    if not os.path.isdir(source_path):
-        raise ValueError("Source is not a directory")
-    skill_md_path = os.path.join(source_path, "SKILL.md")
+    from core.skill_package import stage_skill_package
+    stage_skill_package(source_path, target_path, expected_sha256=expected_sha256)
+    return adapt_staged_skill_directory(target_path, skill_name=skill_name, source_path=source_path)
+
+
+def adapt_staged_skill_directory(target_path, *, skill_name=None, source_path):
+    source_path = os.fspath(source_path)
+    skill_md_path = os.path.join(target_path, "SKILL.md")
     if not os.path.isfile(skill_md_path):
         raise ValueError("Source is not a standard Agent Skill package: SKILL.md is missing.")
-    source_meta = _metadata_from_skill_md(source_path)
+    source_meta = _metadata_from_skill_md(target_path)
     original_name = source_meta.get("name")
     description = source_meta.get("frontmatter_description")
     if not original_name:
@@ -424,14 +429,6 @@ def adapt_skill_directory(source_path, target_path, skill_name=None, source_form
 
     source_basename = os.path.basename(os.path.normpath(source_path))
     skill_name = _slugify_skill_name(skill_name or original_name or source_basename)
-    from core.skill_package import package_digest
-    digest = package_digest(source_path)
-    if expected_sha256 and digest != expected_sha256:
-        raise ValueError("Skill source changed since inspection.")
-    shutil.copytree(source_path, target_path, ignore=shutil.ignore_patterns(*EXCLUDED_DIRS))
-    if package_digest(target_path) != digest:
-        raise ValueError("Skill source changed while copying; target was not installed.")
-
     summary = _collect_folder_summary(target_path)
     tool_refs = _discover_impl_tool_refs(target_path)
     skill_json_path = os.path.join(target_path, "skill.json")

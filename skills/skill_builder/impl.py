@@ -9,9 +9,9 @@ import logging
 import inspect
 
 from core.env_utils import get_app_data_dir
-from core.skill_adapter import adapt_skill_directory, parse_skill_md_content
+from core.skill_adapter import adapt_staged_skill_directory, parse_skill_md_content
 from core.skill_install import prepare_source, check_cancel
-from core.skill_package import validate_package, write_resources, index_resources
+from core.skill_package import index_resources, package_path, stage_skill_package, validate_package, write_resources
 
 
 _SKILL_MUTATION_LOCK = threading.RLock()
@@ -502,7 +502,11 @@ def update_skill(
             skill_json["tool_refs"] = [t.get("name") for t in parsed_tools if isinstance(t, dict) and t.get("name")]
         if tools_list is not None:
             skill_json["tools"] = _normalize_tools_list(tools_list)
-        index_resources(skill_json, write_resources(staging_dir, _normalize_json_value(resources), workspace_dir=workspace_dir, allow_replace=True))
+        original_resources = {}
+        index_resources(skill_json, write_resources(
+            staging_dir, _normalize_json_value(resources), workspace_dir=workspace_dir,
+            original_resources=original_resources,
+        ))
         if skill_json:
             skill_json.setdefault("version", 2)
             skill_json.setdefault("name", skill_name)
@@ -518,6 +522,10 @@ def update_skill(
         changed_desc = ", ".join(changed) if changed else "no fields"
         _validate_staged_skill(staging_dir, skill_name, _context)
         check_cancel(_context)
+        for path, original in original_resources.items():
+            current = package_path(target_dir, path)
+            if (current.read_bytes() if current.exists() else None) != original:
+                raise ValueError(f"Resource changed during update: {path}. Reopen the skill and try again.")
         backup_dir = _swap_staged_skill(staging_dir, target_dir)
         staging_dir = ""
         published = True
@@ -551,7 +559,7 @@ def install_agent_skill(source_path, skill_name=None, skill_paths=None, ref="", 
                         expected_sha256="", workspace_dir=None, _context=None):
     """Install a local package or explicit HTTPS source through the normal execution authorization."""
     context = _context or {}
-    source = str(source_path or "")
+    source = str(source_path or "").strip()
     if workspace_dir and not source.startswith("https://") and not os.path.isabs(source):
         source = os.path.join(workspace_dir, source)
     staging_dirs, published_targets, prior_enabled = [], [], {}
@@ -569,19 +577,24 @@ def install_agent_skill(source_path, skill_name=None, skill_paths=None, ref="", 
             with _SKILL_MUTATION_LOCK:
                 phase = "validation"
                 targets, names = [], set()
+                install_root = os.path.join(get_app_data_dir(), "ai_skills")
+                os.makedirs(install_root, exist_ok=True)
                 for source_dir, provenance in entries:
-                    name = skill_name or _read_agent_skill_name(str(source_dir))
+                    staging = tempfile.mkdtemp(prefix=".skill-install-", dir=install_root)
+                    os.rmdir(staging)
+                    staging_dirs.append(staging)
+                    inspected_digest = expected_sha256 if provenance.get("commit") or os.path.isdir(source) else ""
+                    stage_skill_package(source_dir, staging, expected_sha256=inspected_digest)
+                    if inspected_digest:
+                        provenance["content_sha256"] = inspected_digest
+                    name = skill_name or _read_agent_skill_name(staging)
                     target, error = _resolve_skill_dir(name, target_scope="ai_only")
                     if error:
                         raise ValueError(error)
                     if name.casefold() in names or os.path.exists(target):
                         raise ValueError(f"Skill already exists or is duplicated: {name}; use the update workflow.")
                     names.add(name.casefold())
-                    staging = tempfile.mkdtemp(prefix=f".{name}-staging-", dir=os.path.dirname(target))
-                    os.rmdir(staging)
-                    staging_dirs.append(staging)
-                    adapt_skill_directory(str(source_dir), staging, skill_name=name, source_format="agent_skill",
-                                          expected_sha256=provenance["content_sha256"])
+                    adapt_staged_skill_directory(staging, skill_name=name, source_path=source_dir)
                     metadata_path = os.path.join(staging, "skill.json")
                     with open(metadata_path, encoding="utf-8") as handle:
                         metadata = json.load(handle)
@@ -635,8 +648,8 @@ def _resource_schema():
         "path": {"type": "string", "description": "Relative path under references/, scripts/ or assets/."},
         "content": {"type": "string", "description": "Text for reference/script resources."},
         "source_path": {"type": "string", "description": "Asset only: existing file in the current workspace."},
-        "sha256": {"type": "string", "description": "Expected SHA-256 of a previously inspected asset."},
-        "previous_sha256": {"type": "string", "description": "Required to replace an existing resource during an explicit update."},
+        "sha256": {"type": "string", "description": "Optional expected digest supplied by the user for an asset."},
+        "previous_sha256": {"type": "string", "description": "Optional known digest of the existing resource when replacing it."},
         "description": {"type": "string"},
     }, "required": ["kind", "path"]}}
 
@@ -666,7 +679,7 @@ def _authoring_export(handler):
         properties["source_path"]["description"] = "Local skill directory/ZIP/Markdown file, direct HTTPS package, or HTTPS Git repository. Read installation pages first to identify the actual source."
         properties["skill_paths"]["description"] = "Skill subdirectories inside a repository; omit for a single package with root SKILL.md."
         properties["ref"]["description"] = "Optional Git branch, tag or commit. Omit for the repository default HEAD."
-        properties["expected_sha256"]["description"] = "Optional inspected package/directory digest; mismatch stops installation."
+        properties["expected_sha256"]["description"] = "Optional expected package or directory digest supplied by the user or a prior inspection."
     descriptions = {
         "create_new_skill": "Create a new skill with concise complete guidance and optional package resources. Existing names are not overwritten.",
         "update_skill": "Update an existing skill. Preserve unrelated fields; use instruction_edits for exact local edits and instructions_md only for intentional whole-body replacement.",

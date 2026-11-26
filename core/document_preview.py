@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 from contextlib import contextmanager
 import hashlib
+from io import BytesIO
 import json
 import logging
 import os
@@ -66,8 +67,8 @@ def source_bytes(path):
     return data
 
 
-def cache_pdf(path, root=None):
-    data = source_bytes(path)
+def cache_pdf(path, root=None, *, source_data=None):
+    data = source_bytes(path) if source_data is None else source_data
     if not data.startswith(b"%PDF-"):
         raise WorkbenchError("invalid_pdf", "文件不是有效的 PDF。")
     root = Path(root or cache_root())
@@ -83,7 +84,7 @@ def cache_pdf(path, root=None):
     return str(target)
 
 
-def preview_diagnostics(source, pdf):
+def preview_diagnostics(source, pdf, *, source_data=None):
     """Observable font/size facts, without promising visual equivalence."""
     from pypdf import PdfReader
     from xml.etree import ElementTree
@@ -113,7 +114,7 @@ def preview_diagnostics(source, pdf):
             from .system_fonts import installed_font_families
             installed={name.casefold() for name in installed_font_families()}
             requested=set()
-            with zipfile.ZipFile(source) as package:
+            with zipfile.ZipFile(source if source_data is None else BytesIO(source_data)) as package:
                 for name in package.namelist():
                     if name=='word/document.xml' or name=='xl/styles.xml' or (name.startswith('ppt/slides/slide') and name.endswith('.xml')):
                         if package.getinfo(name).file_size>10*1024*1024: continue
@@ -128,7 +129,10 @@ def preview_diagnostics(source, pdf):
             log.warning('office_preview.font_inventory_unavailable reason=%s',type(exc).__name__)
             warnings.append('本次未能核对本机字体，请检查关键页面。')
     size=Path(pdf).stat().st_size
-    if size>10*1024*1024 and size>20*max(1,source.stat().st_size): warnings.append('预览副本明显大于原文件，可能包含大量字体或位图。')
+    if size > 10 * 1024 * 1024:
+        source_size = source.stat().st_size if source_data is None else len(source_data)
+        if size > 20 * max(1, source_size):
+            warnings.append('预览副本明显大于原文件，可能包含大量字体或位图。')
     return warnings
 
 
@@ -200,7 +204,7 @@ except Exception as exc:
 '''
 
 
-def render_document_pages(path, output_dir, *, pages=None, source_version=None, cancel=None, timeout=120, renderer='auto', pdf_root=None, kind='details', excel_options=None):
+def render_document_pages(path, output_dir, *, pages=None, cancel=None, timeout=120, renderer='auto', pdf_root=None, kind='details', excel_options=None):
     """Render an immutable batch into a caller-owned directory; never edit source."""
     from .process_utils import popen_external_program, terminate_process_tree
     from .sandbox_runtime import get_runtime_executable
@@ -211,7 +215,7 @@ def render_document_pages(path, output_dir, *, pages=None, source_version=None, 
         raise WorkbenchError("cancelled", "已停止页面渲染，源文件未修改。")
     if kind not in {'details','overview'}: raise ValueError('无效的检查类型。')
     numbers = []
-    if pages is not None:
+    if pages is not None and str(pages).strip():
         for part in str(pages).split(','):
             match = re.fullmatch(r"([1-9][0-9]*)(?:-([1-9][0-9]*))?", part.strip())
             if not match: raise ValueError("pages 应为 '1'、'2-4' 或 '1,8,16,24'。")
@@ -223,19 +227,19 @@ def render_document_pages(path, output_dir, *, pages=None, source_version=None, 
     source = Path(path).resolve()
     if source.suffix.lower() not in {*OFFICE_FAMILIES, '.pdf'}:
         raise ValueError("页面渲染支持 Office 和 PDF。")
-    fingerprint = hashlib.sha256(source_bytes(source)).hexdigest()
-    if source_version is not None and source_version != fingerprint:
-        raise WorkbenchError("source_changed", "文件版本已变化，请重新渲染，不能沿用旧页面检查结果。")
     deadline = time.monotonic() + timeout
+    data = source_bytes(source)
     if source.suffix.lower() == ".pdf":
-        pdf = cache_pdf(source, root=pdf_root)
+        pdf = cache_pdf(source, root=pdf_root, source_data=data)
+        fingerprint = Path(pdf).stem
         renderer = "PDFium"
     else:
         from .office_renderers import select_renderer
         selected = select_renderer(OFFICE_FAMILIES[source.suffix.lower()], renderer)
-        pdf, converted_version = render_office_pdf(source, cancel=cancel, timeout=timeout, renderer=selected['id'], root=pdf_root, excel_options=excel_options)
-        if converted_version != fingerprint:
-            raise WorkbenchError("source_changed", "文件在转换前发生变化，请重新渲染。")
+        pdf, fingerprint = render_office_pdf(
+            source, cancel=cancel, timeout=timeout, renderer=selected['id'],
+            root=pdf_root, excel_options=excel_options, source_data=data,
+        )
         renderer = selected['name'] + ' + PDFium'
     if cancel.is_set():
         raise WorkbenchError("cancelled", "已停止页面渲染，源文件未修改。")
@@ -275,9 +279,10 @@ def render_document_pages(path, output_dir, *, pages=None, source_version=None, 
             raise WorkbenchError("renderer_failed", message)
         if cancel.is_set():
             raise WorkbenchError("cancelled", "已停止页面渲染，源文件未修改。")
-        if hashlib.sha256(source_bytes(source)).hexdigest() != fingerprint:
-            raise WorkbenchError("source_changed", "文件在渲染时发生变化，请重新渲染最新版本。")
-        result.update(source_version=fingerprint, renderer=renderer, render_configuration=Path(pdf).stem, pdf_path=str(pdf),warnings=preview_diagnostics(source,pdf))
+        result.update(
+            source_version=fingerprint, renderer=renderer, render_configuration=Path(pdf).stem,
+            pdf_path=str(pdf), warnings=preview_diagnostics(source, pdf, source_data=data),
+        )
         log.info("document_raster.finish version=%s pages=%s", fingerprint[:12], len(result["pages"]))
         return result
     except Exception as exc:
@@ -540,19 +545,22 @@ def _excel_options(source, value, data):
     return options
 
 
-def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False, renderer="auto", excel_options=None):
+def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False, renderer="auto", excel_options=None, source_data=None):
     from .office_renderers import select_renderer, state_path, state_root
     source = Path(path).resolve()
     family = OFFICE_FAMILIES.get(source.suffix.lower())
     if family is None:
         raise WorkbenchError("unsupported", "此格式没有 Office 版式预览。")
     selected = select_renderer(family, renderer)
-    data = source_bytes(source)
+    data = source_bytes(source) if source_data is None else source_data
     options = _excel_options(source, excel_options, data) if family == 'excel' else None
     if selected['id'] == 'libreoffice':
         if options and options['mode']=='region':
             raise WorkbenchError('region_unavailable', 'LibreOffice 暂不提供区域分页。可使用表格视图，或明确选择打印预览。')
-        return _render_libreoffice_pdf(path, cancel=cancel, timeout=timeout, root=root, force=force)
+        return _render_libreoffice_pdf(
+            source, data, cancel=cancel, timeout=timeout, root=root, force=force,
+            require_current=source_data is None,
+        )
     if selected['id'] == 'wps' or family == 'powerpoint':
         _check_shared_office_source(source, data)
     fingerprint = hashlib.sha256(data).hexdigest()
@@ -650,7 +658,7 @@ def render_office_pdf(path, *, cancel=None, timeout=120, root=None, force=False,
             raise WorkbenchError("invalid_pdf", "办公软件没有返回有效的 PDF，请重试或用系统应用打开。")
         if cancel.is_set():
             raise WorkbenchError("cancelled", "已取消版式预览，源文件未修改。")
-        if hashlib.sha256(source_bytes(source)).hexdigest() != fingerprint:
+        if source_data is None and hashlib.sha256(source_bytes(source)).hexdigest() != fingerprint:
             raise WorkbenchError("source_changed", "文件在转换时发生修改，请重新预览最新版本。")
         os.replace(partial, target)
         # This confirms this version/family actually exported and closed a copy;
@@ -754,16 +762,12 @@ def _libreoffice_staging(root):
         shutil.rmtree(platform_runtime.filesystem_path(staging))
 
 
-def _render_libreoffice_pdf(path, *, cancel=None, timeout=120, root=None, force=False):
+def _render_libreoffice_pdf(source, data, *, cancel=None, timeout=120, root=None, force=False, require_current):
     from .process_utils import popen_external_program, terminate_process_tree
-    source = Path(path).resolve()
-    if source.suffix.lower() not in OFFICE_FAMILIES:
-        raise WorkbenchError("unsupported", "此格式没有 Office 版式预览。")
     cancel = cancel or threading.Event()
     if cancel.is_set():
         raise WorkbenchError("cancelled", "已取消版式预览，源文件未修改。")
     executable = _libreoffice_executable()
-    data = source_bytes(source)
     fingerprint = hashlib.sha256(data).hexdigest()
     binary = os.stat(executable)
     renderer_key = hashlib.sha256(f"{executable}|{binary.st_size}|{binary.st_mtime_ns}".encode()).hexdigest()[:16]
@@ -807,7 +811,7 @@ def _render_libreoffice_pdf(path, *, cancel=None, timeout=120, root=None, force=
                 raise WorkbenchError("invalid_pdf", "LibreOffice 没有返回有效的 PDF，请重试或用系统应用打开。") from exc
             if cancel.is_set():
                 raise WorkbenchError("cancelled", "已取消版式预览，源文件未修改。")
-            if hashlib.sha256(source_bytes(source)).hexdigest() != fingerprint:
+            if require_current and hashlib.sha256(source_bytes(source)).hexdigest() != fingerprint:
                 raise WorkbenchError("source_changed", "文件在转换时发生修改，请重新预览最新版本。")
             os.replace(output, target)
         log.info("office_preview.finish renderer=libreoffice source_version=%s", fingerprint[:12])

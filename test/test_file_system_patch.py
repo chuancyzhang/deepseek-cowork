@@ -90,14 +90,15 @@ class TestFileSystemPatch(unittest.TestCase):
         self.assertEqual(paged["encoding"], "utf-8")
         self.assertTrue(paged["bom"])
         self.assertEqual(paged["newline"], "\r\n")
-        self.assertEqual(len(paged["sha256"]), 64)
+        self.assertEqual(paged["file_size"], len(codecs.BOM_UTF8 + b"one\r\ntwo\r\n"))
 
-        denied = apply_patch(
+        applied = apply_patch(
             self.workspace,
             "*** Begin Patch\n*** Update File: utf8.txt\n@@\n-one\n+ONE\n*** End Patch",
             context=self.context,
         )
-        self.assertEqual(denied["error"]["code"], "read_required")
+        self.assertTrue(applied["ok"], applied)
+        self.assertEqual(self._read_bytes("utf8.txt"), codecs.BOM_UTF8 + b"ONE\r\ntwo\r\n")
 
         legacy_bytes = "旧值\r\n".encode("gbk")
         self._write_bytes("legacy.txt", legacy_bytes)
@@ -105,13 +106,9 @@ class TestFileSystemPatch(unittest.TestCase):
         self.assertEqual(undecodable["error"]["code"], "encoding_required")
         legacy = self._read_full("legacy.txt", encoding="gbk")
         self.assertEqual(legacy["content"], "旧值\r\n")
-        audit = next(iter(self.context["file_state"]["reads"].values()))
-        self.assertEqual(audit["sha256"], legacy["sha256"])
-        self.assertEqual(audit["size"], len(legacy_bytes))
-        self.assertIsInstance(audit["mtime_ns"], int)
-        self.assertEqual(audit["encoding"], "gbk")
-        self.assertEqual(audit["bom_hex"], "")
-        self.assertEqual(audit["newline"], "\r\n")
+        self.assertEqual(legacy["encoding"], "gbk")
+        self.assertFalse(legacy["bom"])
+        self.assertEqual(legacy["newline"], "\r\n")
 
     def test_update_preserves_bom_encoding_and_newlines(self):
         self._write_bytes("utf8.txt", codecs.BOM_UTF8 + b"one\r\ntwo\r\n")
@@ -126,17 +123,19 @@ class TestFileSystemPatch(unittest.TestCase):
         self.assertTrue(raw.startswith(codecs.BOM_UTF8))
         self.assertEqual(raw, codecs.BOM_UTF8 + b"ONE\r\ntwo\r\n")
 
-        self._write_bytes("legacy.txt", "旧值\r\n".encode("gbk"))
-        self._read_full("legacy.txt", encoding="gbk")
+        self._write_bytes("legacy.txt", "旧值\r\n第二行\r\n".encode("gbk"))
+        read = read_text_file(self.workspace, "legacy.txt", limit=1, encoding="gbk", context=self.context)
+        self.assertEqual(read["content"], "旧值\r\n")
+        self.assertTrue(read["truncated"])
         result = apply_patch(
             self.workspace,
             "*** Begin Patch\n*** Update File: legacy.txt\n@@\n-旧值\n+新值\n*** End Patch",
             context=self.context,
         )
         self.assertTrue(result["ok"], result)
-        self.assertEqual(self._read_bytes("legacy.txt").decode("gbk"), "新值\r\n")
+        self.assertEqual(self._read_bytes("legacy.txt").decode("gbk"), "新值\r\n第二行\r\n")
 
-    def test_bounded_read_covering_entire_file_grants_write_audit(self):
+    def test_bounded_read_and_patch_keep_edits_outside_the_hunk(self):
         self._write_bytes("bounded.txt", b"one\ntwo\n")
 
         complete = read_text_file(
@@ -150,13 +149,14 @@ class TestFileSystemPatch(unittest.TestCase):
         self.assertTrue(complete["audit_complete"])
         self.assertFalse(complete["truncated"])
 
+        self._write_bytes("bounded.txt", b"one\nuser edit\n")
         result = apply_patch(
             self.workspace,
             "*** Begin Patch\n*** Update File: bounded.txt\n@@\n-one\n+ONE\n*** End Patch",
             context=self.context,
         )
         self.assertTrue(result["ok"], result)
-        self.assertEqual(self._read_text("bounded.txt"), "ONE\ntwo\n")
+        self.assertEqual(self._read_bytes("bounded.txt"), b"ONE\nuser edit\n")
 
     def test_add_multi_hunk_eof_and_continuous_updates(self):
         added = apply_patch(
@@ -193,7 +193,7 @@ class TestFileSystemPatch(unittest.TestCase):
         self.assertIn("beta\n", self._read_text("notes.txt"))
         self.assertTrue(self._read_text("notes.txt").endswith("after-padded-marker\n"))
 
-    def test_exact_unique_matching_and_stale_hash_not_mtime(self):
+    def test_exact_unique_matching_uses_current_text(self):
         self._write_bytes("repeat.txt", b"same\nsame\n")
         self._read_full("repeat.txt")
         ambiguous = apply_patch(
@@ -231,9 +231,10 @@ class TestFileSystemPatch(unittest.TestCase):
             "*** Begin Patch\n*** Update File: stale.txt\n@@\n-old\n+OLD\n*** End Patch",
             context=self.context,
         )
-        self.assertEqual(stale["error"]["code"], "stale_write")
+        self.assertEqual(stale["error"]["code"], "context_not_found")
+        self.assertEqual(self._read_bytes("stale.txt"), b"new\n")
 
-    def test_move_rules_and_content_move_audit(self):
+    def test_move_rules_and_exact_content_move(self):
         self._write_bytes("plain.txt", b"plain\n")
         self._write_bytes("occupied.txt", b"occupied\n")
         occupied = apply_patch(
@@ -252,13 +253,6 @@ class TestFileSystemPatch(unittest.TestCase):
         self.assertTrue(os.path.exists(self._path("moved.txt")))
 
         self._write_bytes("content.txt", b"old\n")
-        denied = apply_patch(
-            self.workspace,
-            "*** Begin Patch\n*** Update File: content.txt\n*** Move to: content-moved.txt\n@@\n-old\n+new\n*** End Patch",
-            context=self.context,
-        )
-        self.assertEqual(denied["error"]["code"], "read_required")
-        self._read_full("content.txt")
         moved = apply_patch(
             self.workspace,
             "*** Begin Patch\n*** Update File: content.txt\n*** Move to: content-moved.txt\n@@\n-old\n+new\n*** End Patch",
@@ -266,6 +260,23 @@ class TestFileSystemPatch(unittest.TestCase):
         )
         self.assertTrue(moved["ok"], moved)
         self.assertEqual(self._read_text("content-moved.txt"), "new\n")
+
+    def test_edit_after_preflight_keeps_the_user_file(self):
+        self._write_bytes("conflict.txt", b"old\n")
+        original_atomic = patch_module._atomic_write_bytes
+
+        def edit_then_commit(path, data, **kwargs):
+            self._write_bytes("conflict.txt", b"user edit\n")
+            return original_atomic(path, data, **kwargs)
+
+        with mock_patch.object(patch_module, "_atomic_write_bytes", side_effect=edit_then_commit):
+            result = apply_patch(
+                self.workspace,
+                "*** Begin Patch\n*** Update File: conflict.txt\n@@\n-old\n+new\n*** End Patch",
+                context=self.context,
+            )
+        self.assertEqual(result["error"]["code"], "partial_apply")
+        self.assertEqual(self._read_bytes("conflict.txt"), b"user edit\n")
 
     def test_delete_decline_and_preflight_failure_apply_nothing(self):
         self._write_bytes("delete.txt", b"delete\n")
@@ -443,20 +454,21 @@ class TestFileSystemPatch(unittest.TestCase):
         self.assertTrue(os.path.exists(self._path("first.txt")))
         self.assertFalse(os.path.exists(self._path("second.txt")))
 
+        self._write_bytes("encoding-written.txt", b"old\n")
         with mock_patch.object(
             patch_module,
-            "mark_file_written",
-            side_effect=OSError("simulated audit state failure"),
+            "remember_text_encoding",
+            side_effect=OSError("simulated encoding state failure"),
         ):
-            audit_failure = apply_patch(
+            encoding_failure = apply_patch(
                 self.workspace,
-                "*** Begin Patch\n*** Add File: audit-written.txt\n+value\n*** End Patch",
+                "*** Begin Patch\n*** Update File: encoding-written.txt\n@@\n-old\n+new\n*** End Patch",
                 context=self.context,
             )
-        self.assertEqual(audit_failure["error"]["code"], "partial_apply")
-        self.assertEqual(audit_failure["applied_changes"][0]["path"], "audit-written.txt")
-        self.assertEqual(audit_failure["failed_change"]["failure_phase"], "audit_state")
-        self.assertTrue(os.path.exists(self._path("audit-written.txt")))
+        self.assertEqual(encoding_failure["error"]["code"], "partial_apply")
+        self.assertEqual(encoding_failure["applied_changes"][0]["path"], "encoding-written.txt")
+        self.assertEqual(encoding_failure["failed_change"]["failure_phase"], "encoding_state")
+        self.assertEqual(self._read_bytes("encoding-written.txt"), b"new\n")
 
     def test_diagnostics_do_not_include_patch_or_content(self):
         signal = _Signal()

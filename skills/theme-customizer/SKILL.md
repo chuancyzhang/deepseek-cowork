@@ -10,17 +10,16 @@ Each saved user theme is one validated `.cowork-theme` package. Its manifest has
 
 ## Workflow
 
-In a creation session, generate and revise the session-owned candidate only. The user applies it in the creation panel. Do not call `save_ui_theme_preview`, `activate_ui_theme` or `delete_ui_theme` there, even after a chat confirmation. Steps 7–9 below apply only to ordinary conversations; candidate revisions and isolation still apply in both contexts.
+In a creation session, generate and revise the session-owned candidate only. The user applies it in the creation panel. Steps 6–8 apply only to ordinary conversations.
 
 1. Call `inspect_ui_theme` before proposing changes. Reuse the returned token names and current values.
 2. Translate the user's visual intent into the smallest meaningful token and manifest override set. Put every workspace image, grid, stripe, dot, or noise layer in the single `workspace_scene`; use surface materials only for transparent, tinted, or opaque functional regions.
 3. When an existing local PNG, JPEG, GIF, or WebP is needed, create a preview first and call `import_ui_theme_asset`. Static PNG/JPEG/WebP assets may be referenced by `workspace_scene` or an icon; GIF and animated WebP assets may only be referenced by the single `workspace_scene` image layer. Cowork does not generate raster images in this workflow.
-4. Call `validate_ui_theme` and fix validation errors before previewing.
-5. Call `preview_ui_theme` so the user can inspect the result in the running app.
-6. Describe the preview briefly and ask what to adjust. Use `patch_ui_theme_preview` with the current `preview_id` and `preview_revision` for incremental changes. Each patch or asset change creates a new revision. Use `clear_ui_theme_preview` when the user rejects it.
-7. Call `save_ui_theme_preview` with the exact accepted `preview_id` and `preview_revision` only after the user explicitly accepts that revision. The tool performs its own approval check.
-8. Use `activate_ui_theme` or `delete_ui_theme` only for an explicit request; both tools confirm the action.
-9. After a successful save-and-activate or activation, explicitly recommend restarting Cowork so every existing surface loads the theme completely.
+4. Call `preview_ui_theme` to validate and show the candidate in the running app. Fix any errors it returns. Use `validate_ui_theme` for a standalone validation request.
+5. Describe the preview briefly. Use `patch_ui_theme_preview` with the current `preview_id` and `preview_revision` for requested adjustments. Each patch or asset change creates a new revision. Use `clear_ui_theme_preview` when the user rejects it.
+6. When the user asks to save, call `save_ui_theme_preview` for the chosen `preview_id` and `preview_revision`. Its save dialog is the confirmation.
+7. Use `activate_ui_theme` or `delete_ui_theme` only for an explicit request. Both tools confirm the action.
+8. After a successful save-and-activate or activation, explicitly recommend restarting Cowork so every existing surface loads the theme completely.
 
 ## Guardrails
 

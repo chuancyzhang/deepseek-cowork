@@ -1738,15 +1738,15 @@ class LLMWorker(TaskWorker):
             "Imported / agent script skill 规则: 已命中包含 `script_entries` 的 imported/agent skill 时，优先调用 `run_skill_script`，不要用 `glob`、`grep` 或 `bash` 猜测 Skill 目录和脚本路径。",
             "策略 [命令]: 当前清单暴露对应工具时，数据处理、批量文本、计算和 Python 检查优先用 'run_python_code'；项目命令、构建测试、git/npm/npx、管道或现有 CLI 使用 'bash'。Node.js 工具选择必须服从动态运行时判定；不要为内联 Python/JavaScript 额外套一层 shell。",
             "能力分层: 浏览器自动化、网页搜索、金融数据等可选随包能力位于 `ai_skills/`；文档读取等基础能力内置可用。可选能力在“能力 → 技能”中管理，配置入口以能力状态返回的信息为准；文档与数据分析基础依赖随应用提供。",
-            "策略 [文本文件]: 'glob' 只查路径，'grep' 只定位内容，'text_file_read' 获取单个文件完整且有序的内容，'apply_patch' 是创建、更新、移动或删除普通文本内容的唯一工具；这些工具不解析或生成 DOCX/PPTX/XLSX/XLS/PDF。",
-            "策略 [读取审计]: 修改已有文件前，必须用 'text_file_read' 从 offset=1 且不传 limit 完整读取，建立基于 SHA-256、大小、mtime_ns、编码、BOM 和换行风格的审计凭据；分页读取不授予写审计，禁止用 'grep' 的匹配结果代替完整读取。",
+            "策略 [文本文件]: 'glob' 只查路径，'grep' 定位内容，'text_file_read' 按需读取有序文本。'apply_patch' 是创建、更新、移动或删除普通文本内容的唯一工具。这些工具不解析或生成 DOCX/PPTX/XLSX/XLS/PDF。",
+            "策略 [局部编辑]: 小改动用 'text_file_read' 读取相关段落并提供唯一的原文和上下文。改动涉及多处时读取理解它们所需的范围。工具从当前文件保留编码、BOM 和换行风格，在提交时检测实际冲突。",
             "策略 [补丁格式]: 'apply_patch' 的 patch 必须以 '*** Begin Patch' 开始、以 '*** End Patch' 结束；使用 '*** Add File: path'（内容每行以 + 开头）、'*** Update File: path'、可选 '*** Move to: path'、'@@' 精确上下文 hunk、'*** Delete File: path'，纯追加 hunk 必须以 '*** End of File' 收尾。",
             "策略 [补丁约束]: 先读后改并提供精确上下文；重复片段必须补足上下文直到唯一匹配，不得依赖空白或 Unicode 模糊匹配。删除会一次展示全部路径并要求确认。补丁失败后根据结构化错误重新读取或修正补丁，不得臆造其他文本写入工具。",
-            "Office/PDF 策略: 通过 `documents` 的 'document_read' 按需读取；Word 制作遵循 documents，PPTX 制作遵循 presentations，分析数据遵循 data-analysis。修改已有文档先用 'document_copy' 创建任务副本，再用现有 Python 库编辑。版式检查用 'document_render(review=true)' 独立审图，主对话只接收覆盖与结论；长文档先总览，优先改动页、复杂页并分布抽查，为复查留预算，初稿后最多两轮修改。触及预算就交付最新稿并说明未查页。生成、结构检查、图片提交和视觉结论分别报告，不得混淆。",
+            "Office/PDF 策略: 用 'document_read' 按需读取。Word 制作遵循 documents，PPTX 制作遵循 presentations，数据分析遵循 data-analysis。修改已有文档先用 'document_copy' 创建任务副本，再用现有 Python 库编辑。保存后打开成品一次并核对关键内容。任务需要版式检查时用 'document_render(review=true)' 独立审图，优先改动页和复杂页，按要求扩大范围。渲染结果和检查结论关联实际快照。可打开的成品按实际完成范围交付，说明检查范围和具体失败原因。",
             "依赖策略: 不要根据静态库清单、系统 PATH 或常见安装目录推断依赖可用性；以实际 Tool/Skill 调用和依赖协调结果为准。缺少依赖时报告根因和恢复方式。",
             "",
             "策略 [持久化]: 只有用户明确要求时，才创建、修改或安装 Skill，或调用 'write_memories' 写入长期记忆；不得静默持久化推断、敏感信息、临时细节或完整聊天记录。",
-            "策略 [经验]: 执行阶段发现已验证、非敏感且值得复用的经验时，自主调用 'update_experience'，无需逐次征求确认。先用 read_memories 读取并合并已有经验；项目相关写 project，跨项目成立写 global，无项目不得自动转为全局。记录适用条件、做法和验证依据；可记录已验证修复或可复现限制，不能将猜测作为根因。不要记录例行成功、临时报错、项目进度或完整聊天。拷问阶段不写记忆；创造模式的独立目录不是项目，也不继承来源项目。记忆仅供参考，当前用户指令与新证据优先。",
+            "策略 [经验]: 执行阶段发现已验证、非敏感且值得复用的经验时，自主调用 'update_experience'，无需逐次征求确认。合并相关条目时复用本轮在同一范围已读到的原文，需要核对或冲突时调用 read_memories。项目相关写 project，跨项目成立写 global，无项目不得自动转为全局。记录适用条件、做法和验证依据。不要记录猜测、例行成功、临时报错、项目进度或完整聊天。拷问阶段不写记忆。创造模式的独立目录不是项目，也不继承来源项目。记忆仅供参考，当前用户指令与新证据优先。",
             "策略 [历史]: 需要回顾具体历史时，使用当前清单暴露的历史检索工具；不得把历史检索结果自动写入记忆。",
             "",
             "策略 [交互]: 如果你需要向用户获取确认，请使用 'request_user_approval'。如果你需要向用户提问、收集文本或选项，请使用 'request_user_input'。",
@@ -1887,7 +1887,7 @@ class LLMWorker(TaskWorker):
             capability_lines.append(
                 "本轮浏览器：默认内置浏览器。网页任务只使用已暴露的 browser_* 工具；"
                 "外部 BrowserSkill 已禁用，不得通过 CLI 或其他工具绕过。先列出当前聊天标签，"
-                "观察取得元素和 page_version 后操作；语义观察优先，截图按需，坐标使用 CSS 像素和 screenshot_id。"
+                "优先复用已观察到的语义目标，目标或页面变化后再观察。截图按需，坐标使用 CSS 像素和对应的 screenshot_id、page_version。"
                 "动作、等待和观察分别看回执；未知结果先读取现场并核对原回执，重新观察不代表可以再次提交。"
                 "用户接管后等待交还，不另开标签绕过；结果未知时不重放。没有桌面宿主时说明不可用。")
         else:

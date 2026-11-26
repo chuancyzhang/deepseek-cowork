@@ -490,7 +490,7 @@ def save_ui_theme_preview(
 ):
     _require_manual_apply(_context)
     repository = _repository(_context)
-    preview = repository.load_preview()
+    preview = repository.load_preview_identity()
     if not preview or preview.get("preview_id") != preview_id:
         return {"status": "error", "error": "Theme preview does not exist."}
     if int(preview.get("revision") or 0) != int(preview_revision):
@@ -499,7 +499,7 @@ def save_ui_theme_preview(
             "error": "Theme preview revision changed; inspect the current preview before saving.",
             "current_preview_revision": int(preview.get("revision") or 0),
         }
-    display_name = str(name or preview.get("name") or "自定义主题")
+    display_name = f"主题“{name}”" if name else "当前主题预览"
     action = "更新" if theme_id else "保存"
     append_theme_log(
         repository.data_dir,
@@ -510,7 +510,7 @@ def save_ui_theme_preview(
         activate=bool(activate),
     )
     approval = _approval_response(
-        f"{action}自定义主题“{display_name}”{'并设为当前主题' if activate else ''}？",
+        f"{action}{display_name}{'并设为当前主题' if activate else ''}？",
         title="保存主题",
         details="该操作会写入 Cowork 的主题配置；可随时在“设置 → 外观”切回默认主题。",
         _context=_context,
@@ -534,7 +534,7 @@ def save_ui_theme_preview(
         result = repository.commit_preview(
             preview_id=preview_id,
             preview_revision=int(preview_revision),
-            name=display_name,
+            name=str(name or ""),
             theme_id=str(theme_id or ""),
             activate=bool(activate),
             default_tokens=default_design_tokens(),
@@ -683,17 +683,17 @@ TOOL_EXPORTS = [
         },
         "read_only": True,
         "allowed_modes": ["execution"],
-        "search_hint": "theme validate contrast font colors tokens UI"
+        "search_hint": "validate theme package manifest contrast 主题校验"
     },
     {
         "name": "preview_ui_theme",
         "handler": preview_ui_theme,
-        "description": "Apply a temporary Cowork UI theme preview without saving it.",
+        "description": "Validate and show a temporary Cowork UI theme preview.",
         "parameters": {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Preview name."},
-                "overrides": {"type": "object", "description": "Validated theme overrides."},
+                "overrides": {"type": "object", "description": "Theme overrides using the active token schema."},
                 "workspace_scene": {"type": "object", "description": "The single fixed workspace background scene."},
                 "surfaces": {"type": "object", "description": "Declarative surface materials and styles."},
                 "components": {"type": "object", "description": "Allowed component presentation overrides."},
@@ -704,7 +704,7 @@ TOOL_EXPORTS = [
         "read_only": False,
         "destructive": False,
         "allowed_modes": ["execution"],
-        "search_hint": "theme preview apply temporary UI skin"
+        "search_hint": "customize UI theme preview temporary skin font colors 自定义主题 预览 字体 配色"
     },
     {
         "name": "patch_ui_theme_preview",

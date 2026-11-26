@@ -183,16 +183,25 @@ class TestSkillBuilder(unittest.TestCase):
                 instructions_md="Use [the reference](assets/reference.docx).", resources=[resource], _context=self.context)
             self.assertIn("Success", result)
             target = Path(self.ai_dir, "template", "assets/reference.docx")
-            old = hashlib.sha256(target.read_bytes()).hexdigest()
             source.write_bytes(b"new reference")
-            result = skill_builder_impl.update_skill(self.temp_dir, "template", resources=[resource], _context=self.context)
-            self.assertIn("already exists", result)
-            self.assertEqual(target.read_bytes(), b"template reference")
             result = skill_builder_impl.update_skill(self.temp_dir, "template",
-                resources=[{**resource, "previous_sha256": old}], _context=self.context)
+                resources=[{**resource, "previous_sha256": "0" * 64}], _context=self.context)
+            self.assertIn("changed since inspection", result)
+            self.assertEqual(target.read_bytes(), b"template reference")
+            result = skill_builder_impl.update_skill(self.temp_dir, "template", resources=[resource], _context=self.context)
             self.assertIn("Success", result)
             self.assertEqual(target.read_bytes(), b"new reference")
             self.assertEqual(json.loads((target.parent.parent / "skill.json").read_text())["asset_refs"], ["assets/reference.docx"])
+            original_validate = skill_builder_impl._validate_staged_skill
+
+            def validate_then_edit(*args, **kwargs):
+                original_validate(*args, **kwargs)
+                target.write_bytes(b"user edit")
+
+            with patch.object(skill_builder_impl, "_validate_staged_skill", side_effect=validate_then_edit):
+                result = skill_builder_impl.update_skill(self.temp_dir, "template", resources=[resource], _context=self.context)
+            self.assertIn("changed during update", result)
+            self.assertEqual(target.read_bytes(), b"user edit")
 
     def test_missing_declared_binding_fails_before_publication(self):
         with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):

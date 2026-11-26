@@ -22,7 +22,7 @@ allowed-tools: ["browser_tabs", "browser_open", "browser_close", "terminal_read"
 - `browser_open` 可以打开 file、web、terminal。当前聊天默认跟随 AI 的网页标签；用户手动切换后暂停跟随，后台聊天与未保存编辑不受打断。终端使用应用自带 Git Bash 或本机 PowerShell；工作目录在创建时确定。
 - 检查本地 HTML 的运行效果时，用 `browser_open(kind="web", path="页面.html")` 打开；path 可为绝对路径或相对当前聊天工作区的路径，支持 `.html` 和 `.htm`。HTTP(S) 网页使用 `url`，不要同时提供 path 和 url。等待标签加载完成后用 `browser_observe` 检查文字、元素与截图。`kind="file"` 用于文件查看与编辑，不能交给 `browser_observe`。
 - 终端是持续交互进程。`terminal_input` 按原样发送文本，执行命令需包含回车 `\r`；发送后用 `terminal_read` 的 cursor 增量读取。等待输出时不要重复发送命令。`terminal_interrupt` 发送 Ctrl+C，不等同于关闭终端。
-- 操作网页前用 `browser_observe` 获取语义信息、原节点引用、框架 ID 和 `page_version`。截图默认关闭，需要看图时指定 `screenshot="viewport"`；截图已经归一到 CSS 像素，不进行 device_pixel_ratio 换算。坐标动作同时携带对应 `screenshot_id`，整页和区域截图仅用于阅读。
+- 复用已观察到的目标，目标或页面变化后再用 `browser_observe`。截图按需，坐标动作使用视口截图的 CSS 像素、`screenshot_id` 和 `page_version`。整页和区域截图用于阅读。
 - 网页动作串行执行。引用始终绑定原节点，节点替换时不能偷偷改为同名目标。语义定位允许页面重绘后重新唯一匹配角色、名称或标签，可用 within 限定观察到的区域；selector 必须来自实际页面证据。业务对象变化风险用 expect 验证价格、名称等事实。坐标操作检查目标及其附近画面，无关区域刷新不会使目标失效。
 - `browser_read` 有界读取局部文本、表单、表格和列表，不刷新操作凭证；`browser_wait` 等待明确的加载、URL 或目标条件，不重复输入。跨框架操作先按返回的 frame_id 观察该框架，开放 Shadow DOM 使用同一套定位方式。
 - `browser_action` 支持点击、双击、填写、追加输入、组合键、选择、勾选、悬停、滚动及拖拽。fill 返回 actual_value，页面自动格式化不等于填写未执行。可附加有界 wait，动作、等待、观察分别结算。批量 steps 只包含已经确定的步骤，首个未完成步骤即停止；不要重放已完成部分。

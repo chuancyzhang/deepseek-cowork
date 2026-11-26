@@ -16,7 +16,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 
 from core.skill_adapter import resolve_agent_skill_source
-from core.skill_package import MAX_PACKAGE_BYTES, file_digest, package_digest, package_path, copy_asset
+from core.skill_package import MAX_PACKAGE_BYTES, file_digest, package_path, copy_asset
 
 log = logging.getLogger("skills.install")
 
@@ -112,7 +112,7 @@ def _git(args, directory, context):
 
 @contextmanager
 def prepare_source(source_path, *, skill_paths=None, ref="", source_type="auto", expected_sha256="", context=None):
-    """Yield (selected directories, provenance). All callers install these same bytes."""
+    """Resolve source directories and provenance before staging the installable contents."""
     if source_type not in {"auto", "repository", "package"}:
         raise ValueError("source_type must be auto, repository or package.")
     if skill_paths is not None and (not isinstance(skill_paths, list) or not skill_paths
@@ -159,10 +159,12 @@ def prepare_source(source_path, *, skill_paths=None, ref="", source_type="auto",
                     raise ValueError("Provide a direct ZIP/Markdown URL or a repository with skill_paths; installation pages are not packages.")
                 downloaded = work / ("source" + extension)
                 final_url = _download(source, downloaded, context)
-                digest = file_digest(downloaded)
-                if expected_sha256 and digest != expected_sha256:
-                    raise ValueError("Downloaded package differs from the inspected content.")
-                provenance = {"url": source, "resolved_url": final_url, "download_sha256": digest}
+                provenance = {"url": source, "resolved_url": final_url}
+                if expected_sha256:
+                    digest = file_digest(downloaded)
+                    if digest != expected_sha256:
+                        raise ValueError("Downloaded package differs from the inspected content.")
+                    provenance["download_sha256"] = digest
                 root, extracted = resolve_agent_skill_source(str(downloaded), select_root=not skill_paths)
                 if extracted:
                     temporary.append(extracted)
@@ -176,8 +178,9 @@ def prepare_source(source_path, *, skill_paths=None, ref="", source_type="auto",
             if path.is_file():
                 temporary.append(tempfile.mkdtemp(prefix="cowork-skill-local-"))
                 retained = Path(temporary[-1]) / ("source" + path.suffix)
-                evidence = copy_asset(path, retained, expected_sha256)
-                provenance["package_sha256"] = evidence["sha256"]
+                evidence = copy_asset(path, retained, expected_sha256, include_digest=False)
+                if expected_sha256:
+                    provenance["package_sha256"] = evidence["sha256"]
                 source = str(retained)
                 path = retained
             if path.is_dir() and skill_paths:
@@ -194,10 +197,7 @@ def prepare_source(source_path, *, skill_paths=None, ref="", source_type="auto",
         for path in selected:
             if not (path / "SKILL.md").is_file():
                 raise ValueError("SKILL.md not found; specify the skill directory inside the repository.")
-            digest = package_digest(path)
-            if expected_sha256 and (source.startswith("https://") and provenance.get("commit") or Path(source).is_dir()) and digest != expected_sha256:
-                raise ValueError("Skill directory changed since inspection.")
-            entries.append((path, {**provenance, "skill_path": path.relative_to(root).as_posix(), "content_sha256": digest}))
+            entries.append((path, {**provenance, "skill_path": path.relative_to(root).as_posix()}))
         check_cancel(context)
         yield entries
     finally:

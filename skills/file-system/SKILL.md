@@ -34,8 +34,8 @@ This built-in skill handles workspace path operations and plain text files only.
 ## Usage Guidelines
 
 - Prefer relative workspace paths.
-- Use `glob` to discover paths and `grep` to locate matching lines. Neither tool returns the complete ordered file or grants a write credential.
-- Before changing existing content, call `text_file_read` with `offset=1` and no `limit`. A paged read never grants write audit even when it reaches the end of the file.
+- Use `glob` to discover paths and `grep` to locate matching lines.
+- For a local edit, read the relevant lines with `text_file_read`. Read more when needed to understand the change or make its context unique. The patch tool checks the current file at commit.
 - Files with a recognized Unicode BOM or valid UTF-8 need no encoding argument. Other encodings must be explicit; decode failures are returned and never replaced or ignored.
 - Use `apply_patch` for every plain-text creation or content change. The patch must start with `*** Begin Patch`, end with `*** End Patch`, and contain `*** Add File`, `*** Update File`, `*** Delete File`, optional `*** Move to`, and exact `@@` hunks. Pure EOF additions require `*** End of File`.
 - Use enough unchanged context to make each hunk unique. Matching is exact: whitespace and Unicode variants are not normalized.

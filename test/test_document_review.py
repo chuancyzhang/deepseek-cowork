@@ -41,10 +41,13 @@ class EchoReviewer:
         wire={'images':['data:image/png;base64,'+base64.b64encode(Path(p['path']).read_bytes()).decode() for p in parts]}
         request_context['validate_request']('chat_completions',{} if self.mode=='missing' else wire)
         if self.mode=='partial': return
-        identity=json.loads(messages[1]['content'])
-        response={key:identity[key] for key in ('request_id','source_version','render_configuration','kind')}
-        response['pages']=[{'page':p,'summary':'fixture observation','issues':[]} for p in identity['page_numbers']]
-        if self.mode=='wrong_version': response['source_version']='wrong'
+        review_input = json.loads(messages[1]['content'])
+        assert 'source_version' not in review_input and 'request_id' not in review_input
+        response = {'pages': [
+            {'page': p, 'summary': 'fixture observation', 'issues': []} for p in review_input['page_numbers']
+        ]}
+        if self.mode == 'wrong_page':
+            response['pages'][0]['page'] = 999
         if self.mode=='source_removed': Path(self.source).unlink()
         yield {'type':'content','content':json.dumps(response)}
         if self.mode!='no_usage': yield {'type':'usage','usage':{'total_tokens':120}}
@@ -84,8 +87,8 @@ class DocumentReviewTests(unittest.TestCase):
         self.assertFalse(records['batches'][-1]['current_version']);self.assertTrue(records['current']['current_version'])
         self.assertEqual(review.read_reviews('session-b',self.source)['batches'],[])
 
-    def test_completed_transport_with_wrong_ack_does_not_count_as_conclusion(self):
-        self.provider.mode='wrong_version';result=self.batch()
+    def test_returned_page_must_match_the_submitted_evidence(self):
+        self.provider.mode='wrong_page';result=self.batch()
         self.assertEqual(result['state'],'failed');self.assertEqual(result['delivered_pages'],[1])
         self.assertEqual(result['conclusion_pages'],[])
 
@@ -106,8 +109,13 @@ class DocumentReviewTests(unittest.TestCase):
     def test_evidence_is_historical_and_tampering_is_detected(self):
         self.provider.mode='source_removed';self.provider.source=self.source
         result=self.batch()
-        self.assertEqual(result['state'],'completed');self.assertTrue(result['source_changed'])
-        batch=review.read_reviews('session-a',self.source)['batches'][0]
+        self.assertEqual(result['state'], 'completed')
+        self.source.write_bytes(b'%PDF-revised')
+        current_version = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        records = review.read_reviews('session-a', self.source, fingerprint=current_version)
+        self.assertIsNone(records['current'])
+        batch = records['batches'][0]
+        self.assertTrue(batch['source_changed'])
         digest=batch['images'][0]['sha256']
         image=review.review_image('session-a',self.source,batch['id'],digest)
         with self.assertRaises(ValueError): review.review_image('session-b',self.source,batch['id'],digest)
@@ -121,8 +129,9 @@ class DocumentReviewTests(unittest.TestCase):
         self.provider.mode='valid';self.context['run_id']='versions'
         for index in range(4):
             self.source.write_bytes(f'%PDF-{index}'.encode());result=self.batch()
-        self.assertEqual(result['state'],'not_reviewed');self.assertIn('两轮',result['reason'])
-        self.context['run_id']='retries';self.provider.mode='wrong_version'
+            self.assertEqual(result['state'], 'completed')
+        self.assertEqual(result['budget']['requests'], 4)
+        self.context['run_id']='retries';self.provider.mode='wrong_page'
         with patch.dict(review.LIMITS,requests=2):
             self.batch();self.batch();result=self.batch()
         self.assertEqual(result['budget']['requests'],2);self.assertEqual(result['state'],'not_reviewed')

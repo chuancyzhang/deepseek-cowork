@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from core.theme_tokens import default_design_tokens
@@ -148,12 +149,14 @@ class ThemeServiceTests(unittest.TestCase):
             session_id="session-1",
         )
         self.assertTrue(os.path.exists(self.repository.preview_path))
-        result = self.repository.commit_preview(
-            preview_id=preview["preview_id"],
-            preview_revision=preview["revision"],
-            activate=True,
-            default_tokens=self.defaults,
-        )
+        with patch.object(self.repository, "_read_preview_package", wraps=self.repository._read_preview_package) as read_preview:
+            result = self.repository.commit_preview(
+                preview_id=preview["preview_id"],
+                preview_revision=preview["revision"],
+                activate=True,
+                default_tokens=self.defaults,
+            )
+        read_preview.assert_called_once_with(self.defaults)
         self.assertEqual(result["theme"]["name"], "AI 主题")
         self.assertFalse(os.path.exists(self.repository.preview_path))
         self.assertEqual(self.repository.load().active_theme_id, result["theme"]["id"])

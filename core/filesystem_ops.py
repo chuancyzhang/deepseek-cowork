@@ -245,50 +245,14 @@ def _get_file_state(context):
     return state
 
 
-def record_full_read_state(
-    abs_path,
-    context,
-    *,
-    data=None,
-    encoding="",
-    bom=b"",
-    newline="\n",
-):
+def remember_text_encoding(abs_path, context, *, data, encoding, bom=b""):
+    """Reuse a manually selected encoding for the same bytes in a later patch."""
+    if encoding == "utf-8" or bom:
+        clear_read_state(abs_path, context)
+        return
     state = _get_file_state(context)
-    if "reads" not in state:
-        return None
-    raw = _read_file_bytes(abs_path) if data is None else bytes(data)
-    file_stat = os.stat(abs_path)
-    entry = {
-        "full": True,
-        "sha256": _sha256_bytes(raw),
-        "size": len(raw),
-        "mtime_ns": int(file_stat.st_mtime_ns),
-        "encoding": str(encoding or ""),
-        "bom_hex": bytes(bom or b"").hex(),
-        "newline": newline if newline in {"\n", "\r\n", "\r"} else "\n",
-    }
-    state["reads"][_cache_key(abs_path)] = entry
-    return dict(entry)
-
-
-def mark_file_written(
-    abs_path,
-    context,
-    *,
-    data=None,
-    encoding="utf-8",
-    bom=b"",
-    newline="\n",
-):
-    record_full_read_state(
-        abs_path,
-        context,
-        data=data,
-        encoding=encoding,
-        bom=bom,
-        newline=newline,
-    )
+    if "reads" in state:
+        state["reads"][_cache_key(abs_path)] = {"encoding": encoding, "sha256": _sha256_bytes(data)}
 
 
 def clear_read_state(abs_path, context, recursive=False):
@@ -385,47 +349,6 @@ def resolve_path(
     else:
         rel_path = _normalize_rel_path(os.path.relpath(abs_path, workspace_abs))
     return abs_path, rel_path, None
-
-
-def ensure_existing_file_write_allowed(abs_path, rel_path, context, action):
-    if not os.path.exists(abs_path):
-        return None
-    if not os.path.isfile(abs_path):
-        return _build_error(action, "not_a_file", "Target path is not a regular file.", path=rel_path)
-
-    state = _get_file_state(context)
-    reads = state.get("reads", {})
-    entry = reads.get(_cache_key(abs_path)) if isinstance(reads, dict) else None
-    if not isinstance(entry, dict) or not entry.get("full"):
-        return _build_error(
-            action,
-            "read_required",
-            "Existing files must be fully read before modification.",
-            path=rel_path,
-        )
-
-    try:
-        current_bytes = _read_file_bytes(abs_path)
-    except Exception as exc:
-        return _build_error(action, "read_failed", str(exc), path=rel_path)
-    current_sha256 = _sha256_bytes(current_bytes)
-    if current_sha256 != entry.get("sha256"):
-        return _build_error(
-            action,
-            "stale_write",
-            "File changed since it was read. Read it again before modifying.",
-            path=rel_path,
-        )
-    return None
-
-
-def get_verified_read_state(abs_path, rel_path, context, action):
-    error = ensure_existing_file_write_allowed(abs_path, rel_path, context, action)
-    if error:
-        return None, error
-    state = _get_file_state(context)
-    entry = (state.get("reads") or {}).get(_cache_key(abs_path))
-    return dict(entry or {}), None
 
 
 def list_files(workspace_dir, path=".", recursive=False, include_hidden=False, limit=200, context=None):
@@ -751,15 +674,7 @@ def read_text_file(
         content = "".join(selected)
         returned_lines = len(selected)
         audit_complete = parsed_offset == 1 and not truncated
-        if audit_complete:
-            record_full_read_state(
-                abs_path,
-                context,
-                data=raw,
-                encoding=detected_encoding,
-                bom=bom,
-                newline=newline,
-            )
+        remember_text_encoding(abs_path, context, data=raw, encoding=detected_encoding, bom=bom)
         return _build_ok(
             action,
             {
@@ -768,7 +683,6 @@ def read_text_file(
                 "encoding": detected_encoding,
                 "bom": bool(bom),
                 "newline": newline,
-                "sha256": _sha256_bytes(raw),
                 "file_size": len(raw),
                 "mtime_ns": int(file_stat.st_mtime_ns),
                 "truncated": truncated,

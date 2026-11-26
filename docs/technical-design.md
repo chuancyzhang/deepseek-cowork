@@ -55,7 +55,7 @@ flowchart TB
 | `core/runtime_ledger.py`、`core/runtime_stream.py` | 共享日志写入、流式批处理、SQLite 整理与有界背压 |
 | `desktop/src/host/`、`desktop/src/plugins/` | 稳定状态、保存协调、SDK、默认界面和扩展点 |
 | `core/daemon.py` | 消息渠道的 Socket 适配；转发同一运行核心 |
-| `core/filesystem_ops.py`、`core/apply_patch.py` | 文件读取凭据与补丁提交 |
+| `core/filesystem_ops.py`、`core/apply_patch.py` | 文本读取、精确匹配与补丁提交 |
 | `core/deliverable_editing.py`、`core/file_capabilities.py` | 文件能力、编辑会话与保存 |
 | `core/workbench.py`、`core/workbench_transport.py` | 标签状态及桌面工具请求 |
 | `desktop/src/Workspace.tsx`、`desktop/electron/browser.cjs` | 统一标签、浮动文件与任务导航、网页表面 |
@@ -316,11 +316,11 @@ Tool Registry 保存名称、说明、JSON Schema、来源、风险属性、运�
 | 工具 | 职责 |
 | --- | --- |
 | `glob` / `grep` | 发现路径、定位文本 |
-| `text_file_read` | 解码读取文本并建立完整读取凭据 |
+| `text_file_read` | 解码并按需读取文本，支持指定编码和行范围 |
 | `apply_patch` | 普通文本的创建、修改、移动与删除 |
 | `workspace_rename_path` / `workspace_delete_path` | 目录级操作 |
 
-读取凭据记录 SHA-256、编码、BOM 和换行风格。`apply_patch` 使用统一函数 Schema，先解析全部操作、校验路径和读取凭据，再完成确认与逐项提交。已有文件经同目录临时文件及 `os.replace` 发布，新文件采用拒绝覆盖的提交方式。
+`apply_patch` 先解析全部操作并校验路径。局部修改按当前文件中的原文和上下文唯一匹配，保留编码、BOM 和换行风格。用户显式指定的编码可复用到同一文件内容。已有文件在 `os.replace` 前检查预检以来的实际编辑冲突，新文件采用拒绝覆盖的提交方式。删除仍以一次汇总确认为提交边界。
 
 ## Skill 与 MCP 开发
 
@@ -342,6 +342,8 @@ example-skill/
 `SKILL.md` 维护工作流程；Cowork 原生能力通过 `skill.json` 描述展示、配置、工具及运行元数据。Tool Handler 可绑定到 `impl.py:function`，首次调用时延迟导入；脚本通过 `script_entries` 声明，由 `run_skill_script` 执行。
 
 `SkillCatalogService` 将目录编译为不可变快照，UI 与 daemon 各自使用快照。任务提交建立轻量运行视图，创建、更新或启停能力后通过 `SkillChangeEvent` 发布变更，Worker 在模型请求边界应用新目录。
+
+安装标准 Skill 时，工具将源内容暂存一次，在该副本上解析、验证并发布。同名冲突保留原技能。显式提供的摘要在安装实际使用的内容上验证一次。模板资源更新按指定路径操作，发布前比较该资源在本次更新中的实际并发冲突。
 
 内置 `documents` 负责 Office/PDF 读取与 Word 创作，`presentations` 负责 PPTX，`data-analysis` 负责口径、质量、计算与结论，`visualize` 负责对话中的交互表达。创作与分析复用现有 Python 运行时；多个交付格式共用已核验的结果。`SKILL.md` 保留核心流程，`references` 按任务读取，加载后的指导提供实际文件路径，默认不把参考正文一并注入。
 
@@ -411,11 +413,11 @@ Agnes 图片与视频、火山方舟视频使用独立请求契约。OpenAI 兼�
 
 ### 页面渲染与成果审阅
 
-`document_render(..., review=true)` 复用本机 Office/WPS 或显式选择的 LibreOffice 导出副本，再由独立 PDFium 进程转图。细节每批至多 4 页、长边 2000 像素；总览将跨章节最多 24 页合成 4 张图，不能计入细节覆盖。Excel `excel_options` 区分区域阅读和原打印；区域模式在副本中按实际列宽分片，保留合并列组并重复用户指定的标识列／标题行，过宽列组显式拒绝。UI 使用离线 PDF.js，字体、CMap、WASM 和 ICC 资源随包分发；阅读亮度只作用于屏幕，保存或后台文件通知不自动换页，用户刷新才重新转换。
+`document_render` 读取一次文件，用这份快照缓存 PDF、转图和关联审稿记录。Office 复用本机 Office/WPS 或显式选择的 LibreOffice，PDFium 在独立进程转图。细节每批至多 4 页、长边 2000 像素。按需总览将最多 24 页合成 4 张图，总览只计为跨页检查。Excel `excel_options` 区分区域阅读和原打印。区域模式按实际列宽分片，保留合并列组并重复指定的标识列或标题行，过宽列组显式拒绝。UI 使用离线 PDF.js 和随包字体等资源。用户刷新才重新转换，阅读亮度只作用于屏幕。
 
 `core/office_renderers.py` 从注册信息、程序版本和位数发现渲染器，不在启动时激活 COM。首次实际转换成功并完成清理后按软件版本／文档类型记录可用性，软件变化使记录失效；这不保证任意字体或文档都可转换。Office helper 只关闭本次副本，不 Quit／强杀办公软件。超时停止等待，实例在旧任务清理完成前暂停接收新转换；重新检测先核对互斥和残留状态，不向挂起实例再发 COM 调用。WPS 按套件串行，并拒绝在已有打开文档时改变共享设置；失败后只能由用户明确选择其他渲染方式。
 
-`core/document_review.py` 使用同一已选模型和授权的独立传输，不携带主对话历史或工具。最终协议请求在数据安全投影后强制核对图片字节摘要，完成回执再核对请求、版本、配置、总览／细节类型和完整页码。独立审稿不展示正文分片；Responses 仅在响应身份匹配的 `response.completed` 到达后读取最终正文，分片差异记录诊断，不将未完成内容当成 JSON 结论。该本地处理不改变模型请求或普通聊天的流式行为。主对话仅接收结构化结果；程序证明提交与结论覆盖，不能证明模型判断正确。每个 run 跨文件／版本共享 24 请求、80 页次、6 分钟、累计像素和已报告 Token 阈值；初稿预留复查额度，每份文件初稿后最多两次修改。内部自动重试关闭，用户重试也计入；用量缺失停止后续请求，Token 阈值不等于精确费用上限。
+`core/document_review.py` 使用同一已选模型和授权的独立传输。最终协议请求核对实际提交的图片，宿主将回执关联到本次请求和快照，模型只返回页码与发现。独立审稿不展示正文分片。Responses 在身份匹配的 `response.completed` 到达后读取最终正文，分片差异记入诊断。主对话接收结构化结果与实际覆盖，查看新版时旧快照结论进入历史。每轮跨文件与版本共享 24 请求、80 页次、6 分钟、累计像素和已报告 Token 限制。内部自动重试关闭，用量缺失时停止新增请求。Token 阈值用于限制请求次数，实际费用以服务用量为准。
 
 预览 PDF、图片证据和检查回执位于应用数据 `browser_previews/sessions/<会话摘要>/`，按版本／配置分离；永久删除会话清理对应缓存，归档和软删除保留可恢复记录。用户原件与最终修改稿不在缓存目录。`review=false` 的临时图片位于工作区 `.cowork/document-previews/`；`document_copy` 仅在 `.cowork/office-drafts/<任务摘要>/` 原子创建副本，重复调用保留已有修改。此默认流程不是操作系统写入沙箱，通用 Python／命令权限边界未改变，也不提供一键替换原件。
 

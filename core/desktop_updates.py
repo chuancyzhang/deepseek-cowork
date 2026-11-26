@@ -15,7 +15,7 @@ from core.update_coordinator import UpdateCoordinator, atomic_json, release_note
 
 log = logging.getLogger("desktop.updates")
 OWNER_TIMEOUT = 30
-INSTALLER_READY_TIMEOUT = 15
+INSTALLER_READY_TIMEOUT = 30
 
 
 def validate_release(value):

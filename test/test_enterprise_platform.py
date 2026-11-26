@@ -86,19 +86,40 @@ class PlatformTests(unittest.TestCase):
                                   "error_field": "errcode", "success_values": []}, "secrets": {"client_secret": "test-secret"}}
         self.auth.save_source(self.source, bootstrap=True)
 
-    def web_login(self, subject="admin-subject"):
+    def federated_callback(self, subject, *, desktop_verifier=""):
         self.oauth_subject = subject
-        response = self.client.post("/api/v1/auth/transactions", json={"provider_id": "company", "mode": "web"})
+        payload = {"provider_id": "company", "mode": "web"}
+        if desktop_verifier:
+            payload.update(mode="desktop", code_challenge=challenge(desktop_verifier))
+        response = self.client.post("/api/v1/auth/transactions", json=payload)
         self.assertEqual(response.status_code, 200, response.text)
         started = response.json()
         launch = self.client.get(started["login_url"], follow_redirects=False)
         self.assertEqual(launch.status_code, 302, launch.text)
         params = parse_qs(urlsplit(launch.headers["location"]).query)
         response = self.client.get("/auth/callback/company", params={"state": params["state"][0], "code": "one-use-code"}, follow_redirects=False)
-        self.assertEqual(response.status_code, 303, response.text)
         self.assertEqual(challenge(self.token_requests[-1]["code_verifier"][0]), params["code_challenge"][0])
         self.assertNotIn("redirect_uri", self.token_requests[-1])
+        return started, response
+
+    def web_login(self, subject="admin-subject"):
+        _, response = self.federated_callback(subject)
+        self.assertEqual(response.status_code, 303, response.text)
         return self.client.get("/api/v1/me").json()
+
+    def desktop_exchange(self, transaction_id, verifier):
+        path = f"/api/v1/auth/transactions/{transaction_id}"
+        handoff = self.client.post(path + "/status", json={"verifier": verifier}).json()["handoff_code"]
+        session = self.client.post(path + "/exchange", json={"verifier": verifier, "handoff_code": handoff})
+        self.assertEqual(session.status_code, 200, session.text)
+        return {"Authorization": "Bearer " + session.json()["access_token"]}
+
+    def desktop_login(self, subject):
+        verifier = "v" * 48
+        tx, response = self.federated_callback(subject, desktop_verifier=verifier)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("cowork_session=", response.headers.get("set-cookie", ""))
+        return self.desktop_exchange(tx["id"], verifier)
 
     def headers(self):
         return {"X-CSRF-Token": self.client.cookies.get("cowork_csrf", "")}
@@ -216,6 +237,38 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return item["id"]
 
+    def test_model_grants_share_member_state_and_detect_stale_changes(self):
+        owner_id = self.web_login()["member"]["id"]
+        first_token = self.desktop_login("model-staff-one")
+        second_token = self.desktop_login("model-staff-two")
+        def me(headers):
+            return self.client.get("/api/v1/me", headers=headers).json()
+        first_id, second_id = (me(token)["member"]["id"] for token in (first_token, second_token))
+        primary, backup = self.model(owner_id), self.model(first_id)
+        url = f"/api/v1/admin/models/{primary}/grants"
+        def grant(current, new, headers=None):
+            return self.client.put(url, headers=self.headers() if headers is None else headers,
+                                   json={"previous_member_ids":current, "member_ids":new})
+        self.assertEqual(grant([owner_id], [owner_id, first_id], first_token).status_code, 403)
+        self.assertEqual(grant([owner_id], [owner_id, first_id, "missing-employee"]).status_code, 409)
+        self.assertEqual([model["id"] for model in me(first_token)["models"]], [backup])
+        expanded = [owner_id, first_id, second_id]
+        response = grant([owner_id], expanded)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(grant([owner_id], expanded).json(), response.json())
+        first = me(first_token)
+        self.assertEqual({model["id"] for model in first["models"]}, {primary, backup})
+        self.assertEqual(first["member"]["default_model_id"], backup)
+        self.assertEqual(me(second_token)["member"]["default_model_id"], primary)
+        response = self.client.put(f"/api/v1/admin/members/{first_id}", headers=self.headers(),
+                                   json={"revision":first["member"]["revision"], "model_ids":[primary, backup],
+                                         "default_model_id":primary})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(grant(expanded, [owner_id, second_id]).status_code, 200)
+        self.assertEqual(me(first_token)["member"]["default_model_id"], backup)
+        self.assertEqual(grant(expanded, [owner_id]).status_code, 409)
+        self.assertEqual(me(second_token)["member"]["default_model_id"], primary)
+
     def submission(self, text="员工新发的问题", submission_id="message-1", **changes):
         result = {"model": "test-model", "stream": True, "messages": [
             {"role": "system", "content": "stable system prefix"},
@@ -307,9 +360,9 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(self.client.put(latest, headers=self.headers(), json={**retained, "run_id": "different-run"}).status_code, 403)
         self.assertEqual(self.client.put(latest, headers=self.headers(), json=retained).status_code, 200)
         self.client.post("/api/v1/auth/logout", headers=self.headers())
-        self.web_login("another-user")
-        self.assertEqual(self.client.put(latest, headers=self.headers(), json=retained).status_code, 403)
-        self.assertEqual(self.client.get("/api/v1/admin/chat-audit").status_code, 403)
+        employee_headers = self.desktop_login("another-user")
+        self.assertEqual(self.client.put(latest, headers=employee_headers, json=retained).status_code, 403)
+        self.assertEqual(self.client.get("/api/v1/admin/chat-audit", headers=employee_headers).status_code, 403)
 
     def test_guest_and_login_do_not_upload_history_or_grant_models(self):
         self.assertEqual(self.client.get("/api/v1/platform-info").json()["chat_audit"]["retention_days"], 30)
@@ -318,12 +371,22 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(admin["member"]["role"], "admin")
         self.assertEqual(admin["models"], [])
         self.client.post("/api/v1/auth/logout", headers=self.headers())
-        employee = self.web_login("employee-subject")
+        tx, denied = self.federated_callback("employee-subject")
+        self.assertEqual(denied.status_code, 403)
+        self.assertIn("网页版仅供平台管理员登录", denied.text)
+        self.assertNotIn("cowork_session=", denied.headers.get("set-cookie", ""))
+        self.assertEqual(self.client.get("/api/v1/me").status_code, 401)
+        self.assertEqual(self.client.get("/downloads").status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/client-releases/recommended?app_layout=electron").status_code, 200)
+        employee_headers = self.desktop_login("employee-subject")
+        employee = self.client.get("/api/v1/me", headers=employee_headers).json()
         self.assertEqual(employee["member"]["role"], "member")
         self.assertEqual(employee["models"], [])
-        self.assertEqual(self.client.get("/api/v1/admin/chat-audit").status_code, 403)
+        self.assertEqual(self.client.get("/api/v1/admin/chat-audit", headers=employee_headers).status_code, 403)
         with self.db.transaction() as db:
             self.assertEqual(list(db.scalars(select(Question))), [])
+            denied_tx = db.get(LoginTransaction, tx["id"])
+            self.assertEqual((denied_tx.status, denied_tx.error), ("failed", "web_admin_required"))
 
     def test_subpath_info_assets_login_and_download_keep_public_prefix(self):
         from dataclasses import replace
@@ -445,10 +508,11 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(len(self.requests), count)
         self.client.post("/api/v1/auth/logout", headers=self.headers())
-        employee = self.web_login("employee")
+        employee_headers = self.desktop_login("employee")
+        employee = self.client.get("/api/v1/me", headers=employee_headers).json()
         with self.db.transaction() as db:
             db.get(Member, employee["member"]["id"]).enabled = False
-        self.assertEqual(self.client.get("/api/v1/me").status_code, 403)
+        self.assertEqual(self.client.get("/api/v1/me", headers=employee_headers).status_code, 403)
 
     def test_obsolete_question_apis_are_removed_and_existing_records_expire_on_schedule(self):
         admin = self.web_login()
@@ -539,18 +603,21 @@ class PlatformTests(unittest.TestCase):
                         "access_token_path": "payload.token", "expires_in_path": "payload.ttl", "name_path": "person.label"},
              "secrets": {"client_secret": "mapped-secret"}}]
         subjects = []
+        verifier = "w" * 48
         for source in sources:
             self.auth.save_source(source)
             with self.db.transaction() as db:
                 record = db.get(AuthSource, source["id"])
                 record.enabled, record.verified_revision = True, record.revision
-            tx = self.client.post("/api/v1/auth/transactions", json={"provider_id": source["id"], "mode": "web"}).json()
+            tx = self.client.post("/api/v1/auth/transactions", json={"provider_id": source["id"], "mode": "desktop",
+                                  "code_challenge": challenge(verifier)}).json()
             launch = self.client.get(tx["login_url"], follow_redirects=False)
             params = parse_qs(urlsplit(launch.headers["location"]).query)
             nonce["value"] = params.get("nonce", [""])[0]
             response = self.client.get("/auth/callback/" + source["id"], params={"state": params["state"][0], "code": "code"}, follow_redirects=False)
-            self.assertEqual(response.status_code, 303, response.text)
-            subjects.append(self.client.get("/api/v1/me").json()["member"]["id"])
+            self.assertEqual(response.status_code, 200, response.text)
+            employee_headers = self.desktop_exchange(tx["id"], verifier)
+            subjects.append(self.client.get("/api/v1/me", headers=employee_headers).json()["member"]["id"])
         self.assertNotEqual(*subjects)  # Same subject under different identity sources never merges.
         bad_nonce["enabled"] = True
         tx = self.client.post("/api/v1/auth/transactions", json={"provider_id": "second", "mode": "web"}).json()
@@ -559,7 +626,7 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(self.client.get("/auth/callback/second", params={"state": params["state"][0], "code": "code"}, follow_redirects=False).status_code, 400)
 
     def test_ldap_requires_certificate_validation_stable_id_and_password(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock, patch
         import ssl
         self.web_login()
         source = {"id": "directory", "name": "目录", "mode": "ldap", "enabled": False,
@@ -581,6 +648,13 @@ class PlatformTests(unittest.TestCase):
             self.assertEqual(tls.call_args.kwargs["validate"], ssl.CERT_REQUIRED)
             self.assertEqual(connection.call_args_list[1].kwargs["password"], "employee-secret")
             self.assertNotIn("a*)(uid=*)", search.search.call_args.args[1])
+        identity = {"subject": "stable-directory-uuid", "name": "目录员工", "email": ""}
+        with patch.object(self.auth, "ldap_identity", new=AsyncMock(return_value=identity)):
+            denied = self.client.post("/api/v1/auth/ldap", json={"provider_id": "directory", "username": "person",
+                                      "password": "employee-secret", "mode": "web"})
+            self.assertEqual(denied.status_code, 403)
+            self.assertEqual(denied.json()["error"]["code"], "web_admin_required")
+            self.assertNotIn("cowork_session=", denied.headers.get("set-cookie", ""))
         with patch("ldap3.Connection", side_effect=RuntimeError("bind refused")):
             response = self.client.post("/api/v1/auth/ldap", json={"provider_id": "directory", "username": "person", "password": "bad", "mode": "desktop"})
             self.assertEqual(response.status_code, 401)

@@ -20,7 +20,7 @@ async function capabilityRoute(route) {
 
 async function capabilityList(kind) {
   const {items} = await api(capabilityApi);
-  heading("企业能力", "发布 Skill、MCP 和专家，员工获得授权后可在客户端使用。");
+  heading("企业能力");
   content.querySelector(".page-title").append(button(capabilityUsesZip(kind) ? "上传 ZIP" : "新建 MCP",
     () => navigate(capabilityPath + kind + "/new"), {primary:true}));
   content.insertAdjacentHTML("beforeend", `<div class="space-tabs" aria-label="企业能力类型">
@@ -33,14 +33,48 @@ async function capabilityList(kind) {
       ? `暂无 ${capabilityKinds[kind]}。上传 ZIP 后会生成草稿。` : "暂无 MCP，请先添加服务配置。"));
     return;
   }
-  content.insertAdjacentHTML("beforeend", `<div class="table-wrap"><table><thead><tr>
-    <th>名称</th><th>状态</th><th>使用范围</th><th>操作</th></tr></thead>
-    <tbody>${rows.map(item => `<tr><td><a data-route href="${base + capabilityPath + kind + "/" + esc(item.id)}">${esc(item.name)}</a>
-    <span class="secondary-line">${esc(item.description)}</span></td>
-    <td>${item.version ? (item.enabled ? "已发布" : "已停用") + " · v" + item.version : "未发布草稿"}</td>
-    <td>${capabilityGrantLabel(item)}</td>
-    <td><a data-route href="${base + capabilityPath + kind + "/" + esc(item.id)}/grants">分配员工</a></td></tr>`).join("")}
-    </tbody></table></div>`);
+  const choice = new URLSearchParams(location.search).get("selected");
+  const selected = rows.find(item => item.id === choice) || rows[0];
+  const page = capabilityPath + kind;
+  const list = '<div class="admin-list">' + adminColumns("名称", "状态", "使用范围") + rows.map(item => adminRow(
+    page + "?selected=" + encodeURIComponent(item.id), item.id === selected.id, item.name,
+    item.version ? (item.enabled ? "已发布" : "已停用") : "草稿", capabilityGrantLabel(item), item.enabled ? "ok" : "warn"
+  )).join("") + '</div>';
+  const id = encodeURIComponent(selected.id);
+  const item = await api(capabilityApi + "/" + id);
+  content.insertAdjacentHTML("beforeend", adminSplit(list, capabilitySummary(item, items, page + "/" + id)));
+  if (choice === selected.id) focusAdminDetail(content.querySelector(".admin-detail"));
+}
+
+function capabilitySummary(item, catalog, path) {
+  const {kind, config} = item;
+  const version = item.version ? "v" + item.version + (item.draft_pending ? " · 有未发布草稿" : "") : "";
+  const top = '<div class="admin-detail-head"><div><h2>' + esc(item.name) + '</h2>' +
+    (version ? '<small>' + esc(version) + '</small>' : "") + '</div></div>';
+  const summarySection = (label, body) => '<div class="admin-detail-section">' +
+    (label ? '<h3>' + label + '</h3>' : "") + body + '</div>';
+  let summary;
+  if (kind === "mcp") {
+    summary = summarySection("", adminFields([["服务地址", config.url],
+      ["认证", config.auth_type === "bearer" ? "Bearer" : "无需认证"], ["工具", (config.allowed_tools || []).join("、") || "全部工具"]]));
+  } else {
+    const instructions = config.instructions.slice(0, 320);
+    summary = summarySection(kind === "expert" ? "提示词" : "技能指引",
+      '<p>' + esc(instructions + (config.instructions.length > instructions.length ? "…" : "")) + '</p>');
+    if (kind === "expert") {
+      const linked = new Set([...(config.skill_ids || []), ...(config.mcp_ids || [])]);
+      const dependencies = catalog.filter(entry => linked.has(entry.id));
+      if (dependencies.length) summary += summarySection("关联能力", '<ul class="admin-resources">' + dependencies.map(entry =>
+        '<li><a data-route href="' + esc(base + capabilityPath + entry.kind + "?selected=" + encodeURIComponent(entry.id)) +
+        '">' + esc(entry.name) + '</a><small>' + esc(capabilityKinds[entry.kind]) + '</small></li>').join("") + '</ul>');
+    } else {
+      const files = Object.keys(config.files || {});
+      if (files.length) summary += summarySection("随包文件", '<p>' + esc(files.slice(0,3).join("、") +
+        (files.length > 3 ? " 等 " + files.length + " 个文件" : "")) + '</p>');
+    }
+  }
+  return top + summary + '<div class="admin-record-actions">' +
+    adminViewLink(path + "/grants", "分配员工") + adminViewLink(path, item.enabled && !item.draft_pending ? "配置" : "检查与发布") + '</div>';
 }
 
 function capabilityUpload(kind, item) {

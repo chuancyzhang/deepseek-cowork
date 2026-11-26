@@ -6,12 +6,29 @@ import time
 from sqlalchemy import delete, func, select
 
 from .config import service_url
-from .database import LocalAdministrator, LoginSession, Member, Model, ModelGrant
+from .database import DatabaseAccount, LocalAdministrator, LoginSession, Member, Model, ModelGrant
 from .security import PlatformError, digest, encode, equal
 
 MODEL_OPTIONS = {"supports_vision", "supports_image_generation", "stream_usage_enabled", "deepseek_thinking_enabled",
                  "reasoning_effort", "reasoning_efforts", "prompt_cache_key_param", "context_window_tokens",
                  "max_output_tokens", "anthropic_auth"}
+
+
+def configured_bootstrap_admin(db, settings):
+    provider, subject = settings.bootstrap_provider, settings.bootstrap_subject
+    if not provider or not subject or provider == "__platform_admin__":
+        return None
+    return db.scalar(select(Member).where(Member.provider_id == provider, Member.subject == subject, Member.role == "admin"))
+
+
+def super_admin_id(db, settings, local_admin):
+    if local_admin is not None:
+        member = db.get(Member, local_admin.member_id)
+        if not member or member.provider_id != "__platform_admin__":
+            return None
+    else:
+        member = configured_bootstrap_admin(db, settings)
+    return member.id if member and member.role == "admin" and member.enabled else None
 
 
 def member_view(member):
@@ -45,6 +62,8 @@ class Management:
             member = db.get(Member, session.member_id)
             if not member or not member.enabled:
                 raise PlatformError("member_disabled", "此成员已停用，请联系管理员。", 403)
+            if session.kind == "web" and member.role != "admin":
+                raise PlatformError("authentication_required", "网页版管理员会话已失效，请重新登录。", 401)
             return member_view(member)
 
     @staticmethod
@@ -56,7 +75,12 @@ class Management:
     def members(self):
         with self.database.transaction() as db:
             grants = list(db.scalars(select(ModelGrant)))
-            return [{**member_view(member), "model_ids": [g.model_id for g in grants if g.member_id == member.id]}
+            usernames = dict(db.execute(select(DatabaseAccount.member_id, DatabaseAccount.username)).all())
+            founder = db.get(LocalAdministrator, 1)
+            super_id = super_admin_id(db, self.settings, founder)
+            return [{**member_view(member), "username": usernames.get(member.id, ""),
+                     "is_super_admin": member.id == super_id,
+                     "model_ids": [g.model_id for g in grants if g.member_id == member.id]}
                     for member in db.scalars(select(Member).order_by(Member.created_at))]
 
     def update_member(self, member_id, payload, actor):
@@ -74,10 +98,15 @@ class Management:
             if role not in {"admin", "member"} or type(enabled) is not bool:
                 raise PlatformError("invalid_member", "成员角色或启用状态无效。")
             founder = db.get(LocalAdministrator, 1)
-            if founder and member.id == founder.member_id and (role != "admin" or not enabled):
-                raise PlatformError("founder_required", "首位管理员负责管理员授权，不能停用或降级。", 409)
-            if founder and role != member.role and actor != founder.member_id:
-                raise PlatformError("founder_required", "管理员角色只能由首位管理员授权或收回。", 403)
+            super_id = super_admin_id(db, self.settings, founder)
+            reserved_id = founder.member_id if founder else super_id
+            if member.id == reserved_id and (role != "admin" or not enabled):
+                raise PlatformError("founder_required", "超级管理员负责管理员授权，不能停用或降级。", 409)
+            if role != member.role:
+                if super_id is None:
+                    raise PlatformError("super_admin_unavailable", "部署未配置可用的超级管理员，请联系部署维护人员。", 403)
+                if actor != super_id:
+                    raise PlatformError("founder_required", "管理员角色只能由超级管理员授权或收回。", 403)
             if member.role == "admin" and member.enabled and (role != "admin" or not enabled):
                 admins = db.scalar(select(func.count()).select_from(Member).where(Member.role == "admin", Member.enabled))
                 if admins <= 1:
@@ -95,10 +124,13 @@ class Management:
                 db.execute(delete(ModelGrant).where(ModelGrant.member_id == member_id))
                 db.add_all(ModelGrant(member_id=member_id, model_id=x) for x in sorted(set(model_ids)))
                 member.default_model_id = default_id
+            role_changed = role != member.role
             member.role, member.enabled = role, enabled
             member.revision += 1
             if not enabled:
                 db.execute(delete(LoginSession).where(LoginSession.member_id == member_id))
+            elif role_changed:
+                db.execute(delete(LoginSession).where(LoginSession.member_id == member_id, LoginSession.kind == "web"))
             self.database.audit(db, "member.updated", member_id=actor, target=member_id)
             return member_view(member)
 
@@ -153,6 +185,59 @@ class Management:
             if member_id:
                 query = query.join(ModelGrant, ModelGrant.model_id == Model.id).where(ModelGrant.member_id == member_id, Model.enabled)
             return [model_view(m, admin=not member_id) for m in db.scalars(query)]
+
+    def update_model_grants(self, model_id, payload, actor):
+        from .database import Platform
+
+        requested, baseline = (payload.get(key) for key in ("member_ids", "previous_member_ids"))
+        for values in (requested, baseline):
+            if not isinstance(values, list) or any(not isinstance(value, str) or not 1 <= len(value) <= 128 for value in values):
+                raise PlatformError("invalid_members", "请选择有效的员工。")
+        desired = set(requested)
+        with self.database.transaction() as db:
+            # Share the lock with member-side model authorization.
+            db.scalar(select(Platform).where(Platform.id == 1).with_for_update())
+            operator = db.get(Member, actor)
+            if not operator or not operator.enabled or operator.role != "admin":
+                raise PlatformError("forbidden", "此操作需要平台管理员权限。", 403)
+            if not db.get(Model, model_id):
+                raise PlatformError("not_found", "模型不存在。", 404)
+            founder = db.get(LocalAdministrator, 1)
+            if founder and founder.member_id in desired:
+                raise PlatformError("invalid_members", "此账号不使用员工模型。")
+            current = set(db.scalars(select(ModelGrant.member_id).where(ModelGrant.model_id == model_id)))
+            if founder:
+                current.discard(founder.member_id)
+            if current == desired:
+                return {"member_ids": sorted(current)}
+            if current != set(baseline):
+                raise PlatformError("conflict", "模型授权已变化，请刷新后核对员工。", 409)
+
+            changes = current ^ desired
+            members = {member.id: member for member in db.scalars(select(Member).where(Member.id.in_(changes)))}
+            if members.keys() != changes:
+                raise PlatformError("unknown_member", "员工列表已变化，请刷新后核对。", 409)
+            grants = {member_id: set() for member_id in changes}
+            for member_id, existing_model in db.execute(
+                select(ModelGrant.member_id, ModelGrant.model_id).where(ModelGrant.member_id.in_(changes))
+            ):
+                grants[member_id].add(existing_model)
+            enabled_models = set(db.scalars(select(Model.id).where(Model.enabled)))
+            for member_id, member in members.items():
+                if member_id in desired:
+                    if len(grants[member_id]) >= 200:
+                        raise PlatformError("invalid_models", f"{member.name}已达到可分配模型数量上限。")
+                    db.add(ModelGrant(member_id=member_id, model_id=model_id))
+                    if not member.default_model_id:
+                        member.default_model_id = model_id
+                else:
+                    db.delete(db.get(ModelGrant, (member_id, model_id)))
+                    if member.default_model_id == model_id:
+                        remaining = grants[member_id] - {model_id}
+                        member.default_model_id = min(remaining, key=lambda key: (key not in enabled_models, key), default="")
+                member.revision += 1
+            self.database.audit(db, "model.grants_changed", member_id=actor, target=model_id)
+        return {"member_ids": sorted(desired)}
 
     def authorized_model(self, member_id, model_id):
         with self.database.transaction() as db:

@@ -70,18 +70,30 @@ def exchange(client,tx):
     return client.post(prefix+'/exchange',json={'verifier':tx['verifier'],'handoff_code':status.get('handoff_code','')})
 
 
-def test_admin_create_enable_employee_web_login(local_auth):
+def test_admin_create_enable_employee_desktop_login_and_reject_web_login(local_auth):
     client,app,settings,headers,source,account=local_auth
     assert client.post('/api/v1/auth/transactions',json={'provider_id':'staff','mode':'web'}).status_code==404
     enable(local_auth)
+    client.cookies.clear()
     tx=transaction(client)
     bad=submit(client,tx,password='wrong')
     assert bad.status_code==401 and "value='employee'" in bad.text
-    assert submit(client,tx).status_code==303
-    me=client.get('/api/v1/me').json()
+    denied=submit(client,tx)
+    assert denied.status_code==403 and '网页版仅供平台管理员登录' in denied.text
+    assert 'cowork_session' not in client.cookies
+    assert client.get('/api/v1/me').status_code==401
+    with app.state.database.transaction() as db:
+        record=db.get(LoginTransaction,tx['id'])
+        assert (record.status,record.error)==('failed','web_admin_required')
+    desktop=transaction(client,desktop=True)
+    assert submit(client,desktop).status_code==200
+    session=exchange(client,desktop)
+    assert session.status_code==200
+    employee_headers={'Authorization':'Bearer '+session.json()['access_token']}
+    me=client.get('/api/v1/me',headers=employee_headers).json()
     assert me['member']['id']==account['id'] and me['member']['role']=='member'
     assert me['models']==[] and not me['can_assign_admin']
-    assert client.get('/api/v1/admin/settings').status_code==403
+    assert client.get('/api/v1/admin/settings',headers=employee_headers).status_code==403
     listing=client.get('/api/v1/admin/auth-sources/staff/accounts',headers=headers).json()
     assert PASSWORD not in str(listing) and 'password_hash' not in str(listing) and 'salt' not in str(listing)
     with app.state.database.transaction() as db:
@@ -98,14 +110,14 @@ def test_enable_empty_source_then_create_account(server):
     assert client.put('/api/v1/admin/login-entry',headers=headers,json={'provider_id':'staff','revision':0}).status_code==200
     assert client.post('/api/v1/admin/auth-sources/staff/accounts',headers=headers,json={
         'username':'employee','name':'测试员工','password':PASSWORD}).status_code==200
-    tx=transaction(client)
-    assert submit(client,tx).status_code==303
+    tx=transaction(client,desktop=True)
+    assert submit(client,tx).status_code==200
 
 
 def test_native_form_origin_policy_and_csrf(local_auth):
     client,app,settings,headers,source,account=local_auth
     enable(local_auth)
-    tx=transaction(client)
+    tx=transaction(client,desktop=True)
     assert client.get(tx['form_url']).headers['referrer-policy']=='strict-origin'
     for origin in ('null','https://other.example'):
         response=client.post(tx['form_url'],headers={'Origin':origin},data={
@@ -115,7 +127,7 @@ def test_native_form_origin_policy_and_csrf(local_auth):
         'state':tx['state'],'username':'employee','password':'wrong'})
     assert response.status_code==401 and response.headers['referrer-policy']=='strict-origin'
     assert client.post(tx['form_url'],headers={'Origin':settings.origin},data={
-        'state':tx['state'],'username':'employee','password':PASSWORD},follow_redirects=False).status_code==303
+        'state':tx['state'],'username':'employee','password':PASSWORD},follow_redirects=False).status_code==200
     assert client.get('/app').headers['referrer-policy']=='no-referrer'
 
 
@@ -143,9 +155,10 @@ def test_reset_revokes_sessions_and_pending_handoff(local_auth):
     assert changed.status_code==200,changed.text
     assert client.get('/api/v1/me',headers=employee_headers).status_code==401
     assert exchange(client,pending).status_code==409
-    tx=transaction(client)
+    tx=transaction(client,desktop=True)
     assert submit(client,tx).status_code==401
-    assert submit(client,tx,password='replacement password 456').status_code==303
+    assert submit(client,tx,password='replacement password 456').status_code==200
+    assert exchange(client,tx).status_code==200
     assert save_account(local_auth,account,password='another replacement').status_code==409
 
 
@@ -189,9 +202,12 @@ def test_browser_binding_cancel_and_one_use_desktop_handoff(local_auth):
 
 def test_admin_account_password_requires_founder(local_auth):
     client,app,settings,headers,source,account=local_auth
+    enable(local_auth)
     assert client.put('/api/v1/admin/members/'+account['id'],headers=headers,json={'revision':1,'role':'admin'}).status_code==200
     account=client.get('/api/v1/admin/auth-sources/staff/accounts',headers=headers).json()['items'][0]
-    token=app.state.auth.session(account['id'],'web')['access_token']
+    assert submit(client,transaction(client)).status_code==303
+    assert client.get('/api/v1/me').json()['member']['role']=='admin'
+    token=client.cookies['cowork_session']
     assert client.put('/api/v1/admin/auth-sources/staff/accounts/'+account['id'],headers={'Authorization':'Bearer '+token},json={**account,'password':'replacement password 456'}).status_code==403
     assert save_account(local_auth,account,password='replacement password 456').status_code==200
 

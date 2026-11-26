@@ -30,7 +30,7 @@ def main():
                 with app.state.database.transaction() as db:
                     for kind, name in [("owner", "王晨"), ("member", "李明"), ("admin", "陈宁")]:
                         db.add(Member(id=people[kind], name=name, email=kind+"@example.invalid", provider_id="fixture", subject=kind,
-                                      role="admin" if kind == "owner" else "member"))
+                                      role="admin" if kind in {"owner", "admin"} else "member"))
                 service = app.state.team_spaces
                 def command(person, action, **payload):
                     return service.execute(people[person], app.state.space_id if hasattr(app.state, "space_id") else "", action,

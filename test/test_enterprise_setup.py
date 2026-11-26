@@ -123,7 +123,7 @@ def test_disabled_admin_cannot_login(server):
     assert client.post('/api/v1/auth/administrator',json={'username':'admin','password':'unique administrator password'}).status_code == 401
 
 
-def test_only_founder_can_authorize_another_administrator(server):
+def test_only_founder_can_authorize_another_administrator_and_demote_web_sessions(server):
     client, app, settings = server
     assert create_admin(client, settings).status_code == 200
     founder=client.get('/api/v1/me').json()['member']['id']
@@ -133,15 +133,87 @@ def test_only_founder_can_authorize_another_administrator(server):
         db.add_all([member,another]);db.flush()
         member_id,another_id=member.id,another.id
     payload={'revision':1,'role':'admin'}
-    session=app.state.auth.session(member_id,'web')
-    headers={'Authorization':'Bearer '+session['access_token']}
+    desktop=app.state.auth.session(member_id,'desktop')
+    headers={'Authorization':'Bearer '+desktop['access_token']}
     assert client.put('/api/v1/admin/members/'+member_id,json=payload,headers=headers).status_code==403
     csrf={'X-CSRF-Token':client.cookies['cowork_csrf']}
     assert client.put('/api/v1/admin/members/'+member_id,json=payload,headers=csrf).status_code==200
+    web=app.state.auth.session(member_id,'web')
+    web_headers={'Authorization':'Bearer '+web['access_token']}
+    assert client.get('/api/v1/me',headers=web_headers).json()['member']['role']=='admin'
     assert client.put('/api/v1/admin/members/'+another_id,json=payload,headers=headers).status_code==403
     assert client.put('/api/v1/admin/members/'+founder,json={'revision':1,'enabled':False},headers=headers).status_code==409
     assert client.put('/api/v1/admin/members/'+member_id,json={'revision':2,'role':'member'},headers=csrf).status_code==200
+    assert client.get('/api/v1/me',headers=web_headers).status_code==401
+    assert client.get('/api/v1/me',headers=headers).json()['member']['role']=='member'
+    assert client.put('/api/v1/admin/members/'+member_id,json={'revision':3,'role':'admin'},headers=csrf).status_code==200
+    assert client.get('/api/v1/me',headers=web_headers).status_code==401
     assert create_admin(client,settings).status_code==409
+
+
+def test_existing_employee_web_session_is_rejected_as_cookie_and_bearer(server):
+    from web.platform.server.database import LoginSession
+    from web.platform.server.security import digest
+    client, app, _ = server
+    with app.state.database.transaction() as db:
+        member = Member(provider_id='legacy', subject='employee', name='员工')
+        db.add(member)
+        db.flush()
+        db.add(LoginSession(token_hash=digest('previous-web-token'), member_id=member.id,
+                            kind='web', expires_at=time.time() + 60))
+    assert client.get('/api/v1/me', headers={'Cookie':'cowork_session=previous-web-token'}).status_code == 401
+    assert client.get('/api/v1/me', headers={'Authorization':'Bearer previous-web-token'}).status_code == 401
+
+
+@pytest.mark.parametrize("owner_state", ["unconfigured", "disabled", "active"])
+def test_legacy_role_changes_require_an_explicit_enabled_super_admin(tmp_path, owner_state):
+    from web.platform.server.database import DatabaseAccount
+    settings = Settings(database_url='sqlite:///' + str(tmp_path / 'db.sqlite'), data_dir=tmp_path,
+                        platform_id='legacy-roles', platform_name='旧版平台', public_url='http://localhost',
+                        encryption_key=Fernet.generate_key().decode(), development=True,
+                        bootstrap_provider='' if owner_state == 'unconfigured' else 'staff', bootstrap_subject='corporate-owner')
+    app = create_app(settings)
+    source = {'id': 'staff', 'name': '员工账号', 'mode': 'database', 'config': {}, 'secrets': {}, 'enabled': True}
+    with TestClient(app, base_url='http://localhost') as client:
+        auth = app.state.auth
+        auth.save_source(source)
+        with app.state.database.transaction() as db:
+            delegate = Member(provider_id='staff', subject='delegate', name='平台管理员', role='admin')
+            owner = Member(provider_id='staff', subject='corporate-owner', name='企业账号', role='admin',
+                           enabled=owner_state != 'disabled')
+            employee = Member(provider_id='staff', subject='employee', name='员工')
+            db.add_all([delegate, owner, employee])
+            db.flush()
+            db.add(DatabaseAccount(member_id=owner.id, provider_id='staff', username='owner.account',
+                                   password_hash='unused-test-hash', salt='unused-test-salt'))
+        delegated = {'Authorization': 'Bearer ' + auth.session(delegate.id, 'web')['access_token']}
+        assert client.get('/api/v1/me', headers=delegated).json()['can_assign_admin'] is False
+        member_list = client.get('/api/v1/admin/members', headers=delegated).json()['items']
+        assert [item['id'] for item in member_list if item['is_super_admin']] == ([owner.id] if owner_state == 'active' else [])
+        member_api = '/api/v1/admin/members/'
+        denied = client.put(member_api + employee.id, headers=delegated, json={'revision': 1, 'role': 'admin'})
+        assert denied.status_code == 403
+        assert denied.json()['error']['code'] == ('founder_required' if owner_state == 'active' else 'super_admin_unavailable')
+        assert client.put(member_api + employee.id, headers=delegated, json={'revision': 1, 'enabled': True}).status_code == 200
+        assert client.put('/api/v1/admin/auth-sources/other', headers=delegated,
+                          json={**source, 'name': '另一认证来源'}).status_code == 200
+        if owner_state != 'unconfigured':
+            protected_source = client.put('/api/v1/admin/auth-sources/staff', headers=delegated,
+                                          json={**source, 'revision': 1, 'enabled': False})
+            assert protected_source.status_code == 403
+            protected_password = client.put('/api/v1/admin/auth-sources/staff/accounts/' + owner.id, headers=delegated,
+                json={'revision': 1, 'member_revision': 1, 'name': '企业账号', 'password': 'another password'})
+            assert protected_password.status_code == 403
+        if owner_state == 'active':
+            super_header = {'Authorization': 'Bearer ' + auth.session(owner.id, 'web')['access_token']}
+            me = client.get('/api/v1/me', headers=super_header).json()
+            assert me['can_assign_admin'] is True and me['can_use_team_spaces'] is True
+            assert client.put(member_api + owner.id, headers=delegated,
+                              json={'revision': 1, 'enabled': False}).status_code == 409
+            assert client.put(member_api + employee.id, headers=super_header,
+                              json={'revision': 2, 'role': 'admin'}).status_code == 200
+            assert client.put(member_api + employee.id, headers=super_header,
+                              json={'revision': 3, 'role': 'member'}).status_code == 200
 
 
 def test_legacy_bootstrap_cannot_grant_admin_after_setup(server):

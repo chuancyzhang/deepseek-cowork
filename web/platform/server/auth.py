@@ -12,8 +12,9 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from .config import service_url
-from .database import AuthSource, Installation, LoginEntry, LoginSession, LoginTransaction, Member, Platform
+from .database import AuthSource, Installation, LocalAdministrator, LoginEntry, LoginSession, LoginTransaction, Member, Platform
 from .database_accounts import DatabaseAccounts
+from .management import configured_bootstrap_admin
 from .security import PlatformError, challenge, digest, equal, token
 
 log = logging.getLogger(__name__)
@@ -116,12 +117,19 @@ def oauth_compatibility_preset(base_url):
 class Authentication:
     def __init__(self, settings, database, vault, client):
         self.settings, self.database, self.vault, self.client = settings, database, vault, client
-        self.accounts = DatabaseAccounts(database)
+        self.accounts = DatabaseAccounts(database, settings)
 
     def public_sources(self):
         with self.database.transaction() as db:
             return [{"id": s.id, "name": s.name, "mode": s.mode, "verified": s.verified_revision == s.revision}
                     for s in db.scalars(select(AuthSource).where(AuthSource.enabled).order_by(AuthSource.name))]
+
+    def protect_bootstrap_source(self, db, source_id, actor):
+        if not actor or source_id != self.settings.bootstrap_provider or db.get(LocalAdministrator, 1):
+            return
+        owner = configured_bootstrap_admin(db, self.settings)
+        if owner is not None and (actor != owner.id or not owner.enabled):
+            raise PlatformError("founder_required", "此认证来源用于超级管理员登录，仅超级管理员可修改。", 403)
 
     def save_source(self, payload, *, actor="", bootstrap=False):
         source_id = payload.get("id", "")
@@ -131,6 +139,7 @@ class Authentication:
             raise PlatformError("invalid_source", "请填写 1–80 字的认证名称。")
         with self.database.transaction() as db:
             db.scalar(select(Platform).where(Platform.id == 1).with_for_update())
+            self.protect_bootstrap_source(db, source_id, actor)
             source = db.get(AuthSource, source_id)
             if source and payload.get("revision") != source.revision:
                 raise PlatformError("conflict", "认证配置已被其他操作修改，请刷新核对。", 409)
@@ -161,6 +170,7 @@ class Authentication:
     def delete_source(self, source_id, revision, *, actor):
         with self.database.transaction() as db:
             db.scalar(select(Platform).where(Platform.id == 1).with_for_update())
+            self.protect_bootstrap_source(db, source_id, actor)
             source = db.get(AuthSource, source_id)
             if source is None:
                 raise PlatformError("not_found", "认证来源不存在，请刷新列表。", 404)
@@ -409,17 +419,23 @@ class Authentication:
                     raise
 
     def session(self, member_id, kind, *, expected_revision=None):
+        with self.database.transaction() as db:
+            return self._issue_session(db, member_id, kind, expected_revision=expected_revision)
+
+    def _issue_session(self, db, member_id, kind, *, expected_revision=None):
+        member = db.scalar(select(Member).where(Member.id == member_id).with_for_update())
+        if not member or not member.enabled:
+            raise PlatformError("member_disabled", "此成员当前不可用。", 403)
+        if expected_revision is not None and member.revision != expected_revision:
+            raise PlatformError("account_changed", "登录期间账号或密码已变更，请重新登录。", 409)
+        if kind == "web" and member.role != "admin":
+            log.info("login.web_denied member=%s", member_id)
+            raise PlatformError("web_admin_required", "网页版仅供平台管理员登录。员工请在 Cowork 客户端登录企业账号。", 403)
         session_token, csrf = token(), token()
         expires_at = time.time() + self.settings.session_seconds
-        with self.database.transaction() as db:
-            member = db.scalar(select(Member).where(Member.id == member_id).with_for_update())
-            if not member or not member.enabled:
-                raise PlatformError("member_disabled", "此成员当前不可用。", 403)
-            if expected_revision is not None and member.revision != expected_revision:
-                raise PlatformError("account_changed", "登录期间账号或密码已变更，请重新登录。", 409)
-            db.add(LoginSession(token_hash=digest(session_token), member_id=member_id, kind=kind,
-                                csrf_hash=digest(csrf), expires_at=expires_at))
-            self.database.audit(db, "login.completed", member_id=member_id)
+        db.add(LoginSession(token_hash=digest(session_token), member_id=member_id, kind=kind,
+                            csrf_hash=digest(csrf), expires_at=expires_at))
+        self.database.audit(db, "login.completed", member_id=member_id)
         return {"access_token": session_token, "csrf_token": csrf, "expires_at": expires_at}
 
     async def callback(self, source_id, state, code, cookies, upstream_error=False, credentials=None):
@@ -447,23 +463,25 @@ class Authentication:
             else:
                 raise PlatformError("invalid_login", "登录方式不匹配。")
             member_id = self.register(snapshot, identity)
-            handoff = token()
+            test_actor = snapshot.get("test_actor", "")
+            member_revision = identity.get("_member_revision")
             with self.database.transaction() as db:
-                tx = db.get(LoginTransaction, tx_id)
-                if tx.status != "exchanging" or tx.expires_at <= time.time():
+                # Lock the account before the login transaction, matching password resets.
+                web_session = None
+                if mode == "web" and not test_actor:
+                    web_session = self._issue_session(db, member_id, "web", expected_revision=member_revision)
+                tx = db.scalar(select(LoginTransaction).where(LoginTransaction.id == tx_id).with_for_update())
+                if tx is None or tx.status != "exchanging" or tx.expires_at <= time.time():
                     raise PlatformError("login_cancelled", "登录事务已取消或过期。", 409)
+                if web_session:
+                    tx.member_id, tx.status = member_id, "consumed"
+                    tx.transient_secret = self.vault.seal({})
+                    tx.source_snapshot = self.vault.seal({})
+                    return {"mode": "web", "transaction_id": tx_id, **web_session}
                 tx.member_id, tx.status = member_id, "ready"
-                tx.transient_secret = self.vault.seal({"handoff": handoff})
-                tx.source_snapshot = self.vault.seal({"test_actor": snapshot.get("test_actor", ""),
-                                                     "member_revision": identity.get("_member_revision")})
-            if snapshot.get("test_actor"):
-                return {"mode": "test", "transaction_id": tx_id}
-            if mode == "web":
-                with self.database.transaction() as db:
-                    db.execute(update(LoginTransaction).where(LoginTransaction.id == tx_id).values(status="consumed"))
-                return {"mode": "web", "transaction_id": tx_id,
-                        **self.session(member_id, "web", expected_revision=identity.get("_member_revision"))}
-            return {"mode": "desktop", "transaction_id": tx_id}
+                tx.transient_secret = self.vault.seal({"handoff": token()})
+                tx.source_snapshot = self.vault.seal({"test_actor": test_actor, "member_revision": member_revision})
+            return {"mode": "test" if test_actor else "desktop", "transaction_id": tx_id}
         except Exception as exc:
             reason = exc.code if isinstance(exc, PlatformError) else "auth_internal_failed"
             transient["attempts"] = transient.get("attempts", 0) + 1

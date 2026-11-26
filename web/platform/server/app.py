@@ -25,7 +25,7 @@ from .chat_audit import ChatAudit, chat_audit_router
 from .config import Settings
 from .database import (AuditEvent, AuthSource, ClientRelease, Database, LoginSession, LoginTransaction,
                        LocalAdministrator, LoginEntry, Member, Model, Platform, Question)
-from .management import Management, member_view, model_view
+from .management import Management, member_view, model_view, super_admin_id
 from .releases import Releases, public_release, desktop_manifest, normalize_report
 from .security import PlatformError, Vault, digest
 from .team_spaces import TeamSpaces
@@ -301,7 +301,7 @@ def create_app(settings=None, *, transport=None):
                 except PlatformError:
                     return HTMLResponse("<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>登录未完成</title>"
                         "<h1>登录未完成</h1><p>本次登录尝试已结束。请返回客户端重新登录，或联系管理员检查账号与认证配置。</p></html>", status_code=401)
-            if exc.code in {"account_locked", "account_changed", "member_disabled", "source_changed", "source_disabled"}:
+            if exc.code in {"account_locked", "account_changed", "member_disabled", "source_changed", "source_disabled", "web_admin_required"}:
                 return HTMLResponse("<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>登录未完成</title>"
                     "<h1>登录未完成</h1><p>" + html.escape(exc.message) + "</p><p>客户端输入和本机历史仍保留。"
                     "请按提示处理后返回客户端重新登录。</p><a href='" + html.escape(settings.public_url + "/app", quote=True)
@@ -342,7 +342,7 @@ def create_app(settings=None, *, transport=None):
         user = principal(request)
         with database.transaction() as db:
             founder = db.get(LocalAdministrator, 1)
-            can_assign_admin = user["role"] == "admin" and (not founder or founder.member_id == user["id"])
+            can_assign_admin = user["id"] == super_admin_id(db, settings, founder)
         return {"member": user, "models": management.models(user["id"]), "platform_id": settings.platform_id,
                 "can_assign_admin": can_assign_admin,
                 "can_use_team_spaces": not founder or founder.member_id != user["id"], "chat_audit_version": 1}
@@ -384,6 +384,12 @@ def create_app(settings=None, *, transport=None):
     async def update_model(model_id: str, request: Request):
         actor = principal(request, admin=True)
         return management.save_model(await read_json(request, 65536), actor["id"], model_id)
+
+    @app.put("/api/v1/admin/models/{model_id}/grants")
+    async def update_model_grants(model_id: str, request: Request):
+        actor = principal(request, admin=True)
+        payload = await read_json(request, 512 * 1024)
+        return await asyncio.to_thread(management.update_model_grants, model_id, payload, actor["id"])
 
     def upstream_parts(model):
         headers = {"Content-Type": "application/json"}

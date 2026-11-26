@@ -7,6 +7,7 @@ import time
 from sqlalchemy import delete, select, update
 
 from .database import AuthSource, DatabaseAccount, LocalAdministrator, LoginSession, LoginTransaction, Member, Platform, uid
+from .management import configured_bootstrap_admin
 from .security import PlatformError, equal, password_hash, token
 
 log = logging.getLogger(__name__)
@@ -19,8 +20,8 @@ def account_view(account, member):
 
 
 class DatabaseAccounts:
-    def __init__(self, database):
-        self.database = database
+    def __init__(self, database, settings):
+        self.database, self.settings = database, settings
         self.lock = threading.RLock()
 
     @staticmethod
@@ -57,6 +58,12 @@ class DatabaseAccounts:
                 founder = db.get(LocalAdministrator, 1)
                 if member.role == 'admin' and founder and founder.member_id != actor:
                     raise PlatformError('founder_required', '管理员账号的密码和状态只能由首位管理员管理。', 403)
+                legacy_owner = configured_bootstrap_admin(db, self.settings) if not founder and member.role == 'admin' else None
+                if legacy_owner and legacy_owner.id == member_id:
+                    if actor != member_id or not legacy_owner.enabled:
+                        raise PlatformError('founder_required', '超级管理员账号只能由本人管理。', 403)
+                    if not enabled:
+                        raise PlatformError('founder_required', '超级管理员账号不能停用。', 409)
                 if payload.get('revision') != account.revision or payload.get('member_revision') != member.revision:
                     raise PlatformError('conflict', '账号已被其他操作修改，请刷新后核对。', 409)
                 if payload.get('username', account.username) != account.username:

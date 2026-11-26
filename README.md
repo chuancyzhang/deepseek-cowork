@@ -1,6 +1,6 @@
 # DeepSeek Cowork
 
-[中文](README_CN.md) | [English](README.md) | [User guide](docs/user-guide.md) | [Technical guide](docs/technical-design.md)
+[中文](README_CN.md) | [English](README.md) | [User guide](docs/user-guide.md) | [Enterprise overview](docs/enterprise/README.md) | [Technical guide](docs/technical-design.md)
 
 DeepSeek Cowork is a local Windows desktop agent workspace that brings conversations, project files, tool execution, specialized capabilities, and deliverables into one workflow. Describe a goal, provide source material, follow the execution, and edit the resulting files.
 
@@ -69,8 +69,9 @@ Packaging produces `desktop/out/DeepSeek Cowork-win32-x64`, a distributable ZIP,
 | Goal | Entry point |
 | --- | --- |
 | Complete tasks and use settings and capabilities | [User guide](docs/user-guide.md) |
+| Understand enterprise features, access, audit, and updates | [Enterprise overview](docs/enterprise/README.md) |
 | Understand the architecture, develop Skills, test, build, and release | [Technical guide](docs/technical-design.md) |
-| Deploy and administer the enterprise platform | [Enterprise platform](web/platform/README.md) |
+| Deploy and administer the enterprise platform | [Deployment guide](docs/enterprise/deployment.md) · [Administrator guide](docs/enterprise/admin-guide.md) |
 | Review version changes | [Release history](docs/releases/index.md) |
 
 Detailed guides are maintained in Chinese.

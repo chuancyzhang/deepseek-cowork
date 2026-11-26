@@ -65,6 +65,48 @@ def test_deployment_snapshot_excludes_credentials_and_changes_with_source(tmp_pa
     assert source_digest(changed) != source_digest(original)
 
 
+def test_offline_package_includes_checksummed_deployment_and_admin_guides(tmp_path, monkeypatch):
+    import json
+    import zipfile
+    from scripts import package_enterprise as packager
+
+    guides = tmp_path / "canonical-guides"
+    guides.mkdir()
+    (guides / "deployment.md").write_text(
+        "# 部署指南\n[管理](admin-guide.md#企业能力)\n[本页](#部署指南)\n"
+        "[客户端](../user-guide.md#登录)\n![截图](../images/admin.png)\n", encoding="utf-8")
+    (guides / "admin-guide.md").write_text(
+        "# 管理员手册\n[启动](./deployment.md#启动)\n[参考](https://example.com/help)\n", encoding="utf-8")
+    monkeypatch.setattr(packager, "ENTERPRISE_DOCS", guides)
+
+    def fake_docker(*args, capture=False):
+        if args[0] == "save":
+            Path(args[2]).write_bytes(b"isolated enterprise images")
+        return "linux"
+
+    monkeypatch.setattr(packager, "docker", fake_docker)
+    monkeypatch.setattr(packager, "audit_image", lambda *args: ("sha256:1111", 5))
+    monkeypatch.setattr(packager, "inspect_image", lambda *args: {"Id": "sha256:2222"})
+    output, archive = tmp_path / "output", tmp_path / "enterprise.zip"
+    packager.package(output, archive)
+    packager.validate_destination(output)
+    readme = (output / "README.md").read_text(encoding="utf-8")
+    assert "(DEPLOYMENT.md)" in readme and "(ADMIN_GUIDE.md)" in readme
+    deployment = (output / "DEPLOYMENT.md").read_text(encoding="utf-8")
+    assert "[管理](ADMIN_GUIDE.md#企业能力)" in deployment
+    assert "[本页](#部署指南)" in deployment
+    assert "客户端（仓库文档）" in deployment and "images/admin.png" not in deployment
+    admin = (output / "ADMIN_GUIDE.md").read_text(encoding="utf-8")
+    assert "[启动](DEPLOYMENT.md#启动)" in admin and "[参考](https://example.com/help)" in admin
+    manifest = json.loads((output / "deployment.json").read_text(encoding="utf-8"))
+    checksums = (output / "SHA256SUMS").read_text(encoding="utf-8")
+    with zipfile.ZipFile(archive) as bundle:
+        for name in ("README.md", "DEPLOYMENT.md", "ADMIN_GUIDE.md"):
+            assert manifest["files"][name] == packager.sha256(output / name)
+            assert f'{manifest["files"][name]}  {name}\n' in checksums
+            assert bundle.read("enterprise-docker/" + name) == (output / name).read_bytes()
+
+
 def test_intranet_http_is_explicit_and_uses_the_configured_origin(tmp_path, monkeypatch):
     from web.platform.server.config import Settings
 

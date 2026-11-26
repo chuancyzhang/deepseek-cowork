@@ -1,6 +1,6 @@
 # DeepSeek Cowork
 
-[中文](README_CN.md) | [English](README.md) | [用户手册](docs/user-guide.md) | [技术文档](docs/technical-design.md)
+[中文](README_CN.md) | [English](README.md) | [用户手册](docs/user-guide.md) | [企业版介绍](docs/enterprise/README.md) | [技术文档](docs/technical-design.md)
 
 DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，将对话、项目文件、工具执行、专业能力和交付物放在同一工作流程中。你可以描述目标、提供资料、查看执行过程，并继续编辑生成的文件。
 
@@ -71,8 +71,9 @@ Mac／统信的新宿主发行流程尚待实现，必须在目标系统及 CPU 
 | 目标 | 入口 |
 | --- | --- |
 | 安装后完成任务、使用设置和各项能力 | [用户手册](docs/user-guide.md) |
+| 了解企业版的功能、权限、审计和更新 | [企业版介绍](docs/enterprise/README.md) |
 | 理解架构、开发能力、运行测试和构建发布 | [技术文档](docs/technical-design.md) |
-| 部署与管理企业中心 | [企业平台说明](web/platform/README.md) |
+| 部署与管理企业中心 | [部署指南](docs/enterprise/deployment.md) · [管理员指南](docs/enterprise/admin-guide.md) |
 | 查看已有版本变化 | [发布记录](docs/releases/index.md) |
 
 ## 许可证

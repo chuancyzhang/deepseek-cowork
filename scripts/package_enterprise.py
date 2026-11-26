@@ -11,15 +11,19 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from core.app_version import APP_VERSION
 
 PLATFORM = ROOT / "web/platform"
+ENTERPRISE_DOCS = ROOT / "docs/enterprise"
 FILES = ("Dockerfile", "Dockerfile.dockerignore", "requirements.txt", "compose.local.yaml",
          "compose.yaml", "compose.http.yaml", "Caddyfile", "start-local.ps1", "start.sh", ".env.example", "README.md")
-GENERATED = {"images.tar", "deployment.json", "SHA256SUMS", "DEPLOYMENT.md"}
+BUNDLE_GUIDES = {"deployment.md": "DEPLOYMENT.md", "admin-guide.md": "ADMIN_GUIDE.md"}
+GENERATED = {"images.tar", "deployment.json", "SHA256SUMS", *BUNDLE_GUIDES.values()}
+MARKDOWN_LINK = re.compile(r'(?P<image>!?)\[(?P<label>[^\]\r\n]*)\]\((?P<target><[^>\r\n]+>|[^()\s]+)(?P<title> +"[^"\r\n]*")?\)')
 
 
 def sha256(path):
@@ -49,6 +53,31 @@ def copy_source(source, destination):
 
 def source_digest(hashes):
     return hashlib.sha256(json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def read_bundle_guides(source_files):
+    """Keep links that are usable when the deployment package stands alone."""
+    guides = {ENTERPRISE_DOCS / source: name for source, name in BUNDLE_GUIDES.items()}
+    for path in guides:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"企业交付指南不是常规文件：{path}")
+    packaged_links = {(PLATFORM / name).resolve(): name for name in source_files}
+    packaged_links.update({path.resolve(): name for path, name in guides.items()})
+
+    def render(path):
+        def rewrite(match):
+            target = urlsplit(match["target"].strip("<>"))
+            if target.scheme or target.netloc or not target.path:
+                return match[0]
+            bundled = packaged_links.get((path.parent / unquote(target.path)).resolve())
+            if bundled:
+                link = urlunsplit(("", "", bundled, target.query, target.fragment))
+                return f'{match["image"]}[{match["label"]}]({link}{match["title"] or ""})'
+            return "" if match["image"] else f'{match["label"]}（仓库文档）'
+
+        return MARKDOWN_LINK.sub(rewrite, path.read_text(encoding="utf-8"))
+
+    return {name: render(path) for path, name in guides.items()}
 
 
 def docker(*args, capture=False):
@@ -122,6 +151,7 @@ def package(destination, archive):
         bundle = work / "enterprise-docker"
         bundle.mkdir()
         hashes = copy_source(PLATFORM, bundle)
+        guides = read_bundle_guides(hashes)
         digest = source_digest(hashes)
         tag = f"cowork-enterprise:{APP_VERSION}-{digest[:12]}"
         print(f"构建企业中心 {APP_VERSION} source={digest}", flush=True)
@@ -134,12 +164,9 @@ def package(destination, archive):
         database_tag = "cowork-postgres:17-" + database["Id"].split(":")[1][:12]
         docker("tag", database["Id"], database_tag)
         docker("save", "--output", str(bundle / "images.tar"), tag, database_tag)
-        # The deployment is standalone; repository-relative documentation links
-        # are plain references here, not broken links to absent desktop files.
-        guide = (bundle / "README.md").read_text(encoding="utf-8")
-        guide = re.sub(r"!\[[^\]]*\]\(\.\./[^)]+\)\n?", "", guide)
-        guide = re.sub(r"\[([^\]]*)\]\(\.\./[^)]+\)", r"\1（仓库文档）", guide)
-        (bundle / "DEPLOYMENT.md").write_text(guide, encoding="utf-8")
+        for name, content in guides.items():
+            (bundle / name).write_text(content, encoding="utf-8")
+            hashes[name] = sha256(bundle / name)
         (bundle / "README.md").write_text(f"""# Cowork 企业中心离线部署包
 
 版本：{APP_VERSION}。包含已核验的 Linux amd64 服务及 PostgreSQL 镜像，仅支持 Electron 企业客户端分发。
@@ -155,11 +182,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\\start-local.ps1
 升级已有中心时，把原 `.env.local` 原样复制到新目录；停止原平台并备份数据库及文件卷后再启动。
 已有数据却缺少原配置时脚本会停止，不会生成新密钥。原业务卷保留，旧 Qt 发布停止分发。
 
-详细部署、升级、备份和客户端分发步骤见 [部署说明](DEPLOYMENT.md)。其中仓库构建命令仅在源码仓库中执行。
+详细部署、升级及备份步骤见[部署指南](DEPLOYMENT.md)。其中仓库构建命令仅在源码仓库中执行。
+账号、模型、企业能力、审计和客户端分发操作见[管理员使用手册](ADMIN_GUIDE.md)。
 `deployment.json` 记录本包版本、源码摘要和镜像 ID，`SHA256SUMS` 记录文件摘要。
 """, encoding="utf-8")
         hashes["README.md"] = sha256(bundle / "README.md")
-        hashes["DEPLOYMENT.md"] = sha256(bundle / "DEPLOYMENT.md")
         hashes["images.tar"] = sha256(bundle / "images.tar")
         manifest = {"schema_version": 1, "version": APP_VERSION, "source_sha256": digest,
                     "target": "linux-amd64", "database_schema": database_schema,

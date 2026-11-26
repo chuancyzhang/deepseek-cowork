@@ -17,8 +17,12 @@ from core.app_version import APP_VERSION
 
 CURRENT_DOCS = tuple(ROOT / name for name in (
     "README.md", "README_CN.md", "docs/user-guide.md",
-    "docs/technical-design.md", "web/platform/README.md",
+    "docs/technical-design.md", "docs/enterprise/README.md",
+    "docs/enterprise/employee-guide.md", "docs/enterprise/admin-guide.md",
+    "docs/enterprise/deployment.md",
 ))
+
+COMPATIBILITY_DOCS = ("web/platform/README.md",)
 
 MAINTENANCE_DOCS = (
     "AGENTS.md", "desktop/sdk/README.md",
@@ -192,8 +196,10 @@ def validate_protected_diff() -> list[str]:
 
 
 def markdown_files() -> list[Path]:
-    files = [path for path in CURRENT_DOCS if path.is_file() and path.parent != ROOT / "docs"]
-    files.extend(sorted((ROOT / "docs").rglob("*.md")))
+    docs_dir = ROOT / "docs"
+    files = [path for path in CURRENT_DOCS if path.is_file() and not path.is_relative_to(docs_dir)]
+    files.extend(sorted(docs_dir.rglob("*.md")))
+    files.extend(ROOT / name for name in COMPATIBILITY_DOCS if (ROOT / name).is_file())
     files.extend(ROOT / name for name in MAINTENANCE_DOCS)
     return files
 

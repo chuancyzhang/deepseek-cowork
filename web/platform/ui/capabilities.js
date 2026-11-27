@@ -21,9 +21,9 @@ async function capabilityRoute(route) {
 async function capabilityList(kind) {
   const {items} = await api(capabilityApi);
   heading("企业能力");
-  content.querySelector(".page-title").append(button(capabilityUsesZip(kind) ? "上传 ZIP" : "新建 MCP",
+  content.querySelector(".page-title").append(button(capabilityUsesZip(kind) ? "上传 " + capabilityKinds[kind] + " ZIP" : "添加或导入 MCP",
     () => navigate(capabilityPath + kind + "/new"), {primary:true}));
-  content.insertAdjacentHTML("beforeend", `<div class="space-tabs" aria-label="企业能力类型">
+  content.querySelector(".page-title > div").insertAdjacentHTML("beforeend", `<div class="space-tabs" aria-label="企业能力类型">
     ${Object.entries(capabilityKinds).map(([key, label]) =>
       `<a data-route href="${base + capabilityPath + key}" ${kind === key ? 'aria-current="page"' : ""}>${label}</a>`).join("")}
     </div>`);
@@ -74,7 +74,7 @@ function capabilitySummary(item, catalog, path) {
     }
   }
   return top + summary + '<div class="admin-record-actions">' +
-    adminViewLink(path + "/grants", "分配员工") + adminViewLink(path, item.enabled && !item.draft_pending ? "配置" : "检查与发布") + '</div>';
+    adminViewLink(path + "/grants", "分配部门或成员") + adminViewLink(path, item.enabled && !item.draft_pending ? "配置" : "检查与发布") + '</div>';
 }
 
 function capabilityUpload(kind, item) {
@@ -140,7 +140,8 @@ function capabilityUpload(kind, item) {
 }
 
 function capabilityGrantLabel(item) {
-  return item.all_members ? "全部成员" : item.member_ids.length ? `已选 ${item.member_ids.length} 人` : "未分配";
+  if (item.all_members) return "全部成员";
+  return [item.department_ids.length && item.department_ids.length+" 个部门",item.member_ids.length && item.member_ids.length+" 位个人"].filter(Boolean).join(" + ") || "未分配";
 }
 
 function capabilityFields(kind, item, catalog, models) {
@@ -193,6 +194,28 @@ function capabilityConfig(kind, data, form) {
     skill_ids:values.getAll("skill_ids"), mcp_ids:values.getAll("mcp_ids")};
 }
 
+function readMcpDefinition(raw) {
+  const map = value => value && typeof value === "object" && !Array.isArray(value);
+  let data;
+  try { data=JSON.parse(raw.replace(/^\uFEFF/,"")); } catch { throw new Error("JSON 格式有误，请检查文件。"); }
+  if(!map(data))throw new Error("请选择包含 MCP 服务配置的 JSON 文件。");
+  let name=data.name, config=data.config, description=data.description||"";
+  if(map(data.mcpServers)){
+    const servers=Object.entries(data.mcpServers);
+    if(servers.length!==1)throw new Error("每次导入一个服务，请在 mcpServers 中保留单个条目。");
+    [name,config]=servers[0];
+  }
+  if(!map(config)||!name||typeof name!=="string"||typeof config.url!=="string")throw new Error("配置需要服务名称和 Streamable HTTP 服务地址。");
+  const allowed=["url","transport","type","auth_type","credential_variable","allowed_tools"];
+  if(Object.keys(config).some(key=>!allowed.includes(key)))throw new Error("配置含不支持的字段。请保留 HTTP 服务地址、工具范围和认证方式，访问令牌由员工在客户端填写。");
+  if(!["streamable_http","streamable-http","http"].includes(config.transport||config.type||"streamable_http"))throw new Error("企业 MCP 仅支持 Streamable HTTP 服务。");
+  if(!["none","bearer"].includes(config.auth_type||"none") || typeof description!=="string" ||
+     (config.credential_variable!==undefined && typeof config.credential_variable!=="string") ||
+     (config.allowed_tools!==undefined && (!Array.isArray(config.allowed_tools)||config.allowed_tools.some(v=>typeof v!=="string"))))throw new Error("认证方式或工具列表格式有误。");
+  return {name,description,url:config.url,auth_type:config.auth_type||"none",credential_variable:config.credential_variable||"",
+    allowed_tools:(config.allowed_tools||[]).join("\n")};
+}
+
 async function capabilityEditor(kind, item) {
   const [catalog, models] = kind === "expert"
     ? await Promise.all([api(capabilityApi), api("/admin/models")]) : [{items:[]}, {items:[]}];
@@ -214,6 +237,7 @@ async function capabilityEditor(kind, item) {
       <ul>${pending.map(skill => `<li><a data-route href="${base}${capabilityPath}skill/${esc(skill.id)}">${esc(skill.name)}</a></li>`).join("")}</ul></div>`);
   }
   content.insertAdjacentHTML("beforeend", `<form class="form" id="capability-form">
+    ${kind==="mcp"&&!item?'<label>导入 MCP 配置<input id="mcp-file" type="file" accept=".json,application/json"><span class="help">可选择单个服务的 mcpServers JSON，或直接在下方填写。</span></label>':""}
     <label>名称<input required name="name" maxlength="128" value="${esc(item?.name)}"></label>
     <label>说明<input name="description" maxlength="2000" value="${esc(item?.description)}"></label>
     ${capabilityFields(kind, item, catalog.items, models.items)}
@@ -228,6 +252,16 @@ async function capabilityEditor(kind, item) {
       document.getElementById("capability-credential").hidden = !bearer;
       form.elements.credential_variable.required = bearer;
     };
+    const file=form.querySelector("#mcp-file");
+    if(file) file.onchange=()=>action(async()=>{
+      const selected=file.files[0];if(!selected)return;
+      if(selected.size>65536)throw new Error("请选择不超过 64 KiB 的配置文件。");
+      const values=readMcpDefinition(await selected.text());
+      if(!form.isConnected)return;
+      for(const [key,value] of Object.entries(values))form.elements.namedItem(key).value=value;
+      updateCredential();form.elements.namedItem("name").dispatchEvent(new Event("input",{bubbles:true}));
+      message("已读入配置，核对后保存草稿。","success");
+    });
     form.elements.auth_type.addEventListener("change", updateCredential);
     updateCredential();
   }
@@ -265,7 +299,7 @@ async function capabilityEditor(kind, item) {
     if (item.enabled) addAction("disable", "停用", async () => {
       if (confirm("停用后员工不能继续使用此企业能力。确认停用？")) await mutate("disable", "企业能力已停用。");
     }, false, {danger:true});
-    content.insertAdjacentHTML("beforeend", `<p class="section"><a href="${base + page + "/" + esc(item.id)}/grants" data-route>分配员工</a></p>`);
+    content.insertAdjacentHTML("beforeend", `<p class="section"><a href="${base + page + "/" + esc(item.id)}/grants" data-route>分配部门或成员</a></p>`);
     if (item.versions.length) {
       content.insertAdjacentHTML("beforeend", `<details class="section"><summary>发布记录</summary>
         <ul>${item.versions.map(version => `<li>v${version.version} · ${esc(version.name)} · ${date(version.published_at)}</li>`).join("")}</ul></details>`);
@@ -294,14 +328,14 @@ async function capabilityEditor(kind, item) {
 }
 
 async function capabilityGrants(item) {
-  const {items} = await api("/admin/members");
-  heading("分配员工", item.name, capabilityPath + item.kind + "/" + item.id);
+  const [{items},units] = await Promise.all([api("/admin/members"),api("/admin/departments")]);
+  heading("分配部门或成员", item.name, capabilityPath + item.kind + "/" + item.id);
   content.querySelector(".page-title a").textContent = "返回能力配置";
-  const options = items.filter(member => member.enabled || item.member_ids.includes(member.id));
+  const options = items.filter(member => member.provider_id!=="__platform_admin__" && (member.enabled || item.member_ids.includes(member.id)));
   content.insertAdjacentHTML("beforeend", `<form class="form" id="capability-grants">
-    <label>使用范围<select name="scope"><option value="selected">指定成员</option>
+    <label>使用范围<select name="scope"><option value="selected">指定部门或成员</option>
     <option value="all" ${item.all_members ? "selected" : ""}>全部成员</option></select></label>
-    <div id="capability-members">
+    <div id="capability-members">${departmentChecks(units.items,item.department_ids)}
       <label>查找成员<input id="capability-member-search" placeholder="姓名或邮箱"></label>
       <div class="check-list">${options.map(member =>
         `<label data-candidate="${esc(member.name + " " + member.email)}"><input name="members" type="checkbox" value="${esc(member.id)}"
@@ -324,11 +358,12 @@ async function capabilityGrants(item) {
     return action(async () => {
       const all_members = form.elements.scope.value === "all";
       const member_ids = all_members ? [] : new FormData(form).getAll("members");
+      const department_ids = all_members ? [] : new FormData(form).getAll("department_ids");
       const fields = form.querySelectorAll("input,select,button");
       for (const field of fields) field.disabled = true;
       try {
         await api(capabilityApi + "/" + item.id + "/grant",
-          {method:"POST", body:{revision:item.revision, all_members, member_ids}});
+          {method:"POST", body:{revision:item.revision, all_members, member_ids, department_ids}});
         dirty = false;
         await render();
         message("授权已保存。", "success");

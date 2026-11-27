@@ -148,7 +148,7 @@ sh start.sh
 
 团队空间在 Cowork 桌面端提供计划、成员、资料、成果和动态。员工在桌面执行任务并选择发布内容。操作见[员工指南](employee-guide.md#共同完成任务)。
 
-`platform.schema_version` 记录已完成的数据库迁移。结构版本 5 增加企业能力及聊天审计表，保留成员、模型、团队空间、业务文件和 Electron 发布记录。结构版本 4 开始只支持 Electron 分发，旧 Qt 记录保留但停止分发。执行入口为：
+`platform.schema_version` 记录已完成的数据库迁移。结构版本 6 增加部门层级、员工归属及模型和能力的部门授权，保留原有个人授权。结构版本 5 增加企业能力及聊天审计表，保留成员、模型、团队空间、业务文件和 Electron 发布记录。结构版本 4 开始只支持 Electron 分发，旧 Qt 记录保留但停止分发。执行入口为：
 
 ```bash
 docker compose run --rm platform python -m server migrate

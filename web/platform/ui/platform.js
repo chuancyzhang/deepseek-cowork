@@ -44,7 +44,13 @@ async function action(work) {
   }
 }
 function button(label, callback, {primary=false,danger=false}={}) {const b=document.createElement("button"); b.type="button"; b.textContent=label; b.className=primary?"primary":danger?"danger":""; b.onclick=()=>action(callback); return b;}
-function heading(title, subtitle="", back="") {content.innerHTML=`<div class="page-title"><div><h1>${esc(title)}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:""}</div>${back?`<a href="${base+back}" data-route>返回列表</a>`:""}</div>`;}
+function heading(title, subtitle="", back="") {
+  const route=location.pathname.slice(base.length);
+  const topLevel=!back && /^\/app(?:\/(overview|members|models|capabilities(?:\/(?:skill|mcp|expert))?|audit(?:\/events)?|releases|settings))?\/?$/.test(route);
+  content.innerHTML=`<div class="page-title ${topLevel?"section-title":""}"><div>
+    <h1>${esc(title)}</h1>${subtitle?`<p>${esc(subtitle)}</p>`:""}</div>
+    ${back?`<a href="${base+back}" data-route>返回列表</a>`:""}</div>`;
+}
 function empty(text) {return `<div class="empty">${esc(text)}</div>`;}
 function watchForm(form) {const changed=event=>{if(!event.target.name?.startsWith("test_"))dirty=true;};form.addEventListener("input",changed);form.addEventListener("change",changed);}
 function adminSplit(list, summary){
@@ -69,10 +75,21 @@ window.addEventListener("beforeunload",event=>{if(dirty){event.preventDefault();
 document.addEventListener("click",event=>{const link=event.target.closest("a[data-route]");if(link){event.preventDefault();navigate(link.getAttribute("href").slice(base.length));}});
 window.addEventListener("popstate",()=>{if(dirty&&!confirm("有尚未保存的修改，确定离开？")){history.forward();return;}dirty=false;action(render);});
 function navigate(path){if(dirty&&!confirm("有尚未保存的修改，确定离开？"))return;dirty=false;history.pushState({},"",base+path);action(render);}
+const navIcons = {
+  "overview": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="5" rx="2"/><rect x="13" y="10" width="8" height="11" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/></svg>',
+  "members": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  "models": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>',
+  "capabilities": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>',
+  "audit": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+  "releases": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>',
+  "team-spaces": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+  "settings": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l-.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+};
 function updateChrome(){
   const nav = document.getElementById("navigation"), identity = document.getElementById("identity");
   identity.replaceChildren();
   nav.hidden = !me;
+  document.body.classList.toggle("signed-in", Boolean(me));
   if (!me) {
     nav.replaceChildren();
     return;
@@ -87,13 +104,14 @@ function updateChrome(){
     dirty = false;
     navigate("/app");
   }));
-  const active = location.pathname.slice(base.length).split("/")[2] || "members";
-  const links = [["members","成员"],["models","模型"],["capabilities","企业能力"],["audit","审计"],
-    ["releases","客户端发布"],["settings","设置"]];
-  nav.innerHTML = links.map(([key,label]) => {
-    const selected = active === key || (key === "settings" && ["sources", "team-spaces"].includes(active));
-    return `<a data-route ${selected?'class="active" aria-current="page"':""} href="${base}/app/${key}">${label}</a>`;
-  }).join("");
+  const active = location.pathname.slice(base.length).split("/")[2] || "overview";
+  const groups = [["工作台", [["overview","平台总览"]]], ["资源管理", [["members","成员与部门"],["models","企业模型"],["capabilities","企业能力"]]],
+    ["安全与交付", [["audit","合规审计"],["releases","客户端发布"],...(spaceEnabled()?[["team-spaces","团队空间"]]:[])]]];
+  const link = ([key,label]) => {
+    const current = active === key || (key === "settings" && active === "sources");
+    return `<a data-route href="${base}/app/${key}" title="${label}" ${current?'class="active" aria-current="page"':""}>${navIcons[key]}<span>${label}</span></a>`;
+  };
+  nav.innerHTML = groups.map(([name,links]) => `<div class="nav-group"><small>${name}</small>${links.map(link).join("")}</div>`).join("") + link(["settings","认证与系统设置"]);
 }
 async function login(){
   const setup=await api("/setup");
@@ -125,7 +143,7 @@ const memberRole = member => superMember(member)?"超级管理员":member.role==
 const memberAvatar = member => `<span class="admin-avatar" aria-hidden="true">${esc(Array.from(member.name||member.username||"员")[0])}</span>`;
 const memberSearch = () => content.querySelector("#member-search")?.value ?? new URLSearchParams(location.hash.slice(1)).get("member") ?? "";
 function memberPath(id="",panel="",query=memberSearch()){
-  return "/app/members"+(id?"/"+encodeURIComponent(id)+(panel?"/"+panel:""):"")+(query?"#"+new URLSearchParams({member:query}):"");
+  return "/app/members"+(id?"/"+encodeURIComponent(id)+(panel?"/"+panel:""):"")+(new URLSearchParams(location.search).has("department")?"?"+new URLSearchParams({department:new URLSearchParams(location.search).get("department")}):"")+(query?"#"+new URLSearchParams({member:query}):"");
 }
 const memberLink = (label,path,classes="button") => `<a class="${classes}" data-route href="${esc(base+path)}">${esc(label)}</a>`;
 const memberLabel = (member,source) => member.username || member.email || source?.name || (superMember(member)?"平台内置账号":"企业认证账号");
@@ -139,35 +157,77 @@ function focusAdminDetail(pane){
   });
 }
 
+function departmentPath(units,id) {
+  const path=[];
+  for(let unit=units.find(d=>d.id===id);unit;unit=units.find(d=>d.id===unit.parent_id)) path.unshift(unit.name);
+  return path.join(" / ");
+}
+function departmentOptions(units,selected="") {
+  return units.map(d=>[d.id,departmentPath(units,d.id)]).sort((a,b)=>a[1].localeCompare(b[1],"zh-CN"))
+    .map(([id,name])=>`<option value="${esc(id)}" ${selected===id?"selected":""}>${esc(name)}</option>`).join("");
+}
+function departmentChecks(units, selected) {
+  return `<fieldset><legend>按部门分配</legend><p class="help">包含下级部门。成员调动后，授权随归属更新。</p><div class="check-list">${units.map(d=>`<label><input type="checkbox" name="department_ids" value="${esc(d.id)}" ${selected.includes(d.id)?"checked":""}>${esc(departmentPath(units,d.id))}</label>`).join("")||"尚未创建部门。"}</div></fieldset>`;
+}
+async function createDepartment() {
+  const {items}=await api("/admin/departments");
+  heading("创建部门","","/app/members");
+  content.insertAdjacentHTML("beforeend",`<form class="form"><label>部门名称<input name="name" maxlength="80" required autofocus></label><label>上级部门<select name="parent_id"><option value="">无（一级部门）</option>${departmentOptions(items)}</select></label><div><button class="primary">创建部门</button></div></form>`);
+  const form=content.querySelector("form");watchForm(form);
+  form.onsubmit=e=>{e.preventDefault();action(async()=>{
+    const submit=form.querySelector("button");submit.disabled=true;
+    try {await api("/admin/departments",{method:"POST",body:formData(form)});dirty=false;navigate("/app/members");message("部门已创建。","success");}
+    finally{submit.disabled=false;}
+  });};
+}
 async function members(id="",panel=""){
-  const [catalog,models,settings]=await Promise.all([api("/admin/members"),api("/admin/models"),api("/admin/settings")]);
+  const [catalog,models,settings,{items:units}]=await Promise.all([api("/admin/members"),api("/admin/models"),api("/admin/settings"),api("/admin/departments")]);
+  const unitId=new URLSearchParams(location.search).get("department")||"";
+  const matchesUnit=member=>{
+    if(!unitId)return true;
+    if(unitId==="none")return !member.department_id;
+    let id=member.department_id;
+    while(id){if(id===unitId)return true;id=units.find(d=>d.id===id)?.parent_id;}
+    return false;
+  };
+  const candidates=catalog.items.filter(matchesUnit);
   const creating=id==="new";
-  const selected=creating?null:id?catalog.items.find(member=>member.id===id):catalog.items.find(member=>member.role!=="admin")||catalog.items[0];
+  const selected=creating?null:id?catalog.items.find(member=>member.id===id):candidates.find(member=>member.provider_id!=="__platform_admin__")||candidates[0];
   if(id&&!creating&&!selected)throw new Error("成员不存在，请返回列表。");
   const sources=new Map(settings.sources.map(source=>[source.id,source]));
   const dbSources=settings.sources.filter(source=>source.mode==="database");
   const source=sources.get(selected?.provider_id);
   const query=new URLSearchParams(location.hash.slice(1)).get("member")||"";
-  heading("成员", "");
+  heading("成员与部门");
+  content.querySelector(".page-title").append(button("创建部门",()=>navigate("/app/members/departments/new")));
   content.querySelector(".page-title").append(button("添加员工",()=>navigate(memberPath("new")),{primary:true}));
   content.insertAdjacentHTML("beforeend",`<div class="admin-split"><div class="admin-overview">
-    <label>查找成员<input id="member-search" type="search" placeholder="姓名、账号或邮箱" value="${esc(query)}"></label>
+    <div class="member-filters"><input aria-label="查找成员" id="member-search" type="search" placeholder="查找姓名、账号或邮箱" value="${esc(query)}"><select id="department-filter" aria-label="筛选部门"><option value="">全部部门</option><option value="none">未分部门</option>${departmentOptions(units)}</select></div>
     <div id="member-groups" class="admin-list" data-columns="two"></div>
   </div><aside class="admin-detail" aria-label="成员详情" id="member-detail"></aside></div>`);
   const list=document.getElementById("member-groups"),search=document.getElementById("member-search"),pane=document.getElementById("member-detail");
   const show=()=>{
     const query=search.value.trim().toLocaleLowerCase();
-    const filtered=catalog.items.filter(member=>[member.name,member.username,member.email].some(value=>String(value||"").toLocaleLowerCase().includes(query)));
-    const group=(title,items,blank)=>`<section class="admin-group"><h2 class="admin-group-title">${title}</h2>${items.map(member=>{
+    const filtered=candidates.filter(member=>[member.name,member.username,member.email].some(value=>String(value||"").toLocaleLowerCase().includes(query)));
+    const group=(title,items)=>`<section class="admin-group"><h2 class="admin-group-title">${esc(title)}</h2>${items.map(member=>{
       const label=memberLabel(member,sources.get(member.provider_id));
       const meta=member.role==="admin"?memberRole(member)+(member.enabled?"":" · 已停用"):member.enabled?"启用":"停用";
       return `<a class="admin-row admin-person-row" data-route data-member="${esc(member.id)}" href="${esc(base+memberPath(member.id))}" ${selected?.id===member.id?'aria-current="true"':""}>
         <span class="admin-person">${memberAvatar(member)}<span><strong>${esc(member.name)}</strong><small>${esc(label)}</small></span></span>
         <span class="admin-status ${member.enabled?"ok":"warning"}">${meta}</span></a>`;
-    }).join("")||empty(query?"没有匹配的成员。":blank)}</section>`;
-    list.innerHTML=group("后台管理员",filtered.filter(member=>member.role==="admin"),"暂无后台管理员。")+
-      group("员工账号",filtered.filter(member=>member.role!=="admin"),"暂无员工账号，可添加员工或等待首次企业登录。");
+    }).join("")}</section>`;
+    const groups=new Map();
+    for(const member of filtered){
+      const key=member.provider_id==="__platform_admin__"?"platform":member.department_id;
+      if(!groups.has(key))groups.set(key,[]);
+      groups.get(key).push(member);
+    }
+    list.innerHTML=Array.from(groups,([key,items])=>group(key==="platform"?"平台内置账号":departmentPath(units,key)||"未分部门",items)).join("") ||
+      empty(query?"没有匹配的成员。":"当前部门暂无成员，可在成员详情调整归属。");
   };
+  const unitFilter=document.getElementById("department-filter");
+  unitFilter.value=new URLSearchParams(location.search).get("department")||"";
+  unitFilter.onchange=()=>{const filter=unitFilter.value?"?"+new URLSearchParams({department:unitFilter.value}):"";navigate("/app/members"+filter+(search.value?"#"+new URLSearchParams({member:search.value}):""));};
   search.oninput=show;show();
   if(creating){
     pane.innerHTML='<h2>添加员工</h2><div id="member-account-editor"></div>';
@@ -179,11 +239,11 @@ async function members(id="",panel=""){
     return;
   }
   if(!selected){pane.innerHTML=empty("请选择一位成员查看详情。");return;}
-  await renderMemberDetail(pane,selected,source,models.items,panel);
+  await renderMemberDetail(pane,selected,source,models.items,panel,units);
   if(id)focusAdminDetail(pane);
 }
 
-async function renderMemberDetail(pane,member,source,models,panel){
+async function renderMemberDetail(pane,member,source,models,panel,units){
   const founder=superMember(member),admin=member.role==="admin",path=memberPath(member.id),roleAction=admin?"收回后台权限":"授予平台管理员";
   const webOnly=member.provider_id==="__platform_admin__";
   const title=`<div class="admin-detail-head"><span class="admin-person">${memberAvatar(member)}<span><h2>${esc(member.name)}</h2><small>${esc(memberLabel(member,source))} · ${memberRole(member)}</small></span></span></div>`;
@@ -229,7 +289,11 @@ async function renderMemberDetail(pane,member,source,models,panel){
     return;
   }
   const modelName=id=>models.find(model=>model.id===id)?.name||id;
-  const summary=member.model_ids.length?member.model_ids.map(modelName).join("、"):"尚未分配模型";
+  const all=[...new Set([...member.model_ids,...member.inherited_model_ids])];
+  const summary=all.length?all.map(id=>modelName(id)+(member.inherited_model_ids.includes(id)?"（部门授权）":"")).join("、"):"尚未分配模型";
+  pane.insertAdjacentHTML("beforeend",`<form class="member-filters admin-detail-section"><label>所属部门<select name="department_id"><option value="">未分部门</option>${departmentOptions(units,member.department_id)}</select></label><button>保存归属</button></form>`);
+  const departmentForm=pane.querySelector("form");watchForm(departmentForm);
+  departmentForm.onsubmit=e=>{e.preventDefault();action(()=>write(formData(departmentForm),"成员归属已保存。"));};
   pane.insertAdjacentHTML("beforeend",`<section class="admin-detail-section"><div class="admin-access"><span>${esc(summary)}</span>${memberLink("分配模型",memberPath(member.id,"models"))}</div>
     ${member.default_model_id?`<p class="muted">默认模型 ${esc(modelName(member.default_model_id))}</p>`:""}</section>
     <section class="admin-detail-section"><div class="actions-row">
@@ -240,15 +304,15 @@ async function renderMemberDetail(pane,member,source,models,panel){
 }
 
 function mountMemberModels(pane,member,models,path,write){
-  const visible=models.filter(model=>model.enabled||member.model_ids.includes(model.id));
+  const visible=models.filter(model=>model.enabled||member.model_ids.includes(model.id)||member.inherited_model_ids.includes(model.id));
   pane.insertAdjacentHTML("beforeend",`<section class="admin-detail-section"><h3>分配模型</h3><form class="form" id="member-form">
-    ${visible.length?`<fieldset><legend>可用模型</legend><div class="check-list">${visible.map(model=>`<label><input type="checkbox" name="models" value="${esc(model.id)}" ${member.model_ids.includes(model.id)?"checked":""}>${esc(model.name)}${model.enabled?"":"（已停用）"}</label>`).join("")}</div></fieldset>`:empty("暂无可分配的企业模型。请先在模型页启用模型。")}
+    ${visible.length?`<fieldset><legend>可用模型（个人授权）</legend><div class="check-list">${visible.map(model=>`<label><input type="checkbox" name="models" value="${esc(model.id)}" ${member.model_ids.includes(model.id)?"checked":""}>${esc(model.name)}${model.enabled?"":"（已停用）"}</label>`).join("")}</div></fieldset>`:empty("暂无可分配的企业模型。请先在模型页启用模型。")}
     <label>默认模型<select name="default_model_id"></select></label><div class="actions-row"><button class="primary" ${visible.length?"":"disabled"}>保存模型授权</button>${memberLink("取消",path)}</div></form></section>`);
   const form=pane.querySelector("#member-form"),defaultModel=form.elements.default_model_id;
   const syncDefault=(current=defaultModel.value)=>{
-    const checked=new FormData(form).getAll("models"), allowed=visible.filter(model=>checked.includes(model.id));
+    const checked=new FormData(form).getAll("models"), allowed=visible.filter(model=>checked.includes(model.id)||member.inherited_model_ids.includes(model.id));
     defaultModel.innerHTML=allowed.map(model=>`<option value="${esc(model.id)}">${esc(model.name)}</option>`).join("")||'<option value="">未分配模型</option>';
-    if(checked.includes(current))defaultModel.value=current;
+    if(allowed.some(model=>model.id===current))defaultModel.value=current;
   };
   watchForm(form);
   form.querySelectorAll('[name="models"]').forEach(input=>input.onchange=()=>syncDefault());syncDefault(member.default_model_id);
@@ -262,7 +326,7 @@ const modelProviders = {openai:"OpenAI 兼容",moonshot:"Moonshot / Kimi",anthro
 const modelSelection = id => "/app/models?selected=" + encodeURIComponent(id);
 
 async function models(selectedId=new URLSearchParams(location.search).get("selected"), assigning=false){
-  const [catalog, memberList] = await Promise.all([api("/admin/models"), api("/admin/members")]);
+  const [catalog, memberList, units] = await Promise.all([api("/admin/models"), api("/admin/members"),api("/admin/departments")]);
   heading("模型");
   content.querySelector(".page-title").insertAdjacentHTML("beforeend", adminViewLink("/app/models/new", "添加模型", true));
   const selected = catalog.items.find(model => model.id === selectedId) || catalog.items[0];
@@ -274,7 +338,7 @@ async function models(selectedId=new URLSearchParams(location.search).get("selec
   const employees = memberList.items.filter(member => member.provider_id !== "__platform_admin__");
   const modelCounts = new Map();
   for (const member of employees) {
-    for (const id of member.model_ids) modelCounts.set(id, (modelCounts.get(id) || 0) + 1);
+    for (const id of new Set([...member.model_ids,...member.inherited_model_ids])) modelCounts.set(id, (modelCounts.get(id) || 0) + 1);
   }
   const scope = id => modelCounts.has(id) ? modelCounts.get(id) + " 人" : "—";
   const rows = '<div class="admin-list">' + adminColumns("名称", "状态", "使用范围") + catalog.items.map(model =>
@@ -286,13 +350,13 @@ async function models(selectedId=new URLSearchParams(location.search).get("selec
     ["模型标识", selected.model_name], ["基础地址", selected.base_url], ["授权范围", scope(selected.id)]]);
   const detailHead = '<div class="admin-detail-head"><h2>' + esc(selected.name) + '</h2></div>';
   const summary = '<div class="admin-detail-section">' + fields + '</div><div class="admin-record-actions">' +
-    adminViewLink(path + "/grants", "分配员工") + adminViewLink(path, "配置模型") + '</div>';
+    adminViewLink(path + "/grants", "分配部门或成员") + adminViewLink(path, "配置模型") + '</div>';
   content.insertAdjacentHTML("beforeend", adminSplit(rows, detailHead + (assigning ? "" : summary)));
-  if (assigning) modelGrants(selected.id, employees);
+  if (assigning) modelGrants(selected.id, employees, units.items, selected.department_ids);
   if (selected.id === selectedId) focusAdminDetail(content.querySelector(".admin-detail"));
 }
 
-function modelGrants(id, employees){
+function modelGrants(id, employees, units, previousUnits){
   const panel = content.querySelector(".admin-detail");
   const before = employees.filter(member => member.model_ids.includes(id)).map(member => member.id);
   const selected = new Set(before);
@@ -301,9 +365,9 @@ function modelGrants(id, employees){
     <input type="checkbox" name="member_ids" value="${esc(member.id)}" ${selected.has(member.id)?"checked":""}>
     ${esc(member.name)}${member.enabled?"":"（已停用）"}</label>`).join("");
   panel.insertAdjacentHTML("beforeend", `<form class="form admin-detail-section" id="model-grants-form">
-    <fieldset><legend>分配员工</legend>
+    ${departmentChecks(units,previousUnits)}<fieldset><legend>按个人分配</legend>
     ${options.length?'<label>查找员工<input type="search" id="model-grant-search"></label><div class="check-list">'+rows+'</div>':'<p class="muted">暂无可分配的员工。</p>'}</fieldset>
-    <div class="actions-row"><button class="primary" type="submit" ${options.length?"":"disabled"}>保存授权</button>
+    <div class="actions-row"><button class="primary" type="submit" ${options.length||units.length?"":"disabled"}>保存授权</button>
     <a data-route href="${esc(base+modelSelection(id))}">取消</a></div></form>`);
   const form = panel.querySelector("form");
   const search = form.querySelector('#model-grant-search');
@@ -314,21 +378,21 @@ function modelGrants(id, employees){
       row.hidden = !row.dataset.modelCandidate.toLocaleLowerCase().includes(query);
     });
   };
-  form.onchange = event => { if (event.target.name === "member_ids") dirty = true; };
+  form.onchange = event => { if (["member_ids","department_ids"].includes(event.target.name)) dirty = true; };
   form.onsubmit = event => {
     event.preventDefault();
     action(async () => {
-      const memberIds = new FormData(form).getAll("member_ids");
-      form.querySelector("fieldset").disabled = submit.disabled = true;
+      const values=new FormData(form), memberIds=values.getAll("member_ids"), departmentIds=values.getAll("department_ids");
+      form.querySelectorAll("fieldset").forEach(f=>f.disabled=true);submit.disabled=true;
       try {
         await api("/admin/models/" + encodeURIComponent(id) + "/grants", {method:"PUT",
-          body:{member_ids:memberIds, previous_member_ids:before}});
+          body:{member_ids:memberIds, previous_member_ids:before, department_ids:departmentIds,previous_department_ids:previousUnits}});
         dirty = false;
         history.replaceState({}, "", base + modelSelection(id));
         await render();
         message("模型授权已保存。", "success");
       } finally {
-        form.querySelector("fieldset").disabled = submit.disabled = false;
+        form.querySelectorAll("fieldset").forEach(f=>f.disabled=false);submit.disabled=false;
       }
     });
   };
@@ -387,7 +451,7 @@ async function chatAuditPage() {
   const events = route === "/events";
   const members = await api("/admin/members");
   auditHeader(events?"/events":"");
-  content.insertAdjacentHTML("beforeend", `<form id="audit-filters" class="toolbar"><label>成员<select name="member_id"><option value="">所有成员</option>${members.items.map(member=>`<option value="${esc(member.id)}">${esc(member.name)}</option>`).join("")}</select></label>${events?"":'<label>开始日期<input name="since" type="date"></label><label>结束日期<input name="until" type="date"></label>'}<label>${events?"操作名称":"聊天标识或模型"}<input name="keyword" maxlength="${events?80:240}"></label><button class="primary">查询</button></form>` +
+  content.insertAdjacentHTML("beforeend", `<form id="audit-filters" class="toolbar"><label>成员<select name="member_id"><option value="">所有成员</option>${members.items.map(member=>`<option value="${esc(member.id)}">${esc(member.name)}</option>`).join("")}</select></label><label>开始时间<input name="since" type="datetime-local"></label><label>结束时间<input name="until" type="datetime-local"></label><label>${events?"操作名称":"聊天标识或模型"}<input name="keyword" maxlength="${events?80:240}"></label><button class="primary">查询</button><button type="button" id="export-audit" disabled>导出 Excel</button></form>` +
     adminSplit('<div id="audit-items" aria-live="polite"></div><div id="audit-pager" class="pager"></div>',
       '<div id="audit-detail" aria-live="polite"><p class="muted">选择一条记录查看详情。</p></div>'));
   const form = document.getElementById("audit-filters"), list = document.getElementById("audit-items"), pager = document.getElementById("audit-pager");
@@ -400,14 +464,24 @@ async function chatAuditPage() {
     ++selectedRevision;
     const filters = formData(form);
     const params = new URLSearchParams({member_id:filters.member_id, keyword:filters.keyword, offset:String(offset)});
-    if (filters.since) params.set("since", String(new Date(filters.since + "T00:00:00").getTime() / 1000));
-    if (filters.until) {
-      const end = new Date(filters.until + "T00:00:00");
-      end.setDate(end.getDate() + 1);
-      params.set("until", String(end.getTime() / 1000));
-    }
+    const download=form.querySelector("#export-audit");
+    download.disabled=true;
+    if(filters.since)params.set("since",String(new Date(filters.since).getTime()/1000));
+    if(filters.until)params.set("until",String(new Date(filters.until).getTime()/1000+60));
+    if(filters.since && filters.until && filters.since>filters.until) throw new Error("结束时间应晚于或等于开始时间。");
     const result = await api("/admin/chat-audit" + (events?"/events":"") + "?" + params);
     if (pending !== revision) return;
+    const exportFilters=new URLSearchParams(params);exportFilters.delete("offset");exportFilters.set("kind",events?"events":"chats");
+    download.disabled=false;
+    download.onclick=()=>action(async()=>{
+      download.disabled=true;
+      try {
+        const response=await fetch(base+"/api/v1/admin/chat-audit/export.xlsx?"+exportFilters);
+        if(!response.ok)throw new Error("导出失败，请重新查询并重试。");
+        const url=URL.createObjectURL(await response.blob()),link=document.createElement("a");
+        link.href=url;link.download=(events?"平台操作":"聊天请求")+".xlsx";link.click();setTimeout(()=>URL.revokeObjectURL(url),30000);
+      }finally{if(pending===revision)download.disabled=false;}
+    });
     summary.innerHTML = '<p class="muted">选择一条记录查看详情。</p>';
     if (!result.items.length) list.innerHTML = empty("没有符合条件的记录。");
     else list.innerHTML = '<div class="admin-list">' + adminColumns(events ? "操作" : "聊天", "成员", "时间") +
@@ -448,6 +522,7 @@ async function chatAuditPage() {
     count.textContent = `共 ${result.total} 条`;
     pager.replaceChildren(previous, count, next);
   };
+  form.oninput=()=>{++revision;form.querySelector("#export-audit").disabled=true;pager.replaceChildren();};
   form.onsubmit = event => { event.preventDefault(); offset = 0; action(load); };
   await load();
 }
@@ -545,7 +620,7 @@ async function releases() {
 function releaseLayout(catalog, selected, deleted=false){
   heading(deleted ? "已删除的发布" : "客户端发布", "", deleted ? "/app/releases" : "");
   const title = content.querySelector(".page-title");
-  if (!deleted) title.insertAdjacentHTML("beforeend", adminViewLink("/app/releases/new", "新建版本", true));
+  if (!deleted) title.insertAdjacentHTML("beforeend", adminViewLink("/app/releases/new", "上传客户端包", true));
   const recommended = catalog.items.find(item => item.recommended);
   const overview = !deleted && recommended ?
     '<div class="admin-recommended"><small>当前推荐</small><strong class="admin-version">' + esc(recommended.app_version) + '</strong><p>Windows ' +
@@ -622,11 +697,36 @@ async function downloads(){
   const data=await api("/client-releases/recommended");const r=data.release;
   content.innerHTML=`<section class="download"><h1>${esc(platform.platform_name)} · Cowork</h1><p class="muted">下载企业客户端，完整解压后运行。登录后取得管理员分配的模型。</p>${r?`<div class="form"><h2>Windows ${esc(r.arch)} · ${esc(r.app_version)}</h2><dl><dt>发布时间</dt><dd>${date(r.published_at)}</dd><dt>文件大小</dt><dd>${(r.bytes/1024/1024).toFixed(1)} MiB</dd><dt>SHA-256</dt><dd class="code">${esc(r.sha256)}</dd></dl><p>${esc(r.notes||"暂无更新说明")}</p><a class="button primary" href="${base}/api/v1/client-releases/${r.id}/download">下载企业客户端</a><a class="button" href="${base}/api/v1/client-releases/${r.id}/manifest">下载校验清单</a><p class="help">离线更新时，将安装包和本页校验清单放在同一目录。</p><p class="help">完整解压后运行 deepseek-cowork.exe。也可选择暂不登录，继续个人使用。</p></div>`:empty("暂无可下载版本，请联系管理员发布企业客户端。")}<p class="section"><a href="${base}/app" data-route>返回企业平台</a></p></section>`;
 }
+async function overview(){
+  const [members,units,models,caps,releases,events,usage]=await Promise.all(["members","departments","models","capabilities","client-releases","chat-audit/events?limit=5","model-usage"].map(path=>api("/admin/"+path)));
+  const employees=members.items.filter(m=>m.enabled&&m.provider_id!=="__platform_admin__");
+  const recommended=releases.items.find(r=>r.recommended);
+  heading("平台总览");
+  const metrics=[["成员与部门",employees.length+" 人",units.items.length+" 个部门","members"],
+    ["企业模型",models.items.filter(m=>m.enabled).length+" 个","已启用","models"],
+    ["企业能力",caps.items.filter(c=>c.enabled).length+" 项","已发布并启用","capabilities"],
+    ["推荐客户端",recommended?.app_version||"暂无","Windows x64","releases"]];
+  const peak=Math.max(1,...usage.items.map(d=>d.requests));
+  const chart=`<section class="usage"><h2>近七天模型调用</h2><div class="bars">${usage.items.map(d=>`<div title="${esc(d.day)} · ${d.requests} 次"><strong>${d.requests}</strong><svg aria-hidden="true" viewBox="0 0 36 74"><rect x="1" y="${72-Math.max(2,Math.round(70*d.requests/peak))}" width="34" height="${Math.max(2,Math.round(70*d.requests/peak))}" rx="3"/></svg><small>${esc(d.day.slice(5))}</small></div>`).join("")}</div></section>`;
+  const enabledModels=models.items.filter(model=>model.enabled);
+  const coverage=`<section><h2>企业模型覆盖率</h2>${enabledModels.map(model=>{
+    const count=employees.filter(m=>m.model_ids.includes(model.id)||m.inherited_model_ids.includes(model.id)).length;
+    return `<div class="coverage"><a data-route href="${esc(base+modelSelection(model.id))}">${esc(model.name)}</a>
+      <small>${count} / ${employees.length} 人</small><progress aria-label="${esc(model.name)}授权人数" max="${employees.length||1}" value="${count}"></progress></div>`;
+  }).join("")||empty("暂无已启用的模型。")}</section>`;
+  const tasks=[...models.items.filter(m=>!m.tested).map(m=>[m.name,"测试模型","/app/models/"+m.id]),
+    ...caps.items.filter(c=>!c.version||c.draft_pending).map(c=>[c.name,"检查草稿",capabilityPath+c.kind+"/"+c.id]),
+    ...releases.items.filter(r=>r.state==="ready").map(r=>[r.app_version,"发布客户端","/app/releases/"+r.id])];
+  content.insertAdjacentHTML("beforeend",`<section class="metrics">${metrics.map(([label,value,sub,path])=>`<a data-route href="${base}/app/${path}"><small>${label}</small><strong>${esc(value)}</strong><small>${sub}</small></a>`).join("")}</section>
+    <div class="overview-grid">${chart}${coverage}<section><h2>待处理</h2>${tasks.map(([name,label,path])=>`<div class="activity"><strong>${esc(name)}</strong>${adminViewLink(path,label)}</div>`).join("")||empty("当前没有待处理事项。")}</section>
+    <section><h2>最近平台操作</h2>${events.items.map(e=>`<div class="activity"><span>${esc(e.member_name||"系统")}<small>${esc(e.action)}</small></span><small>${esc(date(e.created_at))}</small></div>`).join("")||empty("暂无操作记录。")}${adminViewLink("/app/audit/events","查看审计")}</section></div>`);
+}
 async function render(){
   routeGeneration++;clearTimeout(releasePoll);clearTimeout(spacePoll);message("");updateChrome();
   const route=location.pathname.slice(base.length);
   if(route==="/downloads")return downloads();
   if(!me)return login();
+  if(route==="/app/administrator"){history.replaceState({},"",base+"/app/overview");updateChrome();return overview();}
   if(route.startsWith("/app/team-spaces") && spaceEnabled())return teamSpaceRoute(route);
   if(/^\/app\/members\/[^/]+\/spaces$/.test(route)){const id=route.split("/")[3],data=await api("/admin/members");const member=data.items.find(m=>m.id===id);if(!member)throw new Error("成员不存在。");return spaceOwnerRecovery(member);}
   if(route==="/app/releases/new")return newRelease();
@@ -644,9 +744,10 @@ async function render(){
   }
   if(/^\/app\/sources\/[^/]+\/accounts(?:\/[^/]+)?$/.test(route)){const parts=route.split("/");return databaseAccountsPage(parts[3],parts[5]);}
   if(route.startsWith("/app/sources/")){const id=route.split("/").pop(),data=await api("/admin/settings");const item=data.sources.find(m=>m.id===id);if(id!=="new"&&!item)throw new Error("认证来源不存在，请返回设置。");return editSource(item||null);}
+  if(route==="/app/members/departments/new")return createDepartment();
   if(route.startsWith("/app/members/")){const parts=route.split("/");return members(decodeURIComponent(parts[3]),parts[4]);}
-  const page=route.split("/")[2]||"members";
-  await ({members,models,audit:chatAuditPage,settings:settingsPage,releases}[page]||members)();
+  const page=route.split("/")[2]||"overview";
+  await ({overview,members,models,audit:chatAuditPage,settings:settingsPage,releases}[page]||members)();
 }
 (async()=>{
   try {

@@ -5,9 +5,12 @@ import asyncio
 import json
 import re
 import time
+from datetime import datetime, timedelta, timezone
+from tempfile import SpooledTemporaryFile
 
 from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Query, Request
+from starlette.responses import StreamingResponse
 from sqlalchemy import BigInteger, Boolean, Float, JSON, String, and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -19,6 +22,7 @@ from .security import PlatformError, digest, encode
 
 RETENTION = 30 * 86400
 EVENT_RETENTION = 90 * 86400
+EXCEL_RECORDS_PER_SHEET = 1_048_575  # Excel reserves one of its 1,048,576 rows for our header.
 MAX_PAYLOAD_BYTES = 4 * 1024 * 1024
 IDENTIFIER = re.compile(r"[A-Za-z0-9_.:-]{1,240}")
 PROTOCOLS = {"chat_completions", "responses", "anthropic"}
@@ -199,17 +203,26 @@ class ChatAudit:
                 "expires_at": row.expires_at, "model_name": row.model_name, "model_source": row.model_source,
                 "protocol": row.protocol, "omitted": row.omitted}
 
-    def list(self, *, member_id, keyword, since, until, offset, limit):
-        row = ChatAuditRequest
-        filters = [row.expires_at > time.time()]
+    @staticmethod
+    def filters(events, member_id, keyword, since, until):
+        if since is not None and until is not None and since >= until:
+            raise PlatformError("invalid_audit_range", "结束时间应晚于开始时间。")
+        row = AuditEvent if events else ChatAuditRequest
+        filters = [row.created_at > time.time() - EVENT_RETENTION] if events else [row.expires_at > time.time()]
         if member_id:
             filters.append(row.member_id == member_id)
         if keyword:
-            filters.append(or_(row.conversation_id.contains(keyword, autoescape=True), row.model_name.contains(keyword, autoescape=True)))
+            filters.append(row.action.contains(keyword, autoescape=True) if events else or_(
+                row.conversation_id.contains(keyword, autoescape=True), row.model_name.contains(keyword, autoescape=True)))
         if since is not None:
-            filters.append(row.captured_us >= int(since * 1_000_000))
+            filters.append(row.created_at >= since if events else row.captured_us >= int(since * 1_000_000))
         if until is not None:
-            filters.append(row.captured_us < int(until * 1_000_000))
+            filters.append(row.created_at < until if events else row.captured_us < int(until * 1_000_000))
+        return filters
+
+    def list(self, *, member_id, keyword, since, until, offset, limit):
+        row = ChatAuditRequest
+        filters = self.filters(False, member_id, keyword, since, until)
         with self.database.transaction() as db:
             total = db.scalar(select(func.count()).select_from(row).where(*filters))
             # Selecting just displayed columns avoids pulling all stored request bodies into the listing.
@@ -228,13 +241,9 @@ class ChatAudit:
             self.database.audit(db, "chat_audit.read", member_id=actor, target=record_id)
             return {**self.view(row, member.name if member else ""), "request_id": row.request_id, "parameters": row.parameters}
 
-    def events(self, *, member_id, keyword, offset, limit):
+    def events(self, *, member_id, keyword, offset, limit, since=None, until=None):
         row = AuditEvent
-        filters = [row.created_at > time.time() - EVENT_RETENTION]
-        if member_id:
-            filters.append(row.member_id == member_id)
-        if keyword:
-            filters.append(row.action.contains(keyword, autoescape=True))
+        filters = self.filters(True, member_id, keyword, since, until)
         with self.database.transaction() as db:
             total = db.scalar(select(func.count()).select_from(row).where(*filters))
             rows = db.execute(select(row, Member.name).outerjoin(Member, Member.id == row.member_id)
@@ -242,6 +251,71 @@ class ChatAudit:
             return {"total": total, "items": [{"id": item.id, "action": item.action, "target": item.target,
                 "outcome": item.outcome, "member_name": name or item.member_id, "created_at": item.created_at}
                 for item, name in rows]}
+
+    def export(self, actor, kind, member_id, keyword, since, until):
+        from openpyxl import Workbook
+        from openpyxl.cell import WriteOnlyCell
+        from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+        from openpyxl.styles import Font
+
+        events = kind == "events"
+        if not events and kind != "chats":
+            raise PlatformError("invalid_export", "请选择聊天请求或平台操作。")
+        row = AuditEvent if events else ChatAuditRequest
+        filters = self.filters(events, member_id, keyword, since, until)
+        stamp = row.created_at if events else row.captured_us
+        cols = [row.action, row.target, row.outcome] if events else [
+            row.conversation_id, row.model_name, row.model_source, row.protocol, row.omitted]
+        stmt = (select(stamp, Member.name, row.member_id, *cols).outerjoin(Member, Member.id == row.member_id)
+                .where(*filters).order_by(stamp.desc(), row.id).execution_options(yield_per=500))
+        book = Workbook(write_only=True)
+        sheet_title = "平台操作" if events else "聊天请求"
+        def append(ws, values, header=False):
+            cells = []
+            for value in values:
+                cell = WriteOnlyCell(ws, value=value if not isinstance(value, str) else ILLEGAL_CHARACTERS_RE.sub("", value))
+                if isinstance(value, str):
+                    cell.data_type = "s"
+                if header:
+                    cell.font = Font(bold=True)
+                cells.append(cell)
+            ws.append(cells)
+        zone = timezone(timedelta(hours=8))
+        def local_date(t):
+            return datetime.fromtimestamp(t, zone).replace(tzinfo=None)
+        columns = ["时间（北京时间）", "人员", "成员 ID"] + (
+            ["操作", "对象", "结果"] if events else ["聊天标识", "模型", "来源", "协议", "正文已省略"])
+        sheet = book.create_sheet(sheet_title)
+        append(sheet, columns, True)
+        output = SpooledTemporaryFile(max_size=2**20)
+        try:
+            with self.database.transaction() as db:
+                count = 0
+                for t, name, mid, *values in db.execute(stmt):
+                    if count and count % EXCEL_RECORDS_PER_SHEET == 0:
+                        sheet = book.create_sheet(f"{sheet_title} {count // EXCEL_RECORDS_PER_SHEET + 1}")
+                        append(sheet, columns, True)
+                    append(sheet, [local_date(t if events else t / 1_000_000), name or mid, mid, *values])
+                    count += 1
+                notes = book.create_sheet("筛选条件")
+                member = db.get(Member, member_id) if member_id else None
+                for key, value in [("人员", member.name if member else member_id or "全部人员"), ("关键词", keyword),
+                                   ("开始时间（北京时间）", local_date(since) if since is not None else "不限"),
+                                   ("截止时间（不含，北京时间）", local_date(until) if until is not None else "不限"),
+                                   ("记录数", count)]:
+                    append(notes, [key, value])
+                book.save(output)
+                self.database.audit(db, "audit.exported", member_id=actor, target=f"{kind}/{count}")
+            output.seek(0)
+        except BaseException:
+            output.close()
+            raise
+        def chunks():
+            with output:
+                while data := output.read(65536):
+                    yield data
+        return StreamingResponse(chunks(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="audit-{kind}.xlsx"', "Cache-Control": "no-store"})
 
 
 def chat_audit_router(audit, principal, read_json, team_spaces, capabilities):
@@ -274,9 +348,16 @@ def chat_audit_router(audit, principal, read_json, team_spaces, capabilities):
 
     @router.get("/admin/chat-audit/events")
     def list_events(request: Request, member_id: str = Query("", max_length=32), keyword: str = Query("", max_length=80),
+                    since: float | None = Query(None, ge=0, le=9999999999), until: float | None = Query(None, ge=0, le=9999999999),
                     offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)):
         principal(request, admin=True)
-        return audit.events(member_id=member_id, keyword=keyword, offset=offset, limit=limit)
+        return audit.events(member_id=member_id, keyword=keyword, since=since, until=until, offset=offset, limit=limit)
+
+    @router.get("/admin/chat-audit/export.xlsx")
+    def export(request: Request, kind: str, member_id: str = Query("", max_length=32), keyword: str = Query("", max_length=240),
+               since: float | None = Query(None, ge=0, le=9999999999), until: float | None = Query(None, ge=0, le=9999999999)):
+        actor = principal(request, admin=True)
+        return audit.export(actor["id"], kind, member_id, keyword, since, until)
 
     @router.get("/admin/chat-audit/{record_id}")
     def read_request(request: Request, record_id: str):

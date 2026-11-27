@@ -15,6 +15,7 @@ from urllib.parse import parse_qs
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 import httpx
 from sqlalchemy import delete, select, update
 
@@ -343,7 +344,10 @@ def create_app(settings=None, *, transport=None):
         with database.transaction() as db:
             founder = db.get(LocalAdministrator, 1)
             can_assign_admin = user["id"] == super_admin_id(db, settings, founder)
-        return {"member": user, "models": management.models(user["id"]), "platform_id": settings.platform_id,
+        models = management.models(user["id"])
+        if user["default_model_id"] not in {m["id"] for m in models}:
+            user["default_model_id"] = models[0]["id"] if models else ""
+        return {"member": user, "models": models, "platform_id": settings.platform_id,
                 "can_assign_admin": can_assign_admin,
                 "can_use_team_spaces": not founder or founder.member_id != user["id"], "chat_audit_version": 1}
 
@@ -359,6 +363,21 @@ def create_app(settings=None, *, transport=None):
         response.delete_cookie("cowork_session", path=settings.path_prefix or "/")
         response.delete_cookie("cowork_csrf", path=settings.path_prefix or "/")
         return response
+
+    @app.get("/api/v1/admin/model-usage")
+    def model_usage(request: Request):
+        principal(request, admin=True)
+        return {"items": management.model_usage_week()}
+
+    @app.get("/api/v1/admin/departments")
+    def departments(request: Request):
+        principal(request, admin=True)
+        return {"items": management.departments()}
+
+    @app.post("/api/v1/admin/departments")
+    async def create_department(request: Request):
+        actor = principal(request, admin=True)
+        return management.create_department(await read_json(request, 2048), actor["id"])
 
     @app.get("/api/v1/admin/members")
     def members(request: Request):
@@ -512,7 +531,13 @@ def create_app(settings=None, *, transport=None):
         headers = {"X-Request-ID": request.state.request_id, "X-Accel-Buffering": "no"}
         if upstream.headers.get("x-request-id"):
             headers["X-Upstream-Request-ID"] = upstream.headers["x-request-id"][:256]
-        return StreamingResponse(stream_body(), status_code=upstream.status_code,
+        def record_usage():
+            try:
+                management.count_model_request()
+            except Exception:
+                log.exception("model.usage_failed request=%s", request.state.request_id)
+
+        return StreamingResponse(stream_body(), status_code=upstream.status_code, background=BackgroundTask(record_usage),
                                  media_type=upstream.headers.get("content-type", "application/json"), headers=headers)
 
     @app.get("/api/v1/admin/settings")

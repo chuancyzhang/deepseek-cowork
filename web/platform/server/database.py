@@ -10,7 +10,7 @@ from sqlalchemy import Boolean, Float, Integer, JSON, String, Text, UniqueConstr
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 log = logging.getLogger(__name__)
 
 
@@ -33,6 +33,20 @@ class Platform(Base):
     schema_version: Mapped[int] = mapped_column(default=1)
 
 
+class ModelUsageDay(Base):
+    __tablename__ = "model_usage_days"
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    requests: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class Department(Base):
+    __tablename__ = "departments"
+    __table_args__ = (UniqueConstraint("parent_id", "name"),)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(80))
+    parent_id: Mapped[str] = mapped_column(String(32), default="")
+
+
 class Member(Base):
     __tablename__ = "members"
     __table_args__ = (UniqueConstraint("provider_id", "subject"),)
@@ -45,6 +59,7 @@ class Member(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     revision: Mapped[int] = mapped_column(default=1)
     default_model_id: Mapped[str] = mapped_column(String(32), default="")
+    department_id: Mapped[str] = mapped_column(String(32), default="")
     created_at: Mapped[float] = mapped_column(Float, default=time.time)
     last_login_at: Mapped[float] = mapped_column(Float, default=time.time)
 
@@ -126,6 +141,7 @@ class LoginSession(Base):
 
 
 class Model(Base):
+    department_ids: Mapped[list] = mapped_column(JSON, default=list)
     __tablename__ = "models"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
     name: Mapped[str] = mapped_column(String(128))
@@ -236,9 +252,16 @@ class Database:
                 platform = connection.execute(select(Platform.__table__).where(Platform.id == 1)).mappings().first()
             if platform and platform["platform_id"] != settings.platform_id:
                 raise ValueError("数据库属于其他 platform_id；不得复用为新企业实例。")
-            if platform and platform["schema_version"] not in {1, 2, 3, 4, SCHEMA_VERSION}:
+            if platform and platform["schema_version"] not in {1, 2, 3, 4, 5, SCHEMA_VERSION}:
                 raise ValueError("数据库结构版本不兼容，需执行对应版本迁移。")
             Base.metadata.create_all(connection, tables=[t for t in Base.metadata.sorted_tables if t not in SPACE_TABLES])
+            for table, column, definition in [
+                ("members", "department_id", "VARCHAR(32) NOT NULL DEFAULT ''"),
+                ("models", "department_ids", "JSON NOT NULL DEFAULT '[]'"),
+                ("enterprise_capabilities", "department_ids", "JSON NOT NULL DEFAULT '[]'"),
+            ]:
+                if column not in {c["name"] for c in inspect(connection).get_columns(table)}:
+                    connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
             if platform is None:
                 connection.execute(Platform.__table__.insert().values(id=1, platform_id=settings.platform_id,
                     name=settings.platform_name, public_url=settings.public_url, schema_version=1))

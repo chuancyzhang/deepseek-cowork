@@ -15,6 +15,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .capability_packages import MAX_ZIP_BYTES, capability_zip_template, invalid_package, read_capability_package
 from .database import Base, Member, Model, uid
+from .departments import ancestors, checked_units
 from .security import PlatformError
 
 log = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ MAX_CONFIG_BYTES = 1024 * 1024
 
 class Capability(Base):
     __tablename__ = "enterprise_capabilities"
+    department_ids: Mapped[list] = mapped_column(JSON, default=list)
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
     kind: Mapped[str] = mapped_column(String(16))
     draft_name: Mapped[str] = mapped_column(String(128))
@@ -207,7 +209,7 @@ class Capabilities:
         result = {"id": row.id, "kind": row.kind, "name": row.draft_name,
                   "description": row.draft_description, "revision": row.revision, "version": row.current_version,
                   "enabled": row.enabled, "tested": row.draft_tested,
-                  "all_members": row.all_members, "member_ids": row.member_ids}
+                  "all_members": row.all_members, "member_ids": row.member_ids, "department_ids": row.department_ids}
         if configuration:
             result["config"] = row.draft_config
         return result
@@ -304,7 +306,7 @@ class Capabilities:
     def admin_action(self, actor, key, action, payload):
         if action not in {"test", "publish", "disable", "grant"}:
             raise PlatformError("unknown_capability_action", "此能力操作不可用。", 404)
-        if set(payload) - ({"revision", "all_members", "member_ids"} if action == "grant" else {"revision"}):
+        if set(payload) - ({"revision", "all_members", "member_ids", "department_ids"} if action == "grant" else {"revision"}):
             invalid("包含不支持的能力操作字段。")
         revision = payload.get("revision")
         with self.database.transaction() as db:
@@ -348,18 +350,20 @@ class Capabilities:
         if type(everyone) is not bool:
             invalid("请选择授权范围。")
         member_ids = string_list(payload.get("member_ids", []), "授权成员", size=10000, identifiers=True)
-        if everyone and member_ids:
+        units = checked_units(db, payload.get("department_ids", [] if everyone else row.department_ids))
+        if everyone and (member_ids or units):
             invalid("全员授权无需再选择指定成员。")
         if member_ids:
             present = set(db.scalars(select(Member.id).where(Member.id.in_(member_ids))))
             if present != set(member_ids):
                 invalid("授权列表中存在无效成员，请刷新后重试。")
-        self.revise(db, row, revision, all_members=everyone, member_ids=member_ids)
+        self.revise(db, row, revision, all_members=everyone, member_ids=member_ids, department_ids=units)
 
     @staticmethod
-    def granted(rows, member_id):
+    def granted(db, rows, member_id):
+        units = ancestors(db, db.get(Member, member_id))
         return {row.id: row for row in rows if row.enabled and row.current_version
-                and (row.all_members or member_id in row.member_ids)}
+                and (row.all_members or member_id in row.member_ids or units.intersection(row.department_ids))}
 
     @staticmethod
     def verify_member(db, member_id):
@@ -376,7 +380,7 @@ class Capabilities:
                       & (CapabilityVersion.version == Capability.current_version))
                 .where(Capability.enabled)
                 .order_by(Capability.kind, CapabilityVersion.name, Capability.id)).all()
-            allowed = self.granted((row for row, version in released), member_id)
+            allowed = self.granted(db, (row for row, version in released), member_id)
             items = []
             for row, release in released:
                 if row.id not in allowed:
@@ -412,7 +416,7 @@ class Capabilities:
             by_version = {(item.capability_id, item.version): item for item in versions}
             for version in by_version.values():
                 ids.update(key for _, key in self.dependencies(version.config))
-            allowed = self.granted(db.scalars(select(Capability).options(defer(Capability.draft_config))
+            allowed = self.granted(db, db.scalars(select(Capability).options(defer(Capability.draft_config))
                                    .where(Capability.id.in_(ids))), member_id)
             for ref in items:
                 row = allowed.get(ref["id"])

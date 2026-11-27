@@ -8,7 +8,7 @@ if (Test-Path -LiteralPath 'images.tar') {
         throw 'Legacy offline package: rebuild it with scripts/package_enterprise.py.'
     }
     $deployment = Get-Content -LiteralPath 'deployment.json' -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($deployment.schema_version -ne 1 -or $deployment.target -ne 'linux-amd64' -or $deployment.database_schema -ne 5) {
+    if ($deployment.schema_version -ne 1 -or $deployment.target -ne 'linux-amd64' -or $deployment.database_schema -ne 6) {
         throw 'Unsupported deployment manifest.'
     }
     foreach ($required in @('images.tar', 'compose.local.yaml', 'start-local.ps1', 'server/releases.py', 'server/database.py')) {

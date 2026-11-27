@@ -281,6 +281,65 @@ class PlatformTests(unittest.TestCase):
         result.update(changes)
         return result
 
+    def test_inherited_model_access_follows_department_and_preserves_personal_grants(self):
+        owner = self.web_login()["member"]["id"]
+        employee = self.desktop_login("department-member")
+        member = self.client.get("/api/v1/me", headers=employee).json()["member"]
+        model = self.model(owner)
+        org = "/api/v1/admin/departments"
+        def create(name, parent=""):
+            res = self.client.post(org, headers=self.headers(), json={"name": name, "parent_id": parent})
+            self.assertEqual(res.status_code, 200, res.text)
+            return res.json()["id"]
+        top = create("产品")
+        child = create("交付", top)
+        grants = f"/api/v1/admin/models/{model}/grants"
+        def grant(old, new, old_units, new_units):
+            return self.client.put(grants, headers=self.headers(), json={"member_ids": new, "previous_member_ids": old,
+                "department_ids": new_units, "previous_department_ids": old_units})
+        self.assertEqual(grant([owner], [owner], [], [top]).status_code, 200)
+        self.assertEqual(grant([owner], [owner], [], [child]).status_code, 409)
+        def move(unit):
+            current = self.client.get("/api/v1/me", headers=employee).json()["member"]
+            res = self.client.put("/api/v1/admin/members/"+member["id"], headers=self.headers(),
+                                  json={"revision":current["revision"], "department_id":unit})
+            self.assertEqual(res.status_code, 200, res.text)
+        def effective():
+            return [m["id"] for m in self.client.get("/api/v1/me", headers=employee).json()["models"]]
+        move(child)
+        self.assertEqual(effective(), [model])
+        move("")
+        self.assertEqual(effective(), [])
+        self.assertEqual(grant([owner], [owner,member["id"]], [top], [top]).status_code, 200)
+        move(child)
+        self.assertEqual(effective(), [model])
+        move("")
+        self.assertEqual(effective(), [model])
+
+    def test_export_contains_all_filtered_rows_as_excel_text(self):
+        from io import BytesIO
+        from unittest.mock import patch
+        from openpyxl import load_workbook
+        owner = self.web_login()["member"]["id"]
+        with self.db.transaction() as db:
+            for i in range(57):
+                self.db.audit(db, "export_sample", member_id=owner, target=f"=A{i}")
+            self.db.audit(db, "export_sample", member_id="", target="excluded")
+        params = {"member_id":owner,"keyword":"export_sample","since":time.time()-60,"until":time.time()+60}
+        route = "/api/v1/admin/chat-audit"
+        self.assertEqual(self.client.get(route+"/events", params=params).json()["total"], 57)
+        with patch("web.platform.server.chat_audit.EXCEL_RECORDS_PER_SHEET", 25):
+            response = self.client.get(route+"/export.xlsx", params={**params,"kind":"events"})
+        self.assertEqual(response.status_code, 200, response.text if response.status_code != 200 else "")
+        with BytesIO(response.content) as stream:
+            book = load_workbook(stream,read_only=True)
+            self.assertEqual(book.sheetnames, ["平台操作", "平台操作 2", "平台操作 3", "筛选条件"])
+            rows = [row for sheet in book.worksheets[:-1] for row in list(sheet.rows)[1:]]
+            self.assertEqual(len(rows),57)
+            self.assertTrue(all(r[2].value==owner and r[4].data_type=="s" and r[4].value.startswith("=A") for r in rows))
+            book.close()
+        self.assertEqual(self.client.get(route+"/events", params={**params,"until":1}).status_code,400)
+
     def test_chat_audit_keeps_latest_per_member_and_filters_contents(self):
         from web.platform.server.chat_audit import ChatAuditRequest, RETENTION, EVENT_RETENTION
         from web.platform.server.database import AuditEvent
@@ -855,7 +914,7 @@ class PlatformTests(unittest.TestCase):
         self.assertIsNone(self.client.get("/api/v1/client-releases/recommended").json()["release"])
         self.assertIsNone(self.client.get("/api/v1/client-releases/recommended?app_layout=electron").json()["release"])
         with self.db.transaction() as db:
-            self.assertEqual(db.get(Platform, 1).schema_version, 5)
+            self.assertEqual(db.get(Platform, 1).schema_version, 6)
             self.assertEqual(db.get(Platform, 1).catalog_revision, 1)
             self.assertIsNotNone(db.get(Member, actor))
             record = db.get(ClientRelease, release["id"])
@@ -886,6 +945,27 @@ class PlatformTests(unittest.TestCase):
             self.assertFalse(db.get(ClientRelease, old_id).recommended)
             self.assertEqual(db.get(Platform, 1).catalog_revision, 1)
 
+    def test_v5_migration_preserves_existing_direct_authorization(self):
+        from sqlalchemy import text
+        from web.platform.server.database import Department, ModelUsageDay, Platform
+
+        actor = self.web_login()["member"]["id"]
+        model = self.model(actor)
+        with self.db.transaction() as db:
+            db.get(Platform, 1).schema_version = 5
+        with self.db.engine.begin() as conn:
+            Department.__table__.drop(conn)
+            ModelUsageDay.__table__.drop(conn)
+            for table, column in (("members", "department_id"), ("models", "department_ids"),
+                                  ("enterprise_capabilities", "department_ids")):
+                conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+        self.db.migrate(self.settings)
+        self.db.migrate(self.settings)
+        session = self.client.get("/api/v1/me").json()
+        self.assertEqual(session["member"]["department_id"], "")
+        self.assertEqual([m["id"] for m in session["models"]], [model])
+        self.assertEqual(self.client.get("/api/v1/admin/models").json()["items"][0]["department_ids"], [])
+
     def test_v4_migration_creates_capability_tables_without_retiring_releases_again(self):
         from web.platform.server.capabilities import Capability, CapabilityVersion
         from web.platform.server.database import Platform
@@ -902,7 +982,7 @@ class PlatformTests(unittest.TestCase):
             CapabilityVersion.__table__.drop(connection)
             Capability.__table__.drop(connection)
         self.db.migrate(self.settings)
-        self.assertEqual(self.client.get("/healthz").json()["schema_version"], 5)
+        self.assertEqual(self.client.get("/healthz").json()["schema_version"], 6)
         self.assertEqual(self.client.get("/api/v1/admin/capabilities").json()["items"], [])
         with self.db.transaction() as db:
             self.assertEqual(db.get(Platform, 1).catalog_revision, 2)

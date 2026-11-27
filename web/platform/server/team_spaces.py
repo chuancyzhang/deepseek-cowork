@@ -11,7 +11,8 @@ import time
 
 from sqlalchemy import func, select, update
 
-from .database import LocalAdministrator, Member, Model, ModelGrant, Platform, uid
+from .database import LocalAdministrator, Member, Model, Platform, uid
+from .departments import available_models, model_allowed
 from .security import PlatformError, digest, encode
 from .team_space_tables import (TeamSpace, SpaceMember, SpaceInvite, SpacePlan, SpaceComment,
     SpaceActivity, SpaceFolder, SpaceUpload, SpaceAsset, SpaceAssetRevision, SpaceShare,
@@ -174,8 +175,7 @@ class TeamSpaces:
             result["limits"] = {"file_bytes": self.settings.max_space_file_bytes, "space_bytes": self.settings.max_space_bytes}
             result["unfinished_plans"] = db.scalar(select(func.count()).select_from(SpacePlan).where(
                 SpacePlan.space_id == space_id, SpacePlan.state != "completed"))
-            result["models"] = [{"id": m.id, "name": m.name, "enabled": m.enabled} for m in db.scalars(
-                select(Model).join(ModelGrant, ModelGrant.model_id == Model.id).where(ModelGrant.member_id == actor))]
+            result["models"] = [{"id": m.id, "name": m.name, "enabled": m.enabled} for m in available_models(db, actor)]
             return result
 
     def candidates(self, actor, query):
@@ -850,7 +850,7 @@ class TeamSpaces:
                 allowed = space.allow_personal
             elif source == "enterprise":
                 model = db.get(Model, model_id) if isinstance(model_id, str) else None
-                allowed = bool(model and model.enabled and db.get(ModelGrant, (actor, model_id))
+                allowed = bool(model_allowed(db, db.get(Member, actor), model)
                     and (space.model_mode == "authorized" or model_id in space.model_ids))
             else:
                 raise PlatformError("invalid_model_source", "模型来源无效。")

@@ -10,9 +10,11 @@
 .expanded>.workspace-divider{left:0;right:auto}
 .conversation{overflow:hidden;container:chat-available / inline-size}
 .home-conversation{overflow:auto}
-.file-toolbar{flex-wrap:wrap;gap:4px;min-height:40px}
+.file-toolbar{flex-wrap:nowrap;gap:4px;min-height:40px;flex-shrink:0}
 .file-toolbar>.icon-button{width:27px;height:28px;flex-shrink:0}
-.file-toolbar>span{min-width:60px}
+.file-toolbar>span{min-width:0}
+.workspace-file-editor{container: file-editor / inline-size}.file-toolbar-action{display:flex;gap:6px;align-items:center;font-size:12px;flex-shrink:0;padding:5px 8px}.file-toolbar>button{flex-shrink:0}
+@container file-editor (max-width:480px){.file-toolbar-action>span{display:none}.file-toolbar-action{padding:5px}.file-toolbar{padding-inline:8px}}
 .file-navigator .inline-error{margin:8px;font-size:12px;padding:10px;overflow-wrap:anywhere}
 .file-navigator .inline-error button{padding:5px;text-decoration:underline}
 .file-navigator .inline-error p{margin:0 0 6px}
@@ -188,6 +190,7 @@
 
 .workspace-changes, .workspace-file-editor, .workspace-file-changes { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
 .workspace-file-editor[hidden] { display:none; }
+.workspace-start-tasks{margin-bottom:28px}.workspace-start .workspace-start-entry{display:flex;align-items:center;gap:12px;width:100%;min-height:58px;padding:14px 8px;border-bottom:1px solid var(--line);border-radius:0;text-align:left;font-size:14px}.workspace-start-entry>span{flex:1;min-width:0}.workspace-start-entry>svg{flex-shrink:0}.workspace-start-entry>small{font-size:12px;color:var(--muted);max-width:60%;text-align:right;white-space:normal}.workspace-start .new-page-address{align-items:center;padding-left:10px;margin-bottom:12px}.workspace-start .new-page-address>svg{flex-shrink:0;color:var(--muted)}
 .workspace-changes > header .change-totals { justify-content:flex-start; }
 .workspace-change-list { flex:1; overflow:auto; }
 .workspace-change { border-bottom:1px solid var(--line); }

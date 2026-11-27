@@ -1,4 +1,7 @@
-import {useEffect,useRef,useState} from 'react';
+import {useEffect,useMemo,useRef,useState} from 'react';
+import {Bold,Heading2,List} from 'lucide-react';
+import {useFileToolbarContribution} from '../FileToolbar';
+import type {MenuAction} from '../MoreActions';
 import {renderToStaticMarkup} from 'react-dom/server';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -15,8 +18,17 @@ export default function PluginFrame({plugin,extension,scope,mode='active',readyK
   if(!context&&!standalone)throw new Error('宿主尚未启动。');
   const lease=useRef<Lease>({active:true,mode,plugin,scope});lease.current.mode=mode;
   const [ready,setReady]=useState(false),[failure,setFailure]=useState('');
+  const [writingPreview,setWritingPreview]=useState<boolean|null>(null);
+  const writing=plugin.builtin&&plugin.id==='cowork.writing'&&plugin.hostApi===1;
+  const integrated=useFileToolbarContribution(useMemo(()=>{
+    if(!writing||mode!=='active'||hidden||writingPreview===null)return null;
+    const command=(command:string)=>frame.current?.contentWindow?.postMessage({channel:'cowork-host-v1',event:'document-command',data:{command}},'*');
+    const menu:MenuAction[]=writingPreview?[]:[['标题',Heading2,async()=>command('heading')],['加粗',Bold,async()=>command('bold')],['列表',List,async()=>command('list')]];
+    return {controls:<button className="secondary" aria-label={writingPreview?'编辑文档':'预览文档'} onClick={()=>command('mode')}>{writingPreview?'编辑':'预览'}</button>,menu};
+  },[writing,mode,hidden,writingPreview]));
   const url=`cowork-plugin://${plugin.hash}/${extension.entry||plugin.entry}`;
   const identity=JSON.stringify([plugin.hash,extension.id,scope.conversationId,scope.filePath,scope.tabId]);
+  useEffect(()=>{if(ready&&writing)frame.current?.contentWindow?.postMessage({channel:'cowork-host-v1',event:'document-toolbar',data:{integrated:integrated&&mode==='active'&&!hidden}},'*');},[ready,writing,integrated,mode,hidden]);
   if(readyKey)registry?.expect(readyKey,plugin.hash);
   useEffect(()=>{if(ready&&readyKey&&registry?.candidate?.plugin.hash===plugin.hash)registry.ready(readyKey,plugin.hash);},[ready,readyKey,registry?.candidate?.plugin.hash]);
   useEffect(()=>{
@@ -28,7 +40,7 @@ export default function PluginFrame({plugin,extension,scope,mode='active',readyK
       const value=standalone?previewSnapshot(previewTheme!):sdk!.snapshot(instance);
       if(plugin.hostApi===1){
         const data={name:value.editor?.file.name||'文稿',text:value.editor?.text||'',theme:value.theme,saved:!value.editor?.file.payload.untitled&&value.editor?.text===value.editor?.saved,initialEditing:Boolean(value.editor?.file.payload.untitled||value.editor?.file.payload.start_edit)},signature=JSON.stringify(data);
-        if(signature!==lastDocument){lastDocument=signature;post({channel:'cowork-host-v1',event:'document',data});}
+        if(signature!==lastDocument){const contentChanged=!lastDocument||JSON.parse(lastDocument).text!==data.text;lastDocument=signature;post({channel:'cowork-host-v1',event:'document',data:{...data,contentChanged,toolbarIntegrated:writing&&integrated&&instance.mode==='active'&&!hidden}});}
       }
       else post({channel:'cowork-host-v2',event:'state',data:value});
     };
@@ -59,6 +71,10 @@ export default function PluginFrame({plugin,extension,scope,mode='active',readyK
           console.error('plugin_command_failed',plugin.id,extension.id,message);reply({reported:true});return;
         }
         if(plugin.hostApi===1){
+          if(method==='document.controls'&&writing){
+            if(typeof params?.preview!=='boolean')throw new Error('写作视图状态无效。');
+            setWritingPreview(params.preview);reply({integrated:integrated&&instance.mode==='active'&&!hidden});return;
+          }
           const mapped:Record<string,string>={'document.read':'editors.get','document.change':'editors.change','document.save':'editors.save'};
           if(method==='document.render'){
             const value=await invoke('editors.get') as {text?:string} | undefined;
@@ -78,7 +94,7 @@ export default function PluginFrame({plugin,extension,scope,mode='active',readyK
     return ()=>{instance.active=false;clearTimeout(timer);cancelAnimationFrame(raf);unsubscribe?.();commandUnsubscribe?.();draftUnsubscribe?.();window.removeEventListener('message',listener);
       if(scope.tabId&&extension.target==='browser')void window.cowork.call('browser.surface',{tab_id:''}).catch(reason=>error?.(reason.message));
     };
-  },[identity,sdk,registry,host,standalone]);
+  },[identity,sdk,registry,host,standalone,integrated]);
   return <div className={'plugin-surface'+(hidden?' plugin-warm':'')} aria-hidden={hidden||undefined} data-ready={ready}>
     {!ready&&!failure&&<div className="editor-loading">正在打开界面…</div>}
     {failure&&<div className="plugin-failure" role="alert"><p>{failure}</p>{host&&<button onClick={()=>host.set('host:recoveryOpen',true)}>界面恢复</button>}</div>}

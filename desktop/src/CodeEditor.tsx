@@ -1,4 +1,7 @@
-import {useEffect, useLayoutEffect, useRef, useState} from 'react';
+import {useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
+import {CornerDownRight, Search, WrapText} from 'lucide-react';
+import {useFileToolbarContribution} from './FileToolbar';
+import type {MenuAction} from './MoreActions';
 import {Compartment, EditorState, StateEffect, type Extension} from '@codemirror/state';
 import {EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection} from '@codemirror/view';
 import {defaultKeymap, history, historyKeymap, indentWithTab} from '@codemirror/commands';
@@ -36,6 +39,11 @@ export default function CodeEditor(props: Props) {
   const root = useRef<HTMLDivElement>(null), editor = useRef<EditorView | null>(null), latest = useRef(props); latest.current = props;
   const [wrap, setWrap] = useState(snapshot?.wrap || false), [position, setPosition] = useState('1:1'), [failure, setFailure] = useState('');
   const language = props.file.payload.language || 'text';
+  const toolbar=useMemo(()=>({controls:<button className="file-toolbar-action" title="查找替换 (Ctrl+F)" aria-label="查找替换" onClick={()=>editor.current&&openSearchPanel(editor.current)}><Search size={15}/><span>查找替换</span></button>,menu:[
+    ['跳转行',CornerDownRight,async()=>{if(editor.current)gotoLine(editor.current);}],
+    [wrap?'取消自动换行':'自动换行',WrapText,async()=>setWrap(value=>!value)],
+  ] as MenuAction[]}),[wrap]);
+  const integrated=useFileToolbarContribution(toolbar);
   const wrapping = useRef(new Compartment()), syntax = useRef(new Compartment());
   useLayoutEffect(() => {
     let alive = true;
@@ -74,7 +82,7 @@ export default function CodeEditor(props: Props) {
     if(view && view.state.sliceDoc()!==props.text)view.dispatch({changes:{from:0,to:view.state.doc.length,insert:props.text}});
   }, [props.text]);
   return <section className="code-editor" aria-label="源码编辑器">
-    <div className="code-editor-actions"><button onClick={()=>editor.current&&openSearchPanel(editor.current)}>查找替换</button><button onClick={()=>editor.current&&gotoLine(editor.current)}>跳转行</button><label><input type="checkbox" checked={wrap} onChange={event=>setWrap(event.target.checked)}/>自动换行</label></div>
+    {!integrated&&<div className="code-editor-actions"><button onClick={()=>editor.current&&openSearchPanel(editor.current)}>查找替换</button><button onClick={()=>editor.current&&gotoLine(editor.current)}>跳转行</button><label><input type="checkbox" checked={wrap} onChange={event=>setWrap(event.target.checked)}/>自动换行</label></div>}
     {failure && <p className="error-text" role="alert">{failure}</p>}
     <div className="code-editor-surface" ref={root}/>
     <footer><span>{language === 'text' ? '纯文本' : language}</span><span>行:列 {position}</span><span>{props.text===props.saved?'已保存':'未保存'}</span></footer>

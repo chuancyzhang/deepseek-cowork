@@ -14,6 +14,7 @@ import Dialog from '../Dialog';
 import OfficeEditor from '../OfficeEditor';
 import FilePreview, {SpreadsheetWorkspace} from '../FilePreview';
 import MoreActions, {type MenuAction} from '../MoreActions';
+import {FileToolbarControls,FileToolbarProvider} from '../FileToolbar';
 import {FileHistoryPanel, ChangesPanel, WorkspaceDiff} from '../WorkspaceChanges';
 import {pathKey} from '../projects';
 import Workspace, { emptyWorkspace, type WorkspaceView } from '../Workspace';
@@ -233,18 +234,19 @@ export default function BuiltinWorkbench() {
     setWorkspaceExpanded(false); changeWorkspace({width: Math.min(95, width / box.width * 100)});
   }
 const fileTools = editor && current && <>{editor.file.payload.untitled?<input className="draft-file-name" aria-label="文稿文件名" value={editor.file.name} onChange={event=>setEditors(previous=>previous.map(item=>item.file.path===editor.file.path?{...item,file:{...item.file,name:event.target.value}}:item))}/>:<span title={editor.file.path}>{editor.file.name}</span>}
+  {!showingDiff&&<FileToolbarControls/>}
   {!showingDiff && !editor.file.payload.read_only && editor.text !== editor.saved && (!editor.file.payload.untitled || editor.text.trim()) && <button className="primary" onClick={() => void saveEditor(editor.file.path).catch(failure => error(failure.message))}>保存</button>}
   {!showingDiff && editor.file.payload.recovery_available && editor.text !== editor.saved && <button className="primary" onClick={() => void saveCopy()}>保存恢复副本</button>}
   {!showingDiff && editor.file.payload.office_family && <button className="secondary" onClick={() => void call<string>('file.external', {conversation_id:current.id,path:editor.file.path}).then(message => {if(message)error(message);}).catch(failure => error(failure.message))}>打开应用编辑</button>}
   {(fileChange || showingDiff) && <button className="secondary" onClick={() => setEditors(previous => previous.map(item =>
     item.file.path === editor.file.path ? {...item, showChanges: !showingDiff} : item
   ))}><FileDiff size={14} aria-hidden="true"/>{showingDiff ? '隐藏更改' : '显示更改'}</button>}
-  {!editor.file.payload.untitled&&<MoreActions key={editor.file.id} label="更多文件操作" actions={[
+  <MoreActions key={editor.file.id} editorMenu={!showingDiff} label="更多文件操作" actions={editor.file.payload.untitled?[]:[
     ['在资源管理器中打开', Folder, () => call('file.reveal', {conversation_id:current.id,path:editor.file.path})],
     ['复制路径', Copy, () => call('clipboard.write', {text:editor.file.path})],
     ...(!showingDiff && !editor.file.payload.office_family ? [['用本机应用打开', ExternalLink, async () => {const message=await call<string>('file.external', {conversation_id:current.id,path:editor.file.path});if(message)throw Error(message);}]] as MenuAction[] : []),
     ...(showingDiff ? [['刷新变更', RefreshCw, () => refreshChanges()]] : [['重新载入文件', RefreshCw, reloadFile]]) as MenuAction[],
-  ]} error={error}/>}</>;
+  ]} error={error}/></>;
 
 return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
     {sidebar && <Sidebar conversations={conversations} supplemental={sidebarConversations} layout={sidebarLayout} toolsRef={sidebarTools} onLayoutAction={changeSidebar} onError={error} projects={settings?.projects || []} selected={current?.id || ''} route={route} running={runningConversations}
@@ -368,7 +370,7 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
             select={selected => changeWorkspace({fileHistory: {...workspaceView.fileHistory!, selected}})} openFile={onMessageFile}/>}
           changesContent={<ChangesPanel cid={current.id} read={workspaceChanges} selection={selectedChange} select={selectChange}
             openFile={path => void openFile(path, false, true)} refresh={refreshChanges} error={error}/>}
-          error={error} confirm={confirm} libraryContent={<Suspense fallback={<div className="loading">正在打开资料库…</div>}><Library scope={'workspace:' + current.id} onError={error} confirm={confirm} projectsKey={JSON.stringify(settings?.projects || [])} onReference={(source, items) => addLibraryReference(source, items, current.id)}/></Suspense>} fileContent={<>
+          error={error} confirm={confirm} libraryContent={<Suspense fallback={<div className="loading">正在打开资料库…</div>}><Library scope={'workspace:' + current.id} onError={error} confirm={confirm} projectsKey={JSON.stringify(settings?.projects || [])} onReference={(source, items) => addLibraryReference(source, items, current.id)}/></Suspense>} fileContent={<FileToolbarProvider key={current.id+':'+editor?.file.path}>
           {editor && showingDiff && <div className="workspace-file-changes">
             <div className="file-toolbar">{fileTools}</div>
             {fileChange && changes ? <WorkspaceDiff key={fileChange.absolute_path} cid={current.id} file={fileChange} snapshot={changes} refresh={refreshChanges}/>
@@ -381,7 +383,7 @@ return <div className={`app-shell ${sidebar ? '' : 'sidebar-hidden'}`}>
           {editor && (editor.file.conflict || editor.file.unavailable) && <div className="run-error">原文件已变化或暂时无法打开。当前编辑仍保留，可以复制内容或<button className="secondary" onClick={() => void saveCopy()}>另存副本</button>。</div>}
           {editor ? <PluginSlot kind="editor" target={editor.file.payload.editor_target || editor.file.payload.kind} scope={{conversationId:current?.id,filePath:editor.file.path}}>{(['preview', 'html'].includes(editor.file.payload.kind) ? <FilePreview key={editor.file.id} cid={current!.id} toolbar={!showingDiff && fileTools} file={editor.file} text={editor.text} change={text => changeEditor(editor.file.path, text)} register={registerEditorFlush}/> : editor.file.payload.kind === 'sheet' ? <SpreadsheetWorkspace key={editor.file.id} cid={current!.id} file={editor.file} text={editor.text} onChange={text => changeEditor(editor.file.path, text)} error={error} register={registerEditorFlush}/> : editor.file.payload.kind !== 'text' ? <OfficeEditor key={editor.file.id} file={editor.file} text={editor.text} onChange={text => changeEditor(editor.file.path, text)} error={error} register={registerEditorFlush}/> : <Suspense fallback={<div className="loading">正在载入编辑器…</div>}><CodeEditor key={current.id + ":" + editor.file.path} cid={current.id} file={editor.file} text={editor.text} saved={editor.saved} change={text => changeEditor(editor.file.path,text)} save={async () => {await saveEditor(editor.file.path);}}/></Suspense> )}</PluginSlot> : <div className="empty-workspace">选择一个文件开始查看。</div>}
           </div>
-        </>}/></PluginSlot>}
+        </FileToolbarProvider>}/></PluginSlot>}
 
       </div> : <Suspense fallback={<div className="loading"><LoaderCircle className="spin"/>正在载入…</div>}><Management returnToChat={()=>void goRoute('chat')} key={route} route={route} settings={settings} updateSettings={setSettings} openConversation={id => void switchConversation(id)} onError={error} confirm={confirm} registerLeave={registerLeave}
         onReference={addLibraryReference} useEnterpriseCapability={useEnterpriseCapability} openEnterpriseAccount={() => {setSettingsTab('enterprise'); void goRoute('settings');}}/></Suspense>}

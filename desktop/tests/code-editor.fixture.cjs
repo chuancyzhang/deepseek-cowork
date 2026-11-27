@@ -16,8 +16,9 @@ const read=async code=>{try{return await window.webContents.executeJavaScript(co
 const until=async(code,timeout=12000)=>{const start=Date.now();while(Date.now()-start<timeout){if(await read(`Boolean(${code})`))return;await delay(40);}throw Error('Timed out: '+code+'\n'+await read('document.body.innerText')+'\n'+errors.join('\n'));};
 const click=async text=>{const selector=`[...document.querySelectorAll('button')].find(el=>el.textContent.trim()===${JSON.stringify(text)}&&!el.closest('[hidden]'))`;await until(`Boolean(${selector})`);await read(`${selector}.click()`);};
 const rpc=(method,params={})=>read(`window.cowork.call(${JSON.stringify(method)},${JSON.stringify(params)})`);
-const snapshot=async(name,selector)=>{const target=process.env.COWORK_EDITOR_SCREENSHOTS;if(!target)return;window.webContents.invalidate();await delay(300);await fs.mkdir(target,{recursive:true});
-  const rect=selector?await read(`(()=>{const {left,top,right,bottom}=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:Math.ceil(left),y:Math.ceil(top),width:Math.floor(right)-Math.ceil(left),height:Math.floor(bottom)-Math.ceil(top)};})()`):undefined;
+const snapshot=async(name,selector)=>{const target=process.env.COWORK_EDITOR_SCREENSHOTS;if(!target)return;await read('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');await window.webContents.capturePage();await delay(150);await fs.mkdir(target,{recursive:true});
+  const zoom=window.webContents.getZoomFactor();
+  const rect=selector?await read(`(()=>{const {left,top,right,bottom}=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();const z=${zoom};return {x:Math.ceil(left*z),y:Math.ceil(top*z),width:Math.floor(right*z)-Math.ceil(left*z),height:Math.floor(bottom*z)-Math.ceil(top*z)};})()`):undefined;
   await fs.writeFile(path.join(target,name+'.png'),(await window.webContents.capturePage(rect)).toPNG());};
 const input=async text=>read(`(()=>{const el=document.querySelector('[aria-label="消息输入"]');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(el,${JSON.stringify(text)});el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
 const key=async(keyCode,modifiers=[])=>{window.webContents.sendInputEvent({type:'keyDown',keyCode,modifiers});window.webContents.sendInputEvent({type:'keyUp',keyCode,modifiers});await delay(80);};
@@ -30,6 +31,9 @@ async function run(){
   await until('Boolean(document.querySelector("[aria-label=消息输入]"))');
   await input('保留这条原草稿');await read('document.querySelector(".chat-header-tools [aria-label=工作区]").click()');
   await until('Boolean(document.querySelector(".workspace"))');
+  assert.equal(await read('document.querySelectorAll(".workspace-bar [aria-label=打开任务],.workspace-bar [aria-label=打开子任务]").length'),0);
+  await until('document.querySelector(".workspace-start [aria-label=打开子任务]")');
+  await snapshot('workspace-new','.workspace');
   const cid=(await rpc('app.bootstrap')).last_conversation,conversation=await rpc('conversation.get',{conversation_id:cid}),workspace=conversation.meta.workspace_dir;
   assert.ok(path.resolve(workspace).startsWith(path.resolve(process.env.COWORK_APP_DATA_DIR)),workspace);
   const contents={'Demo.java':'public class Demo {\r\n    public static void main(String[] args) {\r\n        System.out.println("你好");\r\n    }\r\n}\r\n',
@@ -44,6 +48,8 @@ async function run(){
     await click(name);await until(`document.querySelector('.code-editor footer')?.textContent.includes(${JSON.stringify(language)})`);
     await until('document.querySelectorAll(".cm-content .cm-line span").length>0');
     assert.equal(await read('document.querySelectorAll(".workspace-content iframe").length'),0);
+    assert.equal(await read('document.querySelectorAll(".code-editor-actions").length'),0,'editor actions share the file toolbar');
+    assert.ok(await read('Boolean(document.querySelector(".file-toolbar [aria-label=查找替换]"))'));
   }
   await read('document.querySelector(".cm-content").focus()');await key('End',['control']);await window.webContents.insertText('// 编辑草稿');await delay(100);
   await until('document.querySelector(".code-editor footer")?.textContent.includes("未保存")');
@@ -58,7 +64,14 @@ async function run(){
   assert.equal(await fs.readFile(path.join(workspace,'demo.js'),'utf8'),contents['demo.js']+'// 保存验证');
   await click('Demo.java');await until('document.querySelector(".code-editor footer")?.textContent.includes("java")');
   await read('document.querySelector("[title=取消固定文件导航]").click();document.querySelector("[aria-label=工作区文件]").click()');
+  await until('!document.querySelector(".file-navigator")');
+  await read('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
   await snapshot('code-editor-light');
+  await read('document.querySelector("[title=更多文件操作]").click()');
+  await until('[...document.querySelectorAll(".file-actions-menu button")].some(button=>button.textContent==="跳转行")');
+  await click('自动换行');
+  await until('document.querySelector(".cm-lineWrapping")');
+  await read('document.querySelector("[title=更多文件操作]").click()');await click('取消自动换行');
   if (!await read('Boolean(document.querySelector(".cm-search"))')) await click('查找替换');
   await until('document.querySelector(".cm-search")');
   await rpc('themes.appearance',{value:{mode:'dark',reading:{}}});
@@ -70,6 +83,27 @@ async function run(){
   window.setSize(1400,930);window.webContents.setZoomFactor(1);await rpc('themes.appearance',{value:{mode:'light',reading:{}}});
   await read('document.querySelector("[aria-label=工作区文件]").click()');await until('document.querySelector(".file-navigator")');
   await click('说明.md');await until('document.querySelector(".workspace-content iframe")');
+  await until('document.querySelector(".file-toolbar [aria-label=编辑文档]")');
+  const writer=window.webContents.mainFrame.frames.find(frame=>frame.url.startsWith('cowork-plugin:'));
+  assert.equal(await writer.executeJavaScript('getComputedStyle(document.querySelector("header")).display'),'none');
+  await snapshot('markdown-preview','.workspace');
+  await read('document.querySelector("[aria-label=编辑文档]").click()');
+  await until('document.querySelector("[aria-label=预览文档]")');
+  await writer.executeJavaScript('(()=>{const input=document.querySelector("#text");input.value+="\\n\\n保留 Markdown 草稿";input.dispatchEvent(new Event("input"));})()');
+  await until('document.querySelector(".file-toolbar .primary")?.textContent==="保存"');
+  await read('document.querySelector("[aria-label=预览文档]").click()');
+  await until('document.querySelector("[aria-label=编辑文档]")');
+  await snapshot('markdown-draft','.workspace');
+  window.setSize(900,720);window.webContents.setZoomFactor(1.25);await delay(180);
+  assert.ok(await read('document.querySelector(".file-toolbar").scrollWidth<=document.querySelector(".file-toolbar").clientWidth+1'));
+  await snapshot('markdown-narrow','.workspace');
+  await read('document.querySelector("[aria-label=编辑文档]").click()');await until('document.querySelector("[aria-label=预览文档]")');
+  assert.ok(await read('document.querySelector(".file-toolbar").scrollWidth<=document.querySelector(".file-toolbar").clientWidth+1'),'Markdown editing actions must fit the same toolbar');
+  await read('document.querySelector("[title=更多文件操作]").click()');await click('标题');
+  await until('document.querySelector(".file-toolbar .primary")');
+  assert.ok((await writer.executeJavaScript('document.querySelector("#text").value')).endsWith('## '),'formatting commands reach the current writing view');
+  await snapshot('markdown-edit-narrow','.workspace');
+  window.setSize(1400,930);window.webContents.setZoomFactor(1);
   assert.equal(await read('document.querySelectorAll(".code-editor").length'),0);
   await read('document.querySelector("[aria-label=工作区文件]").click()');await until('document.querySelector(".file-navigator")');
   await click('notes.txt');await until('document.querySelector(".code-editor footer")?.textContent.includes("纯文本")');

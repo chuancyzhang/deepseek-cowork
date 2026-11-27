@@ -8,6 +8,7 @@ import TerminalWorkspace from './TerminalWorkspace';
 import ReviewWorkspace from './ReviewWorkspace';
 import {reviewTitle, type ReviewEdit} from './reviews';
 import TaskWorkspace, { type TaskView } from './TaskWorkspace';
+import {agentStatuses} from './subagents';
 
 const call = <T = any,>(method: string, params?: any) => window.cowork.call<T>(method, params);
 export type WorkbenchTab = { id: string; kind: string; title: string; cwd: string; url?: string; owner: string; control_revision: number; status: string };
@@ -140,6 +141,19 @@ export default function Workspace(props: Props) {
     if (fallbackTab && (value.selected === 'empty' || value.selected === 'new' && !value.newOpen)) fallbackTab.select();
   }, [fallbackTab, value.selected, value.newOpen]);
   const showNew = !contentTabs.length || value.selected === 'new' && value.newOpen;
+  const [startAgents,setStartAgents]=useState<{status:string}[]|null>(null),[startError,setStartError]=useState(''),[startRevision,setStartRevision]=useState(0);
+  useEffect(()=>{
+    if(!showNew)return;
+    let active=true,timer:ReturnType<typeof setTimeout>;
+    setStartAgents(null);setStartError('');
+    const update=async()=>{try{const agents=await call<{status:string}[]>('agent.list',{conversation_id:cid});if(!active)return;setStartAgents(agents);setStartError('');if(['running','queued','stopping'].includes(conversation.run?.status||'')||agents.some(item=>['running','queued','stopping'].includes(item.status)))timer=setTimeout(update,2000);}catch(failure){if(active)setStartError((failure as Error).message);}};
+    void update();return()=>{active=false;clearTimeout(timer);};
+  },[showNew,cid,conversation.run?.id,conversation.run?.status,startRevision]);
+  const activeAgents=startAgents?.filter(item=>['running','queued','stopping'].includes(item.status)).length||0;
+  const completedAgents=startAgents?.filter(item=>item.status==='completed').length||0;
+  const failedAgents=startAgents?.filter(item=>['failed','incomplete'].includes(item.status)).length||0;
+  const agentSummary=startAgents===null?'':startAgents.length?[activeAgents?`${activeAgents} 项进行中`:'',failedAgents?`${failedAgents} 项未完成`:'',completedAgents?`${completedAgents} 项已完成`:''].filter(Boolean).join(' · '):'';
+  function openTaskTab(agents=false){void navigate(()=>{change({selected:agents?'agents':'tasks',...(agents?{agentsOpen:true}:{tasksPinned:true,tasksOpen:false}),...(!value.filesPinned?{filesOpen:false}:{})});requestAnimationFrame(()=>root.current?.querySelector<HTMLButtonElement>('[role="tab"][aria-selected=true]')?.focus());});}
   const activeTab = !contentTabs.length && !(expanded && value.selected === 'conversation') ? 'new' : value.selected;
   const tabItems: TabItem[] = [
     ...(expanded ? [{id:'conversation',name:'对话',icon:<MessageSquare size={14}/>,select:()=>change({selected:'conversation'})}] : []),
@@ -154,11 +168,6 @@ export default function Workspace(props: Props) {
     <div className="workspace-bar">
       <button data-workspace-toggle className={'icon-button ' + (value.filesOpen ? 'selected' : '')} title="工作区文件" aria-label="工作区文件" aria-expanded={value.filesOpen} onClick={() => { change({filesOpen: !value.filesOpen, tasksOpen: false}); void props.refreshFiles(); }}><Folder size={17}/></button>
       {props.canViewChanges && !value.changesOpen && <button className="icon-button" title="查看工作目录变更" aria-label="查看工作目录变更" onClick={props.openChanges}><FileDiff size={17}/></button>}
-      {!value.tasksPinned && <button data-workspace-toggle className="icon-button" title="任务" aria-label="打开任务" onClick={() => void navigate(() => {
-        change({selected: 'tasks', tasksPinned: true, tasksOpen: false, ...(!value.filesPinned ? {filesOpen: false} : {})});
-        requestAnimationFrame(() => root.current?.querySelector<HTMLButtonElement>('[role="tab"][title="任务"]')?.focus());
-      })}><ListChecks size={17}/></button>}
-      {!value.agentsOpen && <button className="icon-button" title="子任务" aria-label="打开子任务" onClick={()=>void navigate(()=>change({selected:'agents',agentsOpen:true,...(!value.filesPinned ? {filesOpen:false} : {})}))}><Users size={17}/></button>}
       <div className="workspace-tabs" role="tablist" aria-label="工作区标签">
         {tabItems.map(tab=>tabButton(tab.id,tab.name,tab.icon,tab.select,tab.close))}
       </div>
@@ -186,10 +195,10 @@ export default function Workspace(props: Props) {
       <div className="workspace-content" hidden={expanded && value.selected === 'conversation'}>
         {loadError && <div className="inline-error" role="alert">{loadError}<button onClick={() => void refresh()}>重试</button></div>}
         {selectedReview ? <ReviewWorkspace key={cid + ':' + selectedReview} cid={cid} id={selectedReview} conversation={conversation} edit={value.reviewEdits?.[selectedReview]} change={edit=>change({reviewEdits:{...value.reviewEdits,[selectedReview]:edit}})} openReview={props.openReview} openFile={props.openFile} register={props.registerEditorFlush} confirm={props.confirm} saved={()=>void props.refreshFiles()}/> : value.selected === 'file-history' && value.fileHistory ? props.historyContent : value.selected === 'library'  && value.libraryOpen ? <div className="workspace-library">{props.libraryContent}</div> : showAgents ? agentContent : showTasks ? taskContent : value.selected === 'changes' && value.changesOpen ? props.changesContent : fileSelected ? props.fileContent : selectedTab?.kind === 'terminal' ? <PluginSlot kind="panel" target="terminal" scope={{conversationId:cid,tabId:selectedTab.id}}><TerminalWorkspace key={selectedTab.id} cid={cid} tab={selectedTab} dark={props.dark} error={error} refresh={refresh}/></PluginSlot> : selectedTab?.kind === 'web' ? <PluginSlot kind="panel" target="browser" scope={{conversationId:cid,tabId:selectedTab.id}}><BrowserWorkspace key={selectedTab.id} cid={cid} tab={selectedTab} obscured={props.obscured || floating || tabsOpen} error={error} refresh={refresh}/></PluginSlot> : <div className="workspace-start">
-          <h2>新标签页</h2>
-          <section><label htmlFor={'address-' + cid}><Globe size={17}/>打开网页</label><form className="new-page-address" onSubmit={event => {event.preventDefault(); void openNative('web');}}><input id={'address-' + cid} aria-label="新网页地址" placeholder="输入网址" value={address} onChange={event => setAddress(event.target.value)}/><button className="icon-button" title="打开网页" disabled={!address.trim() || busy}><ChevronRight size={17}/></button></form></section>
-          <section className="workspace-start-row"><div><FileText size={18}/><span>页面<small>记录想法或撰写内容</small></span></div><button className="secondary" onClick={() => void props.createDocument()}>新增页面</button></section>
-          <section className="workspace-start-row"><div><Terminal size={18}/><span>终端<small>在当前工作目录运行命令</small></span></div><div className="workspace-terminal-choice"><select aria-label="新终端类型" value={shell} onChange={event => setShell(event.target.value)}><option value="">默认终端</option>{profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select><button className="secondary" disabled={busy} onClick={() => void openNative('terminal')}>打开终端</button></div></section>
+          <div className="workspace-start-tasks"><button className="workspace-start-entry" aria-label="打开任务" onClick={()=>openTaskTab()}><ListChecks size={18}/><span>任务</span><small>{agentStatuses[conversation.run?.status||'']||''}</small><ChevronRight size={16}/></button><button className="workspace-start-entry" aria-label="打开子任务" onClick={()=>openTaskTab(true)}><Users size={18}/><span>子任务</span><small>{agentSummary}</small><ChevronRight size={16}/></button>{startError&&<div className="inline-error" role="alert">子任务状态读取失败：{startError}<button onClick={()=>setStartRevision(value=>value+1)}>重试</button></div>}</div>
+          <form className="new-page-address" onSubmit={event=>{event.preventDefault();void openNative('web');}}><Globe size={17}/><input id={'address-'+cid} aria-label="新网页地址" placeholder="输入网址" value={address} onChange={event=>setAddress(event.target.value)}/><button className="icon-button" title="打开网页" disabled={!address.trim()||busy}><ChevronRight size={17}/></button></form>
+          <button className="workspace-start-entry" onClick={()=>void props.createDocument()}><FileText size={18}/><span>新增页面</span><ChevronRight size={16}/></button>
+          <section className="workspace-start-row"><div><Terminal size={18}/><span>终端</span></div><div className="workspace-terminal-choice"><select aria-label="新终端类型" value={shell} onChange={event=>setShell(event.target.value)}><option value="">默认终端</option>{profiles.map(profile=><option key={profile.id} value={profile.id}>{profile.name}</option>)}</select><button className="secondary" disabled={busy} onClick={()=>void openNative('terminal')}>打开终端</button></div></section>
         </div>}
       </div>
     </div>

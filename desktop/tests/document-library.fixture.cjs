@@ -54,7 +54,7 @@ const frame=()=>window.webContents.mainFrame.framesInSubtree.find(item=>item.url
 const readyEditor=async()=>{await until('Boolean(document.querySelector(".plugin-surface iframe"))');const start=Date.now();while(Date.now()-start<10000){if(frame()&&await frame().executeJavaScript('Boolean(document.querySelector("#text"))&&document.querySelector("#status").textContent!=="正在加载…"'))return;await delay(40);}throw Error('Writing frame unavailable');};
 const snapshot=async(name,selector)=>{
   if(!process.env.COWORK_FIX_SCREENSHOTS)return;
-  await fs.mkdir(process.env.COWORK_FIX_SCREENSHOTS,{recursive:true});await delay(160);
+  await fs.mkdir(process.env.COWORK_FIX_SCREENSHOTS,{recursive:true});await read('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');await window.webContents.capturePage();await delay(160);
   const rect=selector?await read(`(()=>{const {x,y,width,height}=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:Math.ceil(x),y:Math.ceil(y),width:Math.floor(width),height:Math.floor(height)};})()`):undefined;
   const capture=rect?await window.webContents.capturePage(rect):await window.webContents.capturePage();
   await fs.writeFile(path.join(process.env.COWORK_FIX_SCREENSHOTS,name+'.png'),capture.toPNG());
@@ -108,6 +108,10 @@ async function run(){
   assert.equal((await rpc('workspace.list',{conversation_id:cid})).files.length,0);
   await click('新增页面');await readyEditor();
   await input('[aria-label=文稿文件名]','工作笔记.md');
+  await until('Boolean(document.querySelector(".file-toolbar [aria-label=预览文档]"))');
+  await read('document.querySelector(".file-toolbar [title=更多文件操作]").click()');await click('标题');
+  await until('Boolean(document.querySelector(".file-toolbar .primary"))');
+  assert.equal(await frame().executeJavaScript('document.querySelector("#text").value'),'## ','new writing drafts keep their formatting menu');
   await frame().executeJavaScript('document.querySelector("#text").value="# 工作笔记\\n\\n整理本周资料，记录下一步计划。";document.querySelector("#text").dispatchEvent(new Event("input"));');
   await until('Boolean(document.querySelector(".file-toolbar .primary"))');await delay(700);
   const before=await rpc('view.get',{conversation_id:cid});assert.ok(JSON.stringify(before).includes('下一步计划'));

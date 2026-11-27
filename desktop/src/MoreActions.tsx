@@ -1,13 +1,16 @@
 import {useEffect, useLayoutEffect, useRef, useState, type RefObject} from 'react';
 import {MoreHorizontal} from 'lucide-react';
+import {useFileToolbarMenu} from './FileToolbar';
 
 export type MenuAction = [string, React.ElementType, () => Promise<unknown>];
-export default function MoreActions({label, actions, error, triggerRef, onOpenChange}: {
+export default function MoreActions({label, actions, error, triggerRef, onOpenChange, editorMenu=false}: {
   label: string; actions: MenuAction[]; error: (message: string) => void;
+  editorMenu?:boolean;
   triggerRef?: RefObject<HTMLButtonElement | null>; onOpenChange?: (open: boolean) => void;
 }) {
   const [open, setOpen] = useState(false), root = useRef<HTMLDivElement>(null), internalTrigger = useRef<HTMLButtonElement>(null);
   const trigger = triggerRef || internalTrigger;
+  const editorActions=useFileToolbarMenu(),items=editorMenu?[...editorActions,...actions]:actions;
   useLayoutEffect(() => {
     onOpenChange?.(open);
     return () => onOpenChange?.(false);
@@ -24,6 +27,6 @@ export default function MoreActions({label, actions, error, triggerRef, onOpenCh
     if(event.key === 'Escape'){event.preventDefault();setOpen(false);trigger.current?.focus();}
     if(open && ['ArrowDown','ArrowUp'].includes(event.key)){event.preventDefault();const buttons=[...root.current!.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')],index=buttons.indexOf(document.activeElement as HTMLButtonElement);buttons[(index+(event.key==='ArrowDown'?1:buttons.length-1))%buttons.length]?.focus();}
   }}><button ref={trigger} className="icon-button" title={label} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}><MoreHorizontal size={17}/></button>
-    {open && <div className="file-actions-menu" role="menu">{actions.map(([label,Icon,action]) => <button role="menuitem" key={label} onClick={() => {setOpen(false);trigger.current?.focus();void action().catch(failure => error(failure.message));}}><Icon size={15}/>{label}</button>)}</div>}
+    {open && <div className="file-actions-menu" role="menu">{items.map(([label,Icon,action]) => <button role="menuitem" key={label} onClick={() => {setOpen(false);trigger.current?.focus();void action().catch(failure => error(failure.message));}}><Icon size={15}/>{label}</button>)}</div>}
   </div>;
 }

@@ -6,15 +6,15 @@ DeepSeek Cowork is a local Windows desktop agent workspace that brings conversat
 
 This is an independent personal project, unaffiliated with DeepSeek.
 
-Documented version: **5.4.2** · [Version notes](docs/releases/5.4.2.md) · [Release history](docs/releases/index.md)
+Documented version: **5.4.3** · [Version notes](docs/releases/5.4.3.md) · [Release history](docs/releases/index.md)
 
 ## What you can do
 
-- **Conversations and projects**: separate chat directories, project sessions, history search, guidance during execution, execution details, and subtasks.
-- **Files and deliverables**: file and image attachments, Office previews, text and spreadsheet editing, HTML drafts, Markdown writing pages, Office/PDF output, and Git working-directory diffs.
+- **Conversations and projects**: separate chat directories, project sessions, history search, guidance during execution, live tool output, execution details, and dedicated subtask views.
+- **Files and deliverables**: attachments isolated by chat, per-turn file and change records, continuous Office/PDF reading and layout review, text and spreadsheet editing, HTML drafts, Markdown writing pages, and Git working-directory diffs.
 - **Analysis and media**: bundled Python libraries for data analysis, Mermaid diagrams, interactive visualizations, and a multimedia Skill with separately configured image and video services.
 - **Specialized capabilities**: built-in and optional Skills, SkillHub installation, MCP services, conversation experts, and browser automation.
-- **Knowledge and collaboration**: local project files, WeKnora, Tencent Docs, Lexiang, enterprise accounts and models, and team spaces.
+- **Knowledge and collaboration**: local project files, WeKnora, Tencent Docs, Lexiang, enterprise accounts, models and capabilities assigned to departments or members, shared team deliverables, and chat-request auditing.
 - **Recurring work**: saved tasks, schedules, messaging channels, and scheduled result delivery.
 - **Personalization**: themes, AI theme design, Visualize, long-term memory, and an Experience System.
 

@@ -1,6 +1,6 @@
 import re
 
-APP_VERSION = "5.4.2"
+APP_VERSION = "5.4.3"
 
 
 def normalize_version(value):

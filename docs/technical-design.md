@@ -1,6 +1,6 @@
 # DeepSeek Cowork 技术文档
 
-文档适用版本：**5.4.2**
+文档适用版本：**5.4.3**
 
 本文面向开发者与维护者，围绕一次任务如何进入系统、形成模型请求、执行工具、保存事实并呈现成果，说明各层职责和不可破坏的约束。能力开发、构建与测试沿用同一套边界。桌面操作见[用户手册](user-guide.md)，企业中心部署见[企业部署指南](enterprise/deployment.md)。
 
@@ -461,7 +461,13 @@ Agnes 图片与视频、火山方舟视频使用独立请求契约。OpenAI 兼�
 
 公共资料由 `core/local_library.py` 管理，支持导入、目录编辑、剪切复制及应用内回收站；文件与原件分开保存。项目资料按已登记项目及聊天工作目录汇总文件，按规范路径去重并排除已归档项目，不搬动原文件；添加到聊天复用附件提交边界。远程资料库通过各来源适配器访问 WeKnora、腾讯文档和乐享。任务提交时绑定来源、身份和选定资料范围；目录和正文缓存按身份与授权代次组织。
 
-企业中心采用 FastAPI、PostgreSQL 和同源静态页面，处理认证、模型授权与代理、提问记录、客户端分发及团队空间。空间共享对象保存在中心，本机任务在桌面运行。服务部署和配置见[企业部署指南](enterprise/deployment.md)。
+企业中心采用 FastAPI、PostgreSQL 和同源静态页面，处理认证、部门与成员、模型授权与代理、企业能力、聊天请求审计、客户端分发及团队空间。空间共享对象保存在中心，本机任务在桌面运行，员工主动选择内容发布为团队成果。服务部署和配置见[企业部署指南](enterprise/deployment.md)。
+
+`web/platform/server/departments.py` 计算部门继承权限，资源可用范围为个人授权与所在部门、上级部门授权的并集。企业 Skill、MCP 和专家先保存草稿、检查并发布，再分配给成员或部门；专家及其关联能力分别检查权限。`core/enterprise_capabilities.py` 在发送时确定本轮能力版本和企业身份，`core/enterprise_capability_runtime.py` 将其装入本轮运行环境。新发布版本供后续轮次使用，停用或撤权阻止后续调用；账号切换保持身份隔离。MCP 支持 Streamable HTTP，员工凭据保存在本机。
+
+`core/enterprise_chat_audit.py` 与 `web/platform/server/chat_audit.py` 保存符合策略的请求副本。每个成员的每个聊天只保留最近一次请求，保留 30 天；平台操作独立保留 90 天。副本省略认证凭据和内嵌文件数据，超过 4 MiB 时记录正文未保存。自配模型执行企业任务的审计由管理员启用，默认关闭。审计上传队列只重试上传副本，不重放模型请求。管理页支持成员、时间和关键词筛选、Excel 元数据导出，以及已保存 JSON 正文的展开、折叠和复制。
+
+数据库结构版本 6 增加部门与资源授权，版本 5 增加企业能力和聊天审计；升级通过既有迁移入口执行并保留原个人授权。Linux x86_64 与 ARM64 可原生构建后台，现有离线镜像包仅覆盖 amd64；可信内网 HTTP 使用独立 Compose 配置。桌面企业包绑定平台地址，推荐版本检查与下载无需企业登录，安装仍由员工确认。企业后台部署包与桌面发行 ZIP 分别构建。
 
 ## 主题设置与数据处理
 
@@ -542,7 +548,7 @@ Remove-Item Env:COWORK_TEST_DESKTOP_SERVICE
 
 ```text
 updates/desktop-windows-x64/latest.json
-updates/desktop-windows-x64/cowork-desktop-v5.4.2-windows-x64.zip
+updates/desktop-windows-x64/cowork-desktop-v5.4.3-windows-x64.zip
 ```
 
 清单字段如下：
@@ -555,7 +561,7 @@ updates/desktop-windows-x64/cowork-desktop-v5.4.2-windows-x64.zip
 | `target_os` / `arch` | `windows` / `x64` |
 | `filename` | `cowork-desktop-v版本号-windows-x64.zip` |
 | `size` / `sha256` | ZIP 实际字节数和 SHA-256 |
-| `notes` | `docs/releases/版本号.md` 全文，本版为 `docs/releases/5.4.2.md` |
+| `notes` | `docs/releases/版本号.md` 全文，本版为 `docs/releases/5.4.3.md` |
 
 发布顺序为：确定版本与说明 → 构建 EXE → 打包并审计 → GitHub Release 附加 ZIP 和清单 → 公共服务器上传同一 ZIP → 原子替换清单。GitHub 标签采用 `v版本号`。
 

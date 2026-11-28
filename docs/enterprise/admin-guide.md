@@ -1,6 +1,6 @@
 # DeepSeek Cowork 企业版管理员指南
 
-文档适用版本：**5.4.2**
+文档适用版本：**5.4.3**
 
 向部署人员取得企业后台地址，例如 `https://cowork.example.internal/app`。x86_64 与 ARM64 服务器提供相同的管理页面。服务器准备、证书和健康检查见[Linux 管理后台部署指南](deployment.md)。
 

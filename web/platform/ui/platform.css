@@ -296,6 +296,18 @@ svg.admin-icon { background: none; }
 .admin-detail-section > :is(h2, h3, p, dl) { margin: 0; }
 .admin-detail-section h3 { font-size: 13px; }
 .admin-detail-section p, .admin-fields, .admin-access { font-size: 13px; }
+.audit-body { margin-block-start: 14px; }
+.audit-body-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.audit-body-toggle { padding-inline: 4px; border-color: transparent; background: transparent; font-weight: 600; }
+.audit-body-toggle::before {
+  content: ""; inline-size: 6px; block-size: 6px; margin-inline: 2px 4px;
+  border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg);
+}
+.audit-body-toggle[aria-expanded="true"]::before { transform: rotate(45deg); }
+.audit-body pre {
+  min-inline-size: 0; max-block-size: min(48vh, 32rem); overflow: auto; overscroll-behavior: contain;
+  padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface);
+}
 .admin-fields { display: grid; grid-template-columns: fit-content(45%) minmax(0, 1fr); gap: 7px 14px; margin: 0; }
 .admin-fields dt { color: var(--muted); }
 .admin-fields dd { margin: 0; min-inline-size: 0; }

@@ -445,6 +445,69 @@ async function auditSettingsPage() {
   };
 }
 
+function renderAuditBody(container, item) {
+  if (item.omitted) {
+    container.insertAdjacentHTML("beforeend", '<div class="admin-detail-section"><p class="muted">请求内容超过大小限制，仅保留请求信息。</p></div>');
+    return;
+  }
+  container.insertAdjacentHTML("beforeend", `<div class="admin-detail-section audit-body">
+    <div class="audit-body-actions">
+      <button type="button" class="audit-body-toggle" aria-expanded="false" aria-controls="audit-json">展开请求正文</button>
+      <button type="button" class="audit-body-copy">复制 JSON</button>
+    </div>
+    <p class="muted" role="status" hidden></p>
+    <pre id="audit-json" tabindex="0" aria-label="请求正文 JSON" aria-live="off" hidden></pre>
+  </div>`);
+  const toggle = container.querySelector(".audit-body-toggle");
+  const copy = container.querySelector(".audit-body-copy");
+  const status = container.querySelector('[role="status"]');
+  const pre = container.querySelector("#audit-json");
+  let formatted;
+  const json = () => formatted ??= JSON.stringify(item.parameters, null, 2);
+  function expand(open) {
+    if (open && !pre.hasChildNodes()) pre.textContent = json();
+    pre.hidden = !open;
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.textContent = open ? "收起请求正文" : "展开请求正文";
+  }
+  toggle.onclick = () => {
+    status.hidden = true;
+    expand(pre.hidden);
+  };
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(json());
+    } catch {
+      if (!pre.isConnected) return;
+      const wasHidden = pre.hidden;
+      expand(true);
+      pre.focus({preventScroll:true});
+      const range = document.createRange();
+      range.selectNodeContents(pre);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      // Intranet HTTP and browsers with restricted clipboard access can still copy a selection.
+      let copied = false;
+      try {
+        copied = document.execCommand("copy");
+      } catch {
+        // Leave the full text selected for a keyboard copy.
+      }
+      if (!copied) {
+        status.textContent = "已选中正文，请按 Ctrl+C（Mac 用 ⌘C）复制。";
+        status.hidden = false;
+        return;
+      }
+      selection.removeAllRanges();
+      expand(!wasHidden);
+      copy.focus({preventScroll:true});
+    }
+    status.textContent = "已复制完整 JSON。";
+    status.hidden = false;
+  };
+}
+
 async function chatAuditPage() {
   const route = location.pathname.slice((base + "/app/audit").length);
   if (route === "/settings") return auditSettingsPage();
@@ -502,10 +565,10 @@ async function chatAuditPage() {
       try {
         const item = await api("/admin/chat-audit/" + encodeURIComponent(row.id));
         if (requestRevision !== selectedRevision) return;
-        const body = item.omitted ? "请求内容超过大小限制，仅保留请求信息。" : JSON.stringify(item.parameters, null, 2);
         summary.innerHTML = '<h2>最近一次请求</h2>' +
           adminFields([["成员",row.member_name],["模型", row.model_name + (row.model_source === "personal" ? " · 自配模型" : "")],
-            ["时间",date(item.captured_at)]]) + '<div class="admin-detail-section"><pre>' + esc(body) + '</pre></div>';
+            ["时间",date(item.captured_at)]]);
+        renderAuditBody(summary, item);
         focusAdminDetail(summary);
       } catch (error) {
         if (requestRevision !== selectedRevision || error.name === "AbortError") return;

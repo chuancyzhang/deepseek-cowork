@@ -2,38 +2,35 @@
 
 [中文](README_CN.md) | [English](README.md) | [User guide](docs/user-guide.md) | [Enterprise overview](docs/enterprise/README.md) | [Technical guide](docs/technical-design.md)
 
-DeepSeek Cowork is a local Windows desktop agent workspace that brings conversations, project files, tool execution, specialized capabilities, and deliverables into one workflow. Describe a goal, provide source material, follow the execution, and edit the resulting files.
+DeepSeek Cowork is a local Windows desktop agent workspace that brings conversations, project files, code and tool execution, specialized skills, and deliverable editing into one window. State your goal, attach source files, follow each step live, and review or edit the resulting files right beside the chat.
 
 This is an independent personal project, unaffiliated with DeepSeek.
 
 Documented version: **5.4.3** · [Version notes](docs/releases/5.4.3.md) · [Release history](docs/releases/index.md)
 
-## What you can do
+## Key capabilities
 
-- **Conversations and projects**: separate chat directories, project sessions, history search, guidance during execution, live tool output, execution details, and dedicated subtask views.
-- **Files and deliverables**: attachments isolated by chat, per-turn file and change records, continuous Office/PDF reading and layout review, text and spreadsheet editing, HTML drafts, Markdown writing pages, and Git working-directory diffs.
-- **Analysis and media**: bundled Python libraries for data analysis, Mermaid diagrams, interactive visualizations, and a multimedia Skill with separately configured image and video services.
-- **Specialized capabilities**: built-in and optional Skills, SkillHub installation, MCP services, conversation experts, and browser automation.
-- **Knowledge and collaboration**: local project files, WeKnora, Tencent Docs, Lexiang, enterprise accounts, models and capabilities assigned to departments or members, shared team deliverables, and chat-request auditing.
-- **Recurring work**: saved tasks, schedules, messaging channels, and scheduled result delivery.
-- **Personalization**: themes, AI theme design, Visualize, long-term memory, and an Experience System.
+- **Conversations and multitasking**: bind chats to local project folders or run standalone sessions, steer running tasks at any time, inspect live code and command output, and track delegated subtasks in a dedicated tab.
+- **File reading, editing, and change tracking**: read Word/PPT/PDF documents continuously with AI layout checks, inspect wide Excel sheets in region-reading mode, edit code, spreadsheets, HTML, and Markdown in place, and review either per-turn file changes or live Git working-tree diffs.
+- **Data analysis, charts, and media**: run data analysis and Jupyter notebooks with bundled Python libraries, render Mermaid diagrams, interactive Visualize views, and sandboxed HTML/JavaScript previews, and configure dedicated models for image and video generation or video understanding.
+- **Knowledge libraries and extensibility**: organize public and project files locally, connect WeKnora, Tencent Docs, and Lexiang, install Skills from SkillHub or local packages, connect MCP servers, switch conversation experts, and automate either the built-in browser or an external Chrome / Edge browser.
+- **Schedules and enterprise collaboration**: save recurring tasks with schedules, connect Feishu, DingTalk, WeCom, QQ, or WeChat for remote triggers and result delivery, and use the enterprise edition for department-based access control, shared Skills/MCP/experts, team spaces, and chat-request compliance auditing.
+- **Personalization and experience**: customize themes and reading typography, design and test workspace changes safely in Creation Mode or via the [UI SDK](desktop/sdk/README.md), and accumulate long-term memory and reusable experience across sessions.
 
 ## Get started
 
-1. Extract the complete `cowork-desktop-vVERSION-windows-x64.zip` build and run `deepseek-cowork.exe`. Local builds are not automatically published to [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases); older releases retain their old entry point.
-2. Add a service and model under Settings → Models & Services, or sign in to an enterprise account. Production builds use the original configuration, conversation database, attachments, and workspaces in place; no copy or manual import is required.
-3. Start a chat, attach source material, and describe the task. Select a project directory when working on an existing project.
-4. Follow the answer and execution, then open, edit, and save deliverables in the workspace.
+1. Extract the complete `cowork-desktop-vVERSION-windows-x64.zip` archive and launch `deepseek-cowork.exe` inside the extracted `Cowork` folder.
+2. Add a model service under **Settings → Models & Services**, or sign in under **Settings → Enterprise Account**. Upgrades reuse your existing local configuration, chat database, attachments, and workspaces automatically.
+3. Start a new chat. Pick a project folder below the composer when working on an existing codebase or folder, attach your reference files, and describe what you want produced.
+4. Follow the execution timeline, add follow-up instructions if needed, and click any generated file to inspect, edit, and save it in the right-hand workspace.
 
-See the [user guide](docs/user-guide.md) for detailed instructions in Chinese.
-
-The [UI SDK](desktop/sdk/README.md) supports complete workbenches, pages, panels, editors, commands, and menus. Creation mode previews and tests candidates before application. The stable host preserves drafts and unsaved edits while background tasks continue through plugin changes.
+See the [user guide](docs/user-guide.md) (in Chinese) for step-by-step instructions and troubleshooting.
 
 ## Run from source
 
-The desktop uses Electron + React/TypeScript for the interface and native integration, Python for models and tools, and SQLite for local history. See the [workspace guide](docs/user-guide.md#认识工作台) and [development/build instructions](docs/technical-design.md#构建与发布). Windows is the current delivery target; Apple Silicon macOS and UOS V25 releases require target-system validation.
+The desktop app combines **Electron + React/TypeScript + Python + SQLite**: Electron hosts the native window and webviews, React renders the workbench and plugin surfaces, Python drives model protocols and tools, and SQLite stores local history. See the [workspace overview](docs/user-guide.md#认识工作台) and [build and release guide](docs/technical-design.md#构建与发布).
 
-Use Python 3.12+ (the current Windows release uses 3.14) and Node.js 22.12+ with npm. Desktop JavaScript tools can reuse Electron's Node.js runtime; npm for source builds must still be installed separately. Run these commands from the repository root:
+Install Python 3.12+ (the Windows release bundles Python 3.14) and Node.js 22.12+ with npm, then run from the repository root:
 
 ```powershell
 git clone https://github.com/chuancyzhang/deepseek-cowork.git
@@ -48,7 +45,7 @@ node desktop/node_modules/electron/install.js
 
 ## Build a release
 
-Prepare the pinned runtimes in a Windows build environment, then build the executable and release ZIP:
+Fetch the pinned bundled runtimes in a Windows build environment, then build the desktop executable and release archive:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
@@ -56,23 +53,23 @@ $env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
 npm --prefix desktop run package:win
 ```
 
-Packaging produces `desktop/out/DeepSeek Cowork-win32-x64`, a distributable ZIP, and `latest-desktop-windows-x64.json`. Updates distinguish Electron packages from legacy layouts. Signing and publication are separate steps. See [build and release instructions](docs/technical-design.md#构建与发布).
+Packaging outputs the runnable directory, `cowork-desktop-vVERSION-windows-x64.zip`, and `latest-desktop-windows-x64.json` under `desktop/out/`. Local builds are not automatically uploaded to [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases); code signing and publication are separate steps. Apple Silicon macOS and UOS V25 builds require native packaging and verification on target hardware. See [build and release instructions](docs/technical-design.md#构建与发布).
 
 ## Design principles
 
-- **Everything is Tool**: executable actions share tool registration, authorization, execution, and results. Skills organize guidance and resources; experts provide roles.
-- **AI-designed UI**: declarative themes and isolated previews let users review and apply changes to the workspace.
-- **Experience System**: history records the process, memory stores lasting facts, experience captures reusable methods, and Skills organize specialized workflows. This is not model fine-tuning.
+- **Everything is Tool**: executable actions share one tool registration, authorization, execution, and result pipeline; Skills package workflows and references, while experts combine roles with selected capabilities.
+- **AI-designed UI**: declarative themes, Creation Mode candidates, and [UI SDK](desktop/sdk/README.md) plugins are tested in isolated previews before you apply them, keeping active runs and unsaved drafts intact.
+- **Experience over fine-tuning**: chat history preserves the exact process, long-term memory stores durable facts, experience records proven methods, and Skills turn recurring workflows into reusable assets.
 
 ## Documentation
 
 | Goal | Entry point |
 | --- | --- |
-| Complete tasks and use settings and capabilities | [User guide](docs/user-guide.md) |
-| Understand enterprise features, access, audit, and updates | [Enterprise overview](docs/enterprise/README.md) |
-| Understand the architecture, develop Skills, test, build, and release | [Technical guide](docs/technical-design.md) |
-| Deploy and administer the enterprise platform | [Deployment guide](docs/enterprise/deployment.md) · [Administrator guide](docs/enterprise/admin-guide.md) |
-| Review version changes | [Release history](docs/releases/index.md) |
+| Complete daily tasks, configure services, and troubleshoot | [User guide](docs/user-guide.md) |
+| Understand enterprise roles, permissions, auditing, and updates | [Enterprise overview](docs/enterprise/README.md) |
+| Deploy and administer the enterprise server | [Deployment guide](docs/enterprise/deployment.md) · [Administrator guide](docs/enterprise/admin-guide.md) |
+| Understand architecture, build Skills/plugins, test, and package | [Technical guide](docs/technical-design.md) · [UI SDK](desktop/sdk/README.md) |
+| Review version-by-version changes | [Release history](docs/releases/index.md) |
 
 Detailed guides are maintained in Chinese.
 

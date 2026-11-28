@@ -2,38 +2,35 @@
 
 [中文](README_CN.md) | [English](README.md) | [用户手册](docs/user-guide.md) | [企业版介绍](docs/enterprise/README.md) | [技术文档](docs/technical-design.md)
 
-DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，将对话、项目文件、工具执行、专业能力和交付物放在同一工作流程中。你可以描述目标、提供资料、查看执行过程，并继续编辑生成的文件。
+DeepSeek Cowork 是面向 Windows 的本地桌面 Agent 工作台，把对话提问、项目文件读写、代码与工具执行、专业技能和成果编辑放在同一个窗口里。你只需说明目标、提供资料，就可以边看执行过程边在右侧工作区检查、修改并保存生成的文件。
 
-本项目为个人探索，与 DeepSeek 官方无隶属关系。
+本项目为个人独立开发项目，与 DeepSeek 官方无隶属关系。
 
 文档适用版本：**5.4.3** · [本版说明](docs/releases/5.4.3.md) · [发布记录](docs/releases/index.md)
 
-## 可以完成什么
+## 核心能力
 
-- **对话与项目工作**：独立聊天目录、项目会话、历史搜索、运行中补充要求、工具实时输出、执行详情与独立子任务视图。
-- **文件与交付物**：按聊天隔离附件、每轮文件与变更记录、Office/PDF 连续阅读及版式检查、文本与表格编辑、HTML 工作稿、Markdown 写作页及 Git 工作目录差异。
-- **分析与多媒体**：随包数据分析依赖、Mermaid 流程图、交互可视化，以及在技能中启用并配置模型的多媒体能力。
-- **专业能力**：内置与可选 Skill、SkillHub 安装、MCP 服务、会话专家和浏览器自动化。
-- **资料与协作**：本地项目资料汇总、WeKnora、腾讯文档、乐享资料库，以及企业账号、按部门或成员授权的模型与能力、团队成果共享和聊天请求审计。
-- **重复任务**：常用任务、定时计划、消息渠道与计划结果投递。
-- **个性化**：主题、AI 主题设计、Visualize、长期记忆与经验系统。
+- **对话与多任务协作**：支持绑定本机项目文件夹或使用独立聊天目录；任务运行中可随时补充要求、查看代码与命令的实时输出，也可将子任务拆分到独立视图中跟进和控制。
+- **文件阅读、编辑与变更追溯**：右侧工作区支持 Word/PPT/PDF 连续阅读与 AI 版式检查、Excel 表格编辑与宽表区域阅读、代码高亮编辑、HTML 页面内修改及 Markdown 写作；既能按轮次查看本轮文件改动，也能对比 Git 工作目录实时差异。
+- **数据分析、图表与多媒体**：随包内置 Python 数据分析与 Notebook 执行环境，支持对话内 Mermaid 流程图、Visualize 交互图表、HTML/JavaScript 沙箱预览，以及单独配置的图片生成/编辑与视频生成/理解。
+- **资料库与能力扩展**：集中管理本地公共资料与项目资料，支持连接 WeKnora、腾讯文档、腾讯乐享；内置常用办公与分析技能，支持从 SkillHub 或本地包安装扩展技能、接入 MCP 服务、切换专家角色，以及使用内置网页或外部 Chrome / Edge 完成浏览器自动化。
+- **定时任务与企业协作**：支持保存常用任务、设置定时计划，并通过飞书、钉钉、企业微信、QQ 或微信收发任务与结果；企业版提供部门层级授权、统一分发模型与 Skill/MCP/专家、团队空间协作及聊天请求合规审计。
+- **个性化与经验积累**：支持多套主题与阅读排版、创造模式（让 AI 设计界面并在隔离预览中试跑确认）、[UI SDK](desktop/sdk/README.md) 插件扩展，以及跨轮次保留长期记忆与可复用经验。
 
 ## 开始使用
 
-1. Windows 发行包为 `cowork-desktop-v版本号-windows-x64.zip`，完整解压后运行 `deepseek-cowork.exe`。本地构建不会自动发布到 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases)，旧版下载包仍使用旧入口。
-2. 到“设置 → 模型与服务”添加服务和模型，也可登录企业账号。正式包直接使用原配置、会话库、附件和工作区，保留历史及草稿，无需复制或手工导入。
-3. 新建聊天，添加资料并描述任务；处理固定项目时先选择项目目录。
-4. 查看回答与执行过程，在右侧工作区打开、编辑和保存成果。
+1. 下载并完整解压 `cowork-desktop-v版本号-windows-x64.zip`，在解压后的 `Cowork` 目录中运行 `deepseek-cowork.exe`。
+2. 打开“设置 → 模型与服务”配置 API Key 或账号模型；企业用户可在“设置 → 企业账号”登录并使用管理员分配的资源。升级安装会自动沿用本机原有的配置、聊天记录、附件和工作区，无需手动导入。
+3. 点击“新建聊天”。处理固定项目时先在输入框下方选择项目文件夹，临时任务可直接开始；拖入参考文件并描述你希望得到的成果。
+4. 在对话中跟进执行进度或随时补充要求，完成后点击文件名即可在右侧工作区查看、编辑并保存结果。
 
-详细操作见[用户手册](docs/user-guide.md)。
-
-创造模式可先用示例内容试跑界面候选，再由用户应用。界面也可通过 [UI SDK](desktop/sdk/README.md) 整体替换工作台，或组合页面、面板、编辑器及菜单。运行、草稿和未保存编辑由稳定宿主持有，切换插件不重启任务。
+日常操作与常见问题详见[用户手册](docs/user-guide.md)。
 
 ## 从源码运行
 
-桌面采用 **Electron + React / TypeScript + Python + SQLite**：Electron 承载原生窗口与网页，React 组织界面，Python 执行模型与工具，SQLite 保存本机历史。操作见[工作台介绍](docs/user-guide.md#认识工作台)，开发入口见[技术文档](docs/technical-design.md#构建与发布)。当前发行目标为 Windows；Apple Silicon Mac 与统信 V25 仍需完成目标系统发行与验收。
+桌面端采用 **Electron + React / TypeScript + Python + SQLite** 架构：Electron 负责桌面窗口与原生网页视图，React 承载工作台与插件界面，Python 负责模型调度与工具执行，SQLite 保存本机历史。界面说明见[认识工作台](docs/user-guide.md#认识工作台)，架构与构建规范见[技术文档](docs/technical-design.md#构建与发布)。
 
-使用 Python 3.12+（当前 Windows 发行包使用 3.14）和带 npm 的 Node.js 22.12+，在仓库根目录执行。桌面的 JavaScript 工具可复用 Electron 自带的 Node.js；源码构建所需的 npm 仍需另行准备：
+准备 Python 3.12+（Windows 发行包使用 3.14）以及包含 npm 的 Node.js 22.12+，在仓库根目录依次执行：
 
 ```powershell
 git clone https://github.com/chuancyzhang/deepseek-cowork.git
@@ -48,7 +45,7 @@ node desktop/node_modules/electron/install.js
 
 ## 构建发行包
 
-在 Windows 构建环境中准备固定运行时，再生成 EXE 和发行 ZIP：
+在 Windows 构建环境中拉取固定版本的随包运行时，再构建桌面可执行程序与发行压缩包：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
@@ -56,25 +53,23 @@ $env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
 npm --prefix desktop run package:win
 ```
 
-打包生成 `desktop/out/DeepSeek Cowork-win32-x64`、完整 ZIP 和 `latest-desktop-windows-x64.json`。更新清单区分 Electron 与旧版包，构建会审计宿主、服务、资源和默认配置后再生成 ZIP；签名和公开发布需另行执行。具体步骤见[技术文档](docs/technical-design.md#构建与发布)。
+构建产物位于 `desktop/out/`，包含完整运行目录、发行包 `cowork-desktop-v版本号-windows-x64.zip` 与更新清单 `latest-desktop-windows-x64.json`。本地打包不会自动上传到 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases)，代码签名与公开发布独立执行。Apple Silicon Mac 与统信 UOS V25 需在对应目标设备上单独完成发行构建与实机验证。详见[技术文档](docs/technical-design.md#构建与发布)。
 
-Mac／统信的新宿主发行流程尚待实现，必须在目标系统及 CPU 上构建和验收。
+## 设计理念
 
-## 设计思路
+- **Everything is Tool**：所有可执行动作统一走 Tool 注册、权限审批、执行记录与结果回传；Skill 组织工作方法与参考资源，专家组合角色提示词与可用能力。
+- **AI 可设计界面**：无论是调整主题还是通过创造模式与 [UI SDK](desktop/sdk/README.md) 定制工作台，都会先在示例环境中隔离试跑，确认无误后再应用，后台任务与未保存草稿不受影响。
+- **经验系统而非微调**：完整历史保留真实过程，长期记忆沉淀跨会话事实，经验记录已验证的可复用做法，Skill 固化成套专业流程。
 
-- **Everything is Tool**：可执行动作统一通过 Tool 注册、授权、执行和返回结果；Skill 组织指导与资源，专家提供角色。
-- **AI 设计 UI**：用声明式主题与隔离预览调整工作界面，由用户确认应用。
-- **经验系统**：历史保留过程，记忆记录长期事实，经验沉淀可复用方法，Skill 组织专业流程；这不是模型微调。
+## 文档导航
 
-## 文档
-
-| 目标 | 入口 |
+| 你想了解什么 | 推荐入口 |
 | --- | --- |
-| 安装后完成任务、使用设置和各项能力 | [用户手册](docs/user-guide.md) |
-| 了解企业版的功能、权限、审计和更新 | [企业版介绍](docs/enterprise/README.md) |
-| 理解架构、开发能力、运行测试和构建发布 | [技术文档](docs/technical-design.md) |
-| 部署与管理企业中心 | [部署指南](docs/enterprise/deployment.md) · [管理员指南](docs/enterprise/admin-guide.md) |
-| 查看已有版本变化 | [发布记录](docs/releases/index.md) |
+| 日常任务操作、功能配置与问题排查 | [用户手册](docs/user-guide.md) |
+| 企业版角色分工、权限分配、审计与客户端更新 | [企业版介绍](docs/enterprise/README.md) |
+| 部署运维与管理企业后台 | [部署指南](docs/enterprise/deployment.md) · [管理员指南](docs/enterprise/admin-guide.md) |
+| 系统架构、Skill / 插件开发、测试与打包发布 | [技术文档](docs/technical-design.md) · [UI SDK](desktop/sdk/README.md) |
+| 历次版本功能演进 | [发布记录](docs/releases/index.md) |
 
 ## 许可证
 

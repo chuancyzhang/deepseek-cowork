@@ -1,12 +1,12 @@
-# DeepSeek Cowork 企业管理后台 · Linux 部署
+# DeepSeek Cowork 企业管理后台 · Linux 部署指南
 
 文档适用版本：**5.4.3**
 
-本指南在一台 Linux 服务器上部署管理后台、PostgreSQL 和业务文件卷。HTTPS 入口由 Caddy 提供。部署完成后，管理员在浏览器打开企业地址的 `/app`。
+本指南帮助运维人员在一台 Linux 服务器上通过 Docker Compose（或原生 Python 进程）部署 DeepSeek Cowork 企业管理后台、PostgreSQL 数据库与持久化业务文件卷。部署完成后，把企业地址下的 `/app` 交给平台管理员完成初始化即可。
 
-## 选择服务器架构
+## 1. 确认服务器架构与 Docker 环境
 
-在目标服务器运行以下命令，确认 Docker 连接到这台机器上的 Linux 引擎，并已安装支持 `up --wait` 的 Compose 插件。
+在目标 Linux 服务器上执行以下命令，确认 Docker 引擎正常运行且已安装支持 `up --wait` 的 Docker Compose v2 插件：
 
 ```bash
 uname -m
@@ -14,14 +14,14 @@ docker info --format '{{.OSType}}/{{.Architecture}}'
 docker compose version
 ```
 
-| Linux 服务器 | Docker 平台 | 准备后台镜像的方式 |
+| 服务器 CPU 架构 | Docker 平台标识 | 镜像准备方式 |
 | --- | --- | --- |
-| x86_64（Intel、AMD） | `linux/amd64` | 可在服务器上原生构建，也可直接导入同版本交付包内的镜像。 |
-| ARM64（`uname -m` 显示 `aarch64`） | `linux/arm64` | 在 ARM64 服务器上用随包源码或仓库的 `web/platform/` 原生构建。当前交付包的 `images.tar` 仅含 amd64 镜像。 |
+| **x86_64**（Intel / AMD） | `linux/amd64` | 既可使用离线交付包直接导入预构建镜像，也可在服务器上原生构建 |
+| **ARM64**（`aarch64`） | `linux/arm64` | 使用随包源码或仓库 `web/platform/` 目录在目标 ARM64 服务器上原生构建（当前离线交付包中的 `images.tar` 仅包含 `amd64` 镜像） |
 
-## 准备目录与访问地址
+## 2. 准备部署目录与环境变量
 
-将同版本仓库的整个 `web/platform/` 目录复制到服务器，例如 `/opt/cowork-platform/`。使用交付 ZIP 时，完整解压后进入包含 `compose.yaml`、`Dockerfile` 和 `.env.example` 的 `enterprise-docker/` 目录。以下命令均在该部署目录执行。
+将同版本仓库的整个 `web/platform/` 目录复制到服务器（例如 `/opt/cowork-platform/`；若使用企业后台交付压缩包，完整解压后进入含 `compose.yaml`、`Dockerfile` 和 `.env.example` 的 `enterprise-docker/` 目录）。后续所有命令均在该部署目录下执行：
 
 ```bash
 umask 077
@@ -29,42 +29,45 @@ test -e .env || cp .env.example .env
 chmod 600 .env
 ```
 
-编辑 `.env`，先填写下列配置。升级已有中心时沿用原配置。
+编辑 `.env` 填写基础参数（升级已有平台时直接保留原 `.env` 即可）：
 
-| 配置项 | 填写内容 |
+| 配置项 | 说明 |
 | --- | --- |
-| `POSTGRES_PASSWORD` | 新库使用随机密码，例如用 `openssl rand -hex 32` 生成。 |
-| `COWORK_DATABASE_URL` | 保留模板中的主机 `database`、端口 `5432`、用户及库名 `cowork`，将密码改为上面同一个值。密码如含特殊字符，须在此连接串中进行 URL 编码。 |
-| `COWORK_PLATFORM_ID`、`COWORK_PLATFORM_NAME` | 分别填写固定平台标识和员工看到的企业名称。 |
-| `COWORK_ENCRYPTION_KEY` | 在镜像就绪后生成并填入，用于加密模型和认证凭据。已有中心继续使用原密钥。 |
+| `POSTGRES_PASSWORD` | 数据库随机强密码（新部署可用 `openssl rand -hex 32` 生成） |
+| `COWORK_DATABASE_URL` | 保持模板中的主机 `database`、端口 `5432`、库名与用户名 `cowork`，将密码替换为上方同一值（若密码含特殊字符需做 URL 编码） |
+| `COWORK_PLATFORM_ID` | 平台唯一固定标识（选定后请勿随意更改，桌面客户端凭此识别所属企业） |
+| `COWORK_PLATFORM_NAME` | 员工在桌面端与网页上看到的企业名称 |
+| `COWORK_ENCRYPTION_KEY` | 用于加密数据库内模型密钥与认证凭据的主密钥（在第 4 步镜像就绪后生成填入；升级时严禁更换） |
 
-**域名与 HTTPS**　将域名解析到服务器，开放 TCP 443，将证书链与私钥分别放在 `certs/tls.crt`、`certs/tls.key`。管理员和员工的设备都需要信任签发机构。在 `.env` 中设置：
+接着按实际网络环境二选一配置访问入口（登录回调与客户端下载地址均以最终公共地址为准）：
 
-```dotenv
-COMPOSE_FILE=compose.yaml
-COWORK_HOST=cowork.example.internal
-COWORK_PUBLIC_URL=https://cowork.example.internal
-COWORK_ALLOW_PLATFORM_HTTP=0
-```
+- **方式 A：标准域名 + HTTPS（推荐生产环境使用，由内置 Caddy 提供 TLS）**
+  将域名解析到服务器并开放 TCP `443` 端口，把证书链与私钥分别放入部署目录下的 `certs/tls.crt` 和 `certs/tls.key`（若使用企业内网自签 CA，需确保管理员与员工电脑均已信任该根证书），在 `.env` 中设置：
 
-**内网 IP 与 HTTP**　仅用于可信内网，账号和请求会通过明文 HTTP 传输。在下面的示例中，将占位符替换为绑定在服务器网卡上、员工可访问的 IPv4。选择并开放访问端口。此模式只启动后台和数据库。
+  ```dotenv
+  COMPOSE_FILE=compose.yaml
+  COWORK_HOST=cowork.example.internal
+  COWORK_PUBLIC_URL=https://cowork.example.internal
+  COWORK_ALLOW_PLATFORM_HTTP=0
+  ```
 
-```dotenv
-COMPOSE_FILE=compose.yaml:compose.http.yaml
-COWORK_HOST=<服务器内网IPv4>
-COWORK_HTTP_PORT=8788
-COWORK_ALLOW_PLATFORM_HTTP=1
-```
+- **方式 B：内网 IP + HTTP（仅限受信任的封闭内网环境）**
+  注意明文 HTTP 会直接传输登录态与请求内容，切勿暴露在公网。开放选定的访问端口（如 `8788`），在 `.env` 中设置（此模式仅启动后台与数据库，无需启动 Caddy）：
 
-HTTP 配置按上述 IP 和端口设置服务实际使用的 `COWORK_PUBLIC_URL`。两种模式下的登录回调和企业下载地址都以公共地址为准。
+  ```dotenv
+  COMPOSE_FILE=compose.yaml:compose.http.yaml
+  COWORK_HOST=<服务器内网IPv4>
+  COWORK_HTTP_PORT=8788
+  COWORK_ALLOW_PLATFORM_HTTP=1
+  ```
 
-首次部署可沿用 `.env.example` 中的运行参数。需要调整时，`COWORK_SESSION_SECONDS` 控制会话期限，`COWORK_MAX_MODEL_CONCURRENCY` 控制模型并发，`COWORK_CLEANUP_SECONDS` 控制审计清理间隔。团队空间的单文件及总容量上限分别由 `COWORK_MAX_SPACE_FILE_BYTES`、`COWORK_MAX_SPACE_BYTES` 设置。
+> **可选容量与并发调优**：首次部署保持 `.env.example` 默认值即可；后续可按需调整 `COWORK_SESSION_SECONDS`（登录有效期）、`COWORK_MAX_MODEL_CONCURRENCY`（模型代理并发上限）、`COWORK_CLEANUP_SECONDS`（过期审计清理周期），以及团队空间单文件与总容量上限 `COWORK_MAX_SPACE_FILE_BYTES`、`COWORK_MAX_SPACE_BYTES`。
 
-## 准备后台镜像
+## 3. 准备容器镜像
 
-### x86_64 和 ARM64 原生构建
+### 路线一：在 x86_64 或 ARM64 服务器上原生构建
 
-在目标服务器执行。同一份 Dockerfile 使用 `python:3.12-slim`，按当前 Docker 引擎的架构安装 `requirements.txt` 中固定版本的依赖。构建机需要能访问容器镜像源与 Python 包源。Compose 使用 `postgres:17`，HTTPS 模式另需 `caddy:2`。
+构建机需能访问基础容器镜像源（`python:3.12-slim`、`postgres:17`，HTTPS 模式另需 `caddy:2`）与 Python 包源：
 
 ```bash
 unset DOCKER_DEFAULT_PLATFORM
@@ -74,11 +77,11 @@ docker compose pull --ignore-buildable
 docker compose run --rm --no-deps --pull never platform uname -m
 ```
 
-最后一条在后台容器中执行。x86_64 服务器应显示 `x86_64`，ARM64 应显示 `aarch64`。接着按“启动与验收”操作。
+确认最后一行输出的架构与宿主机一致（`x86_64` 或 `aarch64`），即可进入第 4 步。
 
-### x86_64 使用交付包离线部署
+### 路线二：在 x86_64 服务器上使用离线交付包部署
 
-在 x86_64 服务器安装 `jq`，进入同版本交付包的解压目录。以下命令校验包内文件，核对两个镜像的 ID 和架构，并生成 Compose 使用的镜像配置。包中镜像的标签以 `deployment.json` 为准。
+服务器安装 `jq` 后进入离线包解压目录，执行以下脚本校验文件完整性、导入镜像并生成固定镜像映射 `compose.images.yaml`：
 
 ```bash
 (
@@ -99,19 +102,17 @@ docker compose run --rm --no-deps --pull never platform uname -m
 )
 ```
 
-校验成功后，在 `.env` 的 `COMPOSE_FILE` 行末追加 `:compose.images.yaml`。例如内网 HTTP 使用 `COMPOSE_FILE=compose.yaml:compose.http.yaml:compose.images.yaml`。
+校验通过后，在 `.env` 的 `COMPOSE_FILE` 末尾追加 `:compose.images.yaml`（例如 HTTPS 模式为 `COMPOSE_FILE=compose.yaml:compose.images.yaml`，内网 HTTP 模式为 `COMPOSE_FILE=compose.yaml:compose.http.yaml:compose.images.yaml`）。若采用 HTTPS 模式，还需在联网机器拉取导出 `caddy:2`（`docker pull --platform linux/amd64 caddy:2 && docker save -o caddy-amd64.tar caddy:2`）并拷入服务器 `docker load -i caddy-amd64.tar`。
 
-HTTPS 还需单独准备 Caddy。可在有网络的机器执行 `docker pull --platform linux/amd64 caddy:2` 和 `docker save -o caddy-amd64.tar caddy:2`，把归档传到目标服务器，执行 `docker load -i caddy-amd64.tar`。内网 HTTP 可直接进入下一步。
+## 4. 启动与健康检查验收
 
-## 启动与验收
-
-首次安装先执行以下命令，将输出完整填入 `.env` 中的 `COWORK_ENCRYPTION_KEY` 并保存。
+**首次全新安装时**，先生成加密主密钥并完整填入 `.env` 的 `COWORK_ENCRYPTION_KEY`：
 
 ```bash
 docker compose run --rm --no-deps --pull never platform python -m server generate-key
 ```
 
-两种架构在镜像就绪后使用相同命令。应用启动时会连接数据库并执行迁移。
+随后启动全部服务（启动时会自动连接数据库并按序完成表结构迁移）：
 
 ```bash
 docker compose config --quiet
@@ -119,34 +120,35 @@ docker compose up -d --no-build --pull never --wait
 docker compose ps
 ```
 
-从管理员的机器访问实际地址。将下例域名替换为企业域名；内网 HTTP 使用 `http://<服务器内网IPv4>:<访问端口>`。使用企业内部 CA 时，先在访问机器上信任该 CA。
+在管理员电脑或服务器上请求健康检查接口（将地址替换为你的实际 HTTPS 域名或 `http://<内网IP>:<端口>`）：
 
 ```bash
 PUBLIC_URL=https://cowork.example.internal
 curl --fail --show-error --silent "$PUBLIC_URL/healthz"
 ```
 
-健康接口应返回 `"status":"ok"` 和数据库结构版本。打开同一地址的 `/app`，创建超级管理员，再配置企业登录方式、部门与模型授权。配置步骤见[管理员指南](admin-guide.md#初始化与成员管理)。
+返回包含 `"status":"ok"` 及当前数据库结构版本号即代表部署成功。现在可以将 `$PUBLIC_URL/app` 交给管理员，按[管理员指南](admin-guide.md#初始化与成员管理)完成首次初始化。
 
-## 子路径与原生进程部署
+## 进阶部署方式
 
-子路径可配置为 `COWORK_PUBLIC_URL=https://企业域名/cowork`。代理统一处理此前缀，并检查对应的登录、静态资源和下载地址。
+### 挂载反向代理子路径或直接运行原生进程
 
-直接运行 Python 进程时，先准备 PostgreSQL 及可用的加密密钥，将 `COWORK_DATABASE_URL` 指向进程可达的数据库主机，设置可写的绝对路径 `COWORK_DATA_DIR`，并将实际 `COWORK_*` 配置导入进程环境。在独立 Python 3.12 环境执行：
+- **子路径代理**：支持将公共地址设为带前缀路径（如 `COWORK_PUBLIC_URL=https://example.internal/cowork`），由前置反向代理统一转发该前缀并验证登录回调、静态资源与 `/downloads` 下载页可达。
+- **无容器原生运行**：准备好 PostgreSQL、可写的绝对路径 `COWORK_DATA_DIR` 及全套 `COWORK_*` 环境变量后，在独立的 Python 3.12 虚拟环境中执行：
 
-```bash
-python -m pip install -r requirements.txt
-python -m server migrate
-python -m server serve --host localhost --port 8080
-```
+  ```bash
+  python -m pip install -r requirements.txt
+  python -m server migrate
+  python -m server serve --host localhost --port 8080
+  ```
 
-使用 systemd 等管理单进程服务，在前方配置 HTTPS 代理。
+  生产环境请通过 `systemd` 托管进程，并在前方配置 HTTPS 反向代理。
 
-## 命令行导入认证来源
+### 命令行导入认证来源
 
-网页初始化是常规入口。已有自动部署流程也可在空平台配置 `COWORK_BOOTSTRAP_PROVIDER`、`COWORK_BOOTSTRAP_SUBJECT`，导入认证来源，让对应企业账号完成首次管理员初始化。
+除网页引导初始化外，自动化运维流水线也可以在空库状态下配置 `COWORK_BOOTSTRAP_PROVIDER` 与 `COWORK_BOOTSTRAP_SUBJECT`，预先导入 SSO 认证配置，让指定的企业管理员账号首次登录即获得管理权限。
 
-创建权限为 `600` 的本地 `bootstrap-auth.json`，例如：
+先创建权限为 `600` 的 `bootstrap-auth.json`：
 
 ```json
 {
@@ -164,7 +166,7 @@ python -m server serve --host localhost --port 8080
 }
 ```
 
-执行导入并启动：
+执行迁移与导入并启动服务：
 
 ```bash
 docker compose up -d --no-build --pull never --wait database
@@ -173,36 +175,28 @@ docker compose run --rm --no-deps --pull never -T platform python -m server impo
 docker compose up -d --no-build --pull never --wait
 ```
 
-在身份平台注册回调地址 `https://企业域名/auth/callback/company-sso`。完成首次登录后可移除导入文件。如果没有通过网页创建本地超级管理员，保留 `COWORK_BOOTSTRAP_PROVIDER` 与 `COWORK_BOOTSTRAP_SUBJECT`，用它们指向已启用的企业管理员。平台通过该账号授予或收回管理员角色，其他管理员可以继续管理普通资源。
+在身份平台侧将回调地址注册为 `https://企业域名/auth/callback/company-sso`（首次登录成功后即可删除本地的 `bootstrap-auth.json`；若未创建本地超级管理员，请保留 `.env` 中的 `COWORK_BOOTSTRAP_PROVIDER` 与 `COWORK_BOOTSTRAP_SUBJECT`）。
 
-## 数据库与业务文件
+## 数据存储与迁移说明
 
-团队空间在 Cowork 桌面端提供计划、成员、资料、成果和动态。员工在桌面执行任务并选择发布内容。操作见[员工指南](employee-guide.md#共同完成任务)。
-
-`platform.schema_version` 记录已完成的数据库迁移。结构版本 6 增加部门层级、员工归属及模型和能力的部门授权，保留原有个人授权。结构版本 5 增加企业能力及聊天审计表，保留成员、模型、团队空间、业务文件和 Electron 发布记录。结构版本 4 开始只支持 Electron 分发，旧 Qt 记录保留但停止分发。执行入口为：
-
-```bash
-docker compose run --rm platform python -m server migrate
-```
-
-文件保存在 `COWORK_DATA_DIR/team-space-files`，使用同一业务文件卷。平台信息接口 `/api/v1/platform-info` 提供能力声明。
+- **数据库迁移记录**：`platform.schema_version` 记录当前已完成的数据库结构版本（版本 4 切换为纯 Electron 客户端分发，版本 5 新增企业能力与聊天审计表，版本 6 新增部门树与资源分级授权并兼容保留原个人授权）。手动执行迁移命令为 `docker compose run --rm platform python -m server migrate`。
+- **业务文件卷**：团队空间的共享文件存放在 `COWORK_DATA_DIR/team-space-files`，客户端发布包存放在 `releases` 目录，均位于持久化数据卷中（员工桌面协作方式见[员工指南](employee-guide.md#共同完成任务)）。
 
 ## 日常运维
 
-所有运维命令均在原部署目录执行，Compose 会读取 `.env` 的 `COMPOSE_FILE`。用以下命令查看服务和最近的启动日志。
+所有运维命令均在原部署目录下执行：
 
 ```bash
 docker compose ps
 docker compose logs --tail=100 platform database
 ```
 
-**备份。** 停止后台写入，保留数据库运行，导出业务库。以下备份按审计保留策略排除聊天请求快照与历史提问正文。同步备份挂载到 `/data` 的 `releases` 卷，并单独保管 `.env` 中的原加密密钥及 HTTPS 证书。
+- **安全备份**：为保证数据一致性，备份前先短暂停止 `platform` 容器写入，导出 PostgreSQL 业务库（下列命令默认排除临时提问表与 30 天滚动的聊天请求审计快照），同时备份挂载到 `/data` 的持久化业务文件卷，并将 `.env`（尤其是 `COWORK_ENCRYPTION_KEY`）与 `certs/` 证书妥善异地保管：
 
-```bash
-docker compose stop platform
-docker compose exec -T database pg_dump -U cowork -d cowork -Fc --exclude-table-data=questions --exclude-table-data=chat_audit_requests > cowork-business.dump
-```
+  ```bash
+  docker compose stop platform
+  docker compose exec -T database pg_dump -U cowork -d cowork -Fc --exclude-table-data=questions --exclude-table-data=chat_audit_requests > cowork-business.dump
+  docker compose up -d --no-build --pull never --wait
+  ```
 
-业务备份完成后，执行 `docker compose up -d --no-build --pull never --wait` 恢复服务。
-
-**升级。** 备份后，在同一部署目录更新后台源码并执行 `docker compose build platform`；使用 x86_64 离线包则按上文核验新包并重新生成 `compose.images.yaml`。保留原 `.env`、证书、Compose 项目名及卷名，再运行“启动与验收”中的启动和健康检查命令。若需回退数据库迁移，同时恢复升级前的数据库、业务文件和匹配的后台版本。
+- **平滑升级与回滚**：先按上一步完成完整备份；随后在原部署目录更新同版本代码重新 `docker compose build platform`（x86_64 离线包则按第 3 步核验新包并更新 `compose.images.yaml`），保持原有的 `.env`、证书、Compose 项目名和卷名不变，执行第 4 步的 `up -d --wait` 与 `/healthz` 检查即可自动完成数据库平滑升级。万一需要回退版本，须同时恢复升级前备份的数据库、业务文件卷以及对应旧版镜像。

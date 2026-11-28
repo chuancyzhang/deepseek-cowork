@@ -2,184 +2,125 @@
 
 文档适用版本：**5.4.3**
 
-本文面向开发者与维护者，围绕一次任务如何进入系统、形成模型请求、执行工具、保存事实并呈现成果，说明各层职责和不可破坏的约束。能力开发、构建与测试沿用同一套边界。桌面操作见[用户手册](user-guide.md)，企业中心部署见[企业部署指南](enterprise/deployment.md)。
+本文面向核心开发者与扩展维护者，从全局视角说明 DeepSeek Cowork 如何接收任务、构造模型请求、调度工具、持久化运行事实并在桌面与企业端交付成果。日常桌面操作见[用户手册](user-guide.md)，界面插件开发见 [UI SDK](../desktop/sdk/README.md)，企业服务端安装见[企业部署指南](enterprise/deployment.md)，历次版本演进见[发布记录](releases/index.md)。
 
-按需从下列目录进入；版本变化集中在[发布记录](releases/index.md)，本文维护当前实现。构建成功与公开发布分别确认。
+全文按自顶向下的**六层架构**组织：
 
-## 目录
+1. [系统全景与架构不变量](#系统全景与架构不变量)：进程拓扑、源码职责地图、三层状态归属与跨平台系统边界
+2. [Electron 宿主、会话运行与持久化链路](#electron-宿主会话运行与持久化链路)：宿主生命周期、Agent Loop、上下文缓存、有序账本（WAL）与实时观测
+3. [Skill 与 MCP 开发](#skill-与-mcp-开发)：统一工具注册与授权、能力包快照与安装、长期记忆/经验系统与多媒体异步任务
+4. [工作区、编辑器与交付物引擎](#工作区编辑器与交付物引擎)：文件事务保存、Office/PDF 渲染与独立审稿、本轮文件记录 vs Git 差异、网页/终端/沙箱表面
+5. [自动化调度与企业协同平台](#自动化调度与企业协同平台)：常用任务调度、IM 渠道网关、资料库适配与企业中心（部门授权、能力分发、合规审计）
+6. [构建与发布](#构建与发布)：开发与 Windows 打包审计、增量更新与安装器回滚事务、退役兼容边界与分类测试矩阵
 
-- [架构与源码入口](#架构与源码入口)
-- [Electron 工作台](#electron-工作台)
-- [Agent Loop 与模型协议](#agent-loop-与模型协议)
-- [上下文与缓存](#上下文与缓存)
-- [消息保存与界面投影](#消息保存与界面投影)
-- [工具与执行授权](#工具与执行授权)
-- [Skill 与 MCP 开发](#skill-与-mcp-开发)
-- [工作区与交付物](#工作区与交付物)
-- [后台任务与企业协作](#后台任务与企业协作)
-- [主题设置与数据处理](#主题设置与数据处理)
-- [构建与发布](#构建与发布)
-- [开发与测试](#开发与测试)
+---
 
-## 架构与源码入口
+## 系统全景与架构不变量
 
-桌面、常用计划、企业消息和子任务最终复用 `LLMWorker` 与 Tool Registry。每次提交确定模型、会话、工作目录、能力和运行模式，协议消息与持久化事实驱动界面展示。
+### 1. 全局运行拓扑与源码地图
+
+桌面交互、定时计划、消息渠道（IM）与子任务共享同一个 Python 运行核心（`RuntimeCoordinator` + `LLMWorker` + `Tool Registry`）。每次任务在接收时锁定会话、工作目录、模型、能力快照与权限模式；前端界面完全由已持久化的运行事实与事件增量驱动。
 
 ```mermaid
 flowchart TB
-    Entry[桌面 / 计划 / 企业消息] --> Core[RuntimeCoordinator]
-    Core --> Context[Run Context]
-    Context --> Worker[LLMWorker]
-    Catalog[Skill Catalog Snapshot] --> Worker
-    Worker <--> Provider[Provider Adapter]
-    Worker <--> Tools[Tool Registry]
-    Tools --> Builtin[内置 Tool]
-    Tools --> Skill[Skill / Script]
-    Tools --> MCP[MCP]
-    Worker --> Events[UI 与运行事件]
-    Worker --> Core
-    Core --> Store[共享应用日志 / SQLite 整理器]
+    subgraph Desktop["桌面客户端 (Electron + React)"]
+        UI["内置 React 工作台 / 隔离 UI 插件"] --> Host["稳定宿主与 SDK (desktop/src/host/)"]
+        Host --> IPC["Electron 主进程与受控 IPC (desktop/electron/)"]
+    end
+    Channel["IM 渠道守护进程 (core/daemon.py)"] --> Core
+    Scheduler["定时调度器 (TaskAutomationService)"] --> Core
+    IPC <-->|"JSONL RPC v2"| Service["领域服务分发 (core/desktop_service.py)"]
+    Service --> Core["RuntimeCoordinator"]
+    Core --> Worker["LLMWorker + Run Context"]
+    Catalog["Skill Catalog 快照"] --> Worker
+    Worker <--> Provider["Provider Adapter (OpenAI / Responses / Anthropic)"]
+    Worker <--> Tools["Tool Registry (内置 / Skill / MCP)"]
+    Worker --> Ledger["RuntimeLedger (有序 JSONL WAL)"]
+    Ledger --> DB["SQLite 批量整理器 (WAL + FULL)"]
+    Ledger --> Host
+    Service <-->|"HTTPS / HTTP"| Enterprise["独立部署企业中心 (web/platform/)"]
 ```
 
-| 源码入口 | 职责 |
-| --- | --- |
-| `main.py`、`scripts/run_desktop.py` | Electron 开发启动入口 |
-| `desktop/src/`、`desktop/electron/` | React 页面、受控 IPC、原生窗口与网页宿主 |
-| `core/desktop_service.py`、`core/desktop_*.py` | 本地 RPC、领域接口、提交回执、草稿与界面恢复 |
-| `core/runtime_tasks.py` | 原生线程、事件、取消及退出生命周期 |
-| `core/agent.py`、`core/llm/` | Agent Loop、上下文、流式事件与模型协议 |
-| `core/tool_registry.py`、`core/tool_tasks.py` | 工具注册、可见性、执行及后台工具任务 |
-| `core/skill_manager.py` | 能力目录、指导披露、脚本、经验与 MCP |
-| `core/message_persistence.py`、`core/chat_storage.py` | 消息过滤、SQLite 保存与查询 |
-| `core/runtime_coordinator.py` | 所有入口的提交、停止、运行终态、长上下文回执与恢复 |
-| `core/runtime_ledger.py`、`core/runtime_stream.py` | 共享日志写入、流式批处理、SQLite 整理与有界背压 |
-| `desktop/src/host/`、`desktop/src/plugins/` | 稳定状态、保存协调、SDK、默认界面和扩展点 |
-| `core/daemon.py` | 消息渠道的 Socket 适配；转发同一运行核心 |
-| `core/filesystem_ops.py`、`core/apply_patch.py` | 文本读取、精确匹配与补丁提交 |
-| `core/deliverable_editing.py`、`core/file_capabilities.py` | 文件能力、编辑会话与保存 |
-| `core/workbench.py`、`core/workbench_transport.py` | 标签状态及桌面工具请求 |
-| `desktop/src/Workspace.tsx`、`desktop/electron/browser.cjs` | 统一标签、浮动文件与任务导航、网页表面 |
-| `core/document_preview.py`、`core/preview_versions.py` | Office/PDF 预览及内容版本 |
-| `core/im_gateway_registry.py`、`core/im_gateway/` | 消息渠道注册与运行 |
-| `core/theme_package.py`、`core/theme_service.py` | 主题包与预览事务 |
-| `web/editors/` | 离线编辑器源码及分发资源 |
-| `web/platform/` | 独立部署的企业中心 |
+核心源码按职责分层如下：
 
-### 选型依据与不变量
+| 层次 | 关键源码路径 | 核心职责 |
+| --- | --- | --- |
+| **宿主与前端界面** | `main.py`、`scripts/run_desktop.py` | 开发环境启动与进程装配入口 |
+| | `desktop/electron/main.cjs`、`desktop/electron/browser.cjs` | 原生窗口、单实例锁、受控协议（`cowork-local:` / `cowork-plugin:` / `cowork-editor:`）与内置网页视图 |
+| | `desktop/src/host/`、`desktop/src/plugins/` | 稳定状态持有、草稿与表单恢复协调、UI SDK 2 宿主实现与内置工作台插件 |
+| | `desktop/src/Workspace.tsx`、`web/editors/` | 统一工作区标签、文件/任务/子任务分栏，以及随包分发的离线富文本/表格编辑器 |
+| | `core/theme_package.py`、`core/theme_service.py` | 声明式主题包校验、字体/Token 映射与预览激活事务 |
+| **运行调度与持久化** | `core/desktop_service.py` | 本地认证 JSONL RPC 生命周期与领域模块（会话、工作台、设置、连接、更新）装配 |
+| | `core/runtime_coordinator.py`、`core/runtime_tasks.py` | 多入口任务提交、取消令牌、终态收敛、长上下文整理回执与原生线程生命周期 |
+| | `core/agent.py`、`core/llm/` | Agent Loop、流式分片解析（`core/llm/chat_completions_stream.py`）、多模型协议适配与上下文组装 |
+| | `core/runtime_ledger.py`、`core/runtime_stream.py` | 数据目录单写者 JSONL WAL、流式批处理、SQLite 异步整理与有界背压 |
+| | `core/message_persistence.py`、`core/chat_storage.py` | UI 元数据剥离、协议消息过滤、SQLite 会话历史读写与全文索引 |
+| **工具、能力与文件引擎** | `core/tool_registry.py`、`core/tool_tasks.py`、`core/tool_output.py` | 工具注册、可见性过滤、长耗时后台任务与独立流式输出日志 |
+| | `core/skill_manager.py`、`core/skill_install.py`、`core/skill_package.py` | 能力快照编译、按需指导披露、统一来源安装与原子校验发布 |
+| | `core/filesystem_ops.py`、`core/apply_patch.py` | 文本编码识别、局部精确上下文匹配与原子补丁写入 |
+| | `core/file_capabilities.py`、`core/deliverable_editing.py` | 文件类型能力注册、编辑会话指纹与防冲突事务保存 |
+| | `core/turn_files.py`、`core/workspace_changes.py` | 文件锁内的本轮改动快照库（`turn_files.sqlite`）与内置 Git 工作树实时差异查询 |
+| | `core/document_preview.py`、`core/preview_versions.py`、`core/document_review.py` | Office/WPS/LibreOffice 页面渲染、版本化缓存与独立模型视觉版式审阅 |
+| | `core/workbench.py`、`core/workbench_transport.py` | 工作区网页/终端标签状态与桌面工具双向桥接 |
+| **自动化、资料与企业端** | `core/daemon.py`、`core/im_gateway_registry.py`、`core/im_gateway/` | IM 渠道跨进程 Socket 适配、五渠道 Provider 注册与计划结果投递 |
+| | `core/local_library.py`、`core/desktop_connections.py` | 本地公共/项目资料库、远程知识库（WeKnora / 腾讯文档 / 乐享）与桌面企业连接 |
+| | `core/enterprise_capabilities.py`、`core/enterprise_capability_runtime.py`、`core/enterprise_chat_audit.py` | 桌面端企业能力目录、请求级版本挂载与本地脱敏审计上传队列 |
+| | `web/platform/` | 独立部署的企业管理中心（FastAPI + PostgreSQL + 同源静态管理后台） |
 
-架构围绕界面可替换与任务生命周期独立组织。Electron 提供统一的网页宿主与原生桌面入口；React/TypeScript 负责可组合界面和 SDK 契约；Python 保留模型、工具、文档和连接器生态；SQLite 继续承担本机事务与历史查询。选择不以“框架更新”或“插件更多”为目标。
+### 2. 三层职责分离与五条核心不变量
 
-职责分为三层：运行事实归 Python 核心，草稿与编辑恢复归稳定宿主，布局与局部交互归界面插件。移除 Qt 后仍使用 Python 原生线程、队列和事件，不同时重写成熟业务为另一套异步框架。新增执行能力继续使用 Tool／Skill／MCP，界面插件不另建运行引擎。
+架构围绕**“界面可安全替换、任务生命周期独立”**设计，避免为换框架而重写成熟 Python 业务逻辑：
 
-验收不变量是消息可靠、过程连续、会话隔离、失败可恢复、用户可控制。替换页面不重启任务，恢复界面不回滚用户数据，模型上下文不夹带布局状态。Electron 的资源开销和平台发行验证是实际成本；共享源码不能代替 Mac／统信的构建、签名与实机验收。
+- **三层状态归属**：
+  1. **Python 运行核心**：唯一持有会话历史、模型协议、工具执行与数据库事务事实（不依赖 Qt，纯原生线程、队列与事件驱动；PyInstaller 仅打包独立后端服务 `cowork-service`）。
+  2. **Electron + React 稳定宿主**：按稳定会话/文件 ID 持有未发送输入、编辑器草稿、表单恢复副本与运行订阅，切换页面或重载插件不清空用户正在编辑的内容。
+  3. **UI SDK 2 界面插件**：仅组合展示与交互扩展点，不直接接触 SQLite、认证凭据或模型网络请求，也不维护第二套发送队列。
+- **五条不可破坏的不变量**：**消息可靠、过程连续、会话隔离、失败可恢复、用户可控制**。替换或恢复界面不重启后台任务，恢复内置界面不回滚用户数据，界面布局状态绝不混入发给模型的上下文。
 
 ### 平台适配边界
 
-采用共享业务核心、少量平台后端和集中能力策略。消息持久化、Agent Loop、会话隔离、文件编辑和任务调度复用同一套实现；平台差异只进入系统边界。避免给每个业务对象增加平台接口，也不在不同平台维护独立 UI。
+跨平台采用“共享全部业务核心 + 薄系统适配层 + 集中能力策略”，不在业务对象中散落平台分支，也不维护多套前端 UI：
 
 ```mermaid
 flowchart TB
-    UI[共享 React 页面] --> Host[Electron 宿主]
-    Host --> Core[Python 业务与任务执行]
-    Policy[平台能力策略] --> UI
-    Policy --> Catalog[工具目录与组件准备]
-    Catalog --> Core
-    Core --> Secrets[凭据保护接口]
-    Core --> Terminal[终端接口]
-    Core --> Preview[文档转换接口]
-    Core --> Update[更新协调器]
-    Secrets --> NativeKeys[Windows DPAPI / Keychain / Secret Service]
-    Terminal --> PTY[ConPTY / POSIX PTY]
-    Preview --> Office[Windows Office/WPS / LibreOffice]
-    Update --> Install[Windows 安装器 / 新平台手动安装]
+    UI["共享 React 工作台"] --> Host["Electron 宿主"]
+    Host --> Core["Python 业务与任务核心"]
+    Policy["集中平台策略 (core/platform_capabilities.py)"] --> UI
+    Policy --> Core
+    Core --> Secrets["凭据加密: Windows DPAPI / macOS Keychain / Secret Service"]
+    Core --> Locks["并发保存锁: Windows Mutex / POSIX flock"]
+    Core --> Terminal["终端会话: ConPTY / POSIX 独立会话 PTY"]
+    Core --> Preview["文档渲染: Windows Office·WPS / LibreOffice"]
+    Core --> Updater["更新交付: Windows 独立安装器 / 其他平台原生包"]
 ```
 
-| 边界 | 代码入口与约束 |
+| 系统边界 | 实现入口与工程约束 |
 | --- | --- |
-| 原子持久化与宿主进程 | `core/platform_runtime.py`、`desktop/electron/platform.cjs`；启动时选择系统实现，复用既有进程、凭据、终端和系统路径模块 |
-| 发行范围与功能限制 | `core/platform_capabilities.py`；目录、设置、依赖准备和执行同时校验，不能只隐藏按钮 |
-| 敏感数据 | `core/credential_protection.py` 提供 `protect/unprotect`；Windows 原 DPAPI 格式兼容，POSIX 使用系统密钥环保存 AES-256-GCM 密钥，密文带版本与认证信息；解密缺密钥不自动生成 |
-| 并发保存 | `core/file_write_locks.py`；Windows Mutex／POSIX flock 锁定稳定的路径键，不锁会被原子替换的目标 inode；支持同线程嵌套并设等待上限 |
-| 终端 | `core/workbench_terminal.py` 保留公共会话生命周期，`core/posix_terminal.py` 通过独立会话和控制终端启动 Shell，避免在线程化进程里使用 `preexec_fn`；清理覆盖该终端会话的前后台进程组 |
-| 外部程序 | `core/process_utils.py`；POSIX 冻结态恢复外部程序的库搜索环境，避免 PyInstaller 的动态库覆盖系统 LibreOffice |
-| 运行时 | `core/runtime_manifest.py` 固定目标、下载地址和 SHA-256；在线／离线准备复用校验，tar 解压保留内部链接和执行权限并拒绝越界路径 |
-| 默认字体 | `core/system_fonts.py` 枚举系统字体，`desktop/src/theme.ts` 映射正文／等宽字体和主题 token；自定义主题的显式字体仍校验，不绕过预览事务 |
+| **宿主与原子持久化** | `core/platform_runtime.py`、`desktop/electron/platform.cjs`；启动时按系统绑定进程管理、系统路径与原子替换实现 |
+| **平台能力门控** | `core/platform_capabilities.py`；界面展示、目录编译、依赖准备与工具执行同步校验，严禁只隐藏前端按钮而放开后端入口 |
+| **敏感凭据保护** | `core/credential_protection.py` 提供统一 `protect / unprotect`；Windows 兼容 DPAPI，POSIX 在系统密钥环中保存 AES-256-GCM 主密钥（密文带版本与认证标签，密钥环不可用时显式报错，绝不降级明文或自动重生密钥） |
+| **跨进程文件写锁** | `core/file_write_locks.py`；Windows Mutex / POSIX `flock` 锁定规范化路径键而非会被 `os.replace` 替换的目标 inode，支持同线程重入与超时上限 |
+| **终端进程组** | `core/workbench_terminal.py` 维护公共会话生命周期，`core/posix_terminal.py` 使用独立会话与控制终端启动 Shell（避免多线程进程调用不安全的 `preexec_fn`），关闭时完整回收前后台进程组 |
+| **外部程序动态库隔离** | `core/process_utils.py`；POSIX 冻结态启动外部程序（如系统 LibreOffice）前恢复干净的动态库搜索路径，防止 PyInstaller 内置库污染外部进程 |
+| **随包运行时与字体** | `core/runtime_manifest.py` 固定各平台运行时下载地址与 SHA-256（tar 解压保留内部符号链接与执行位并拒绝路径越界）；`core/system_fonts.py` 与 `desktop/src/theme.ts` 负责跨平台字体枚举与回退映射 |
 
-非 Windows 的提示词差异限于已确认的能力范围：直接使用完整 Agent，停用能力不进入运行目录，历史向量工具不注册；语音转文字相关运行指导与技能已下线。Windows 的既有工具定义、顺序及极简启动选择不改变；不修改模型协议与历史消息格式。
+非 Windows 环境下默认直接使用完整 Agent（不启用 Windows PowerShell 极简启动，不注册退役组件或未启用能力），模型协议与历史存储格式与 Windows 完全一致。企业客户端分发当前仅面向 Windows x64。
 
-企业中心及 Windows 专属分发独立维护，Mac／统信的企业接入尚不在交付范围内。Mac／统信使用全新用户环境；最低 macOS 版本及统信 V25 补丁、显示服务、输入法、托盘和睡眠恢复需在目标设备验收。
+---
 
-## Electron 工作台
+## Electron 宿主、会话运行与持久化链路
 
-“任务”与“子任务”分别保存工作区视图。主对话的协作分组由既有工具调用投影而来，目标由所属会话中的 agent ID（或唯一名称）解析。子任务详情复用 `AssistantTurn`，将 `agent.get` 返回的工具活动与对应运行的保存消息组合为显示记录；折叠和路由不改写模型历史。补充、停止、恢复仍走 `SubagentControl`，发送失败沿用原消息 ID；迟到读取不覆盖已切换的任务，关闭视图不停止后台工作。
+### 1. 数据目录、启动时序与宿主恢复
 
-`desktop/` 包含稳定宿主、内置 React 界面插件和 Electron 原生边界。`App.tsx` 只挂载宿主、工作台插件与独立恢复入口。`core/desktop_service.py` 负责装配、协议分发和生命周期，领域操作由 `desktop_conversations`、`desktop_workbench`、`desktop_settings` 等模块处理。桌面与计划任务进程内调用 `RuntimeCoordinator`；消息渠道保留认证的跨进程适配，转交同一个核心。JSONL RPC 与渠道协议均为版本 2。运行路径不加载 Qt，PyInstaller 仅构建 `cowork-service`。
+- **原位复用数据目录**：正式安装包启动时自动定位本机原数据目录（便携模式优先使用可执行文件同级的 `user_data`，源码开发默认使用隔离目录，可通过 `--data-dir` 或 `COWORK_APP_DATA_DIR` 指定）。直接原位读写既有 `config.json`、SQLite 会话库、附件与工作区，不新建 `desktop-v2` 副本或重写历史路径。启动时获取数据目录独占锁，新旧版本切换须先正常退出原进程。
+- **非阻塞启动与技能预热**：服务在耗时初始化前先公布认证控制端点并实时上报 `starting` 阶段，数据库与运行账本恢复完毕后发出 `ready`。窗口启动进入新聊天首页（同窗口重载则恢复当前会话），首帧绘制完成后在后台异步预热 `SkillCatalogService`（首次触发技能菜单或发任务也会按需共享同一次加载快照），大幅缩短首屏等待。
+- **本机输入恢复与附件隔离**：未发送的文字和附件由 Electron 宿主按会话保存在本机恢复存储中（新建聊天自动携带未发草稿，切换已有聊天恢复各自输入，收到服务端接收回执后仅清空本次已提交部分）。新上传、拖入或粘贴的附件统一复制到聊天历史目录下的 `attachments/<conversation_id>/uploads`，不再向用户的项目工作目录写入 `attachments` 文件夹；历史旧附件原路径继续兼容可读。表单恢复副本通过系统凭据接口加密暂存，与正式点击“保存”的配置严格区分。
+- **工作区任务与子任务分栏**：工作区将主运行详情（`任务`标签）与子 Agent 协作（`子任务`标签）拆分为独立视图状态。主对话时间线中的子任务分组由既有协作工具调用投影生成；子任务详情复用 `AssistantTurn` 组合 `agent.get` 的工具活动与保存消息，支持通过 `SubagentControl` 独立发送补充（失败重试复用原 `message_id` 防重）、停止或继续，关闭标签不终止后台执行。
+- **UI SDK 2 与创造模式试跑**：`hostApi: 2` 插件运行在无联网、无 Node 权限的沙箱 `iframe` 中，整包内容计算指纹（扩展点覆盖 `workbench:main`、`page:<id>`、`panel:<id>`、`editor:<type>`、`toolbar:chat` 及 `command / menu`）。创造模式在独立设计会话中向 `interface/` 提交补丁后，宿主在隐藏预览环境中绑定包指纹完成渲染、交互检查与截图并回传给同一轮任务；用户点击“应用”时通过宿主保存协调器原子切换，失败保留原界面，独立恢复入口始终可用。详见 [UI SDK](../desktop/sdk/README.md)。
 
-```mermaid
-flowchart LR
-    UI[内置 React / 隔离界面插件] --> SDK[稳定宿主与 SDK]
-    SDK --> IPC[Electron 受限 IPC]
-    IPC --> RPC[Python 领域接口]
-    RPC --> Core[RuntimeCoordinator]
-    Channel[消息渠道适配] --> Core
-    Core --> Worker[LLMWorker / Tool / Skill / MCP]
-    Worker --> Core
-    Core --> Log[共享有序应用日志]
-    Log --> Event[持久化事件与回执]
-    Log --> DB[批量 SQLite 整理]
-    Event --> SDK
-```
+### 2. Agent Loop 与多协议适配
 
-### 运行与生命周期
-
-同会话命令按序执行，一个会话只有一个顶层活动运行；不同会话和子任务可以并行。核心拥有 `queued / running / stopping / completed / failed / interrupted` 状态，等待用户和重试保留为阶段信息。停止先触发目标运行的取消令牌，绕过正文积压；写入失败会单独报告，不能阻止取消。旧回调按会话与运行身份隔离。模型和网络错误沿用最多五次的可见重试，不因重连重新执行工具。
-
-### 数据目录与输入恢复
-
-正式包启动时自动定位原数据目录；便携版优先使用可执行文件旁的 `user_data`。直接复用原配置、SQLite、附件、凭据及工作区，自定义历史目录也保持原路径；不创建 `desktop-v2`、整目录备份或路径重写。`ChatStorage` 继续负责原会话表，新运行核心仅增加 `desktop_*` / `runtime_*` 状态表及 `runtime_wal`。旧 `runtime_journal_v2` 保留原位，兼容读取层按需校验并读取记录、清单和事件；新写入走共享 WAL，事件序号从旧记录之后继续，冲突或损坏显式报错。原消息和引用直接复用；聊天输入按下述本机恢复规则保留。旧版可读取同一会话库，但不能接管新版运行中任务；新旧程序须先退出再切换，不能同时写同一数据目录。
-
-启动取得数据目录独占权并检查旧版窗口已退出，在耗时初始化前公布已认证控制端点。`starting` 报告真实阶段，数据库和运行记录恢复完成后发送 `ready`；实际进度更新延长等待，长时间无进展则报错。重试重连现有启动进程，不新建竞争服务。启动中、失败页、菜单与托盘均可退出；完整退出保存草稿与恢复副本、停止任务并等待本应用后台结束，再清除托盘图标。窗口关闭按钮仅收起到托盘。
-
-桌面启动进入新聊天，同一窗口重载时恢复当前聊天。界面绘制后触发技能目录预热，首次需要技能的操作也可以触发。并发操作共用一次加载，只有完整快照才供技能菜单与任务使用。
-
-未发送的聊天文字和附件由 Electron 宿主按会话保留在本机恢复存储中，不参与后台草稿同步或 revision 比较；界面重建只读取当前输入，旧版数据库草稿仅在缺少本机记录时导入一次。新建聊天转交未发送内容，附件先复制进目标会话在历史目录下的 `attachments/<conversation_id>/uploads`；切换已有聊天仍隔离输入。新附件不写入项目，旧附件路径不迁移。消息提交继续使用稳定请求 ID 与持久回执，确认接收后只清空该次发送的内容；历史改写、运行与模型请求构造沿用原协议。
-
-开发默认使用隔离目录，可用 `--data-dir` 或 `COWORK_APP_DATA_DIR` 显式选择测试数据。生产包必须使用随包服务，缺失时明确报错。前端与插件不接触数据库、认证凭据或直接模型调用。
-
-能力选择与上下文策略通过运行参数传递，在任务接受时冻结。界面布局、插件源码与用量视图不进入模型请求；系统提示、工具顺序及 Provider 投影统一由运行核心构造，具体缓存边界见[上下文与缓存](#上下文与缓存)。
-
-### 原生表面与编辑器边界
-
-工作区中的终端由服务持有，界面切换或重连只重读带游标的缓冲输出，不重新启动 Shell。用户接管与交还更新控制版本，旧输入不能在控制权变化后执行。xterm 的 DA/DSR 协议应答经过独立白名单，不作为用户命令，避免 ConPTY 等待协议应答时阻塞输入。
-
-内置网页由 Electron 的独立 `WebContentsView` 承载，每个对话使用单独浏览会话。Agent 请求只能消费原任务的一次性授权；操作前再次核对取消状态、控制权和页面版本。文本观察失败与截图失败分别反馈，不能把没有截图的结果用于坐标猜测。本地 HTML 通过限定目录的独立协议提供资源，不开放 Node 或任意本机文件读取。
-
-Office 编辑器复用内置 Web 编辑器，改用限定命令的父页面桥接；保存前等待最后一版编辑快照。外部修改冲突保留草稿，“另存副本”保留原文件格式并拒绝覆盖已有文件。传输上限为 64 MiB，覆盖 25 MiB Office 文件经 base64 编码后的体积。
-
-### 界面插件与稳定宿主
-
-清单 `hostApi: 2` 支持完整本地包（HTML、JS 模块、CSS、图片和字体），内容指纹覆盖整个包。内置 `cowork.workbench` 复用现有 React 组件；外部插件通过隔离 iframe 和同一领域 SDK 使用宿主能力。旧 `cowork.writing` 的 `hostApi: 1` 只保留文稿读写适配，不提供任意后端调用。
-
-| 扩展点 | 选择规则 |
-| --- | --- |
-| `workbench:main` | 同时启用一个整体布局 |
-| `page:<id>` | 按 chat/settings/capabilities/library/favorites/team/plugins 选择页面 |
-| `panel:<id>` | 工作区、文件、任务、网页和终端；支持替换或追加 |
-| `editor:<type>` | 按文件类型选择，`*` 作为显式通用编辑器 |
-| `toolbar:chat` | 内置对话顶部的宿主用量按钮，可显示生成速度 |
-| `command / menu` | 稳定命令 ID；重复注册拒绝安装 |
-
-会话、运行、草稿、文件编辑及管理表单由 `desktop/src/host/` 按稳定 ID 持有。快照和增量经过统一入口，页面卸载不清空内容。聊天草稿使用本机恢复存储，发送沿用稳定请求 ID 与接收回执；文件沿用指纹与冲突保存。表单恢复副本使用系统凭据保护，恢复副本不等于正式保存配置。
-
-创造会话提交 `interface/` 补丁后，通过已认证的运行请求安排 Electron 试跑。试跑以包指纹绑定隔离渲染、交互检查和截图。工具结果在原轮次回传，已通过的快照按设计会话发布到预览区。用户应用时使用该快照的指纹，复用插件安装事务和宿主保存协调。
-
-插件切换先校验并隔离预览，等待旧实例中的修改完成，保存宿主恢复状态，加载候选并确认所有扩展点就绪，最后提交选择。失败保留现有版本。候选预览只读示例内容；未就绪实例和已失效实例不能提交业务操作。停用、恢复上一版和恢复内置界面都只改变插件代码，保留用户数据。宿主恢复按钮与应用菜单独立于当前插件。
-
-接口、能力声明、包限制和可安装示例见 [UI SDK](../desktop/sdk/README.md)。
-
-## Agent Loop 与模型协议
-
-最小循环围绕模型消息与工具结果推进：
+每次顶层会话同一时刻最多维持一个活动运行（不同会话及子任务可并行），状态机覆盖 `queued → running → stopping → completed / failed / interrupted`。核心执行循环如下：
 
 ```python
 while not stopped:
@@ -196,410 +137,225 @@ while not stopped:
     checkpoint_session()
 ```
 
-Provider Adapter 将 Chat Completions、Responses 和 Anthropic 转换为统一的正文、thinking、工具、usage 与运行事件。工具调用聚合完成后执行，结果通过 `tool_call_id` 与原调用配对：
+- **协议归一与无损回放**：`Provider Adapter` 将 OpenAI Chat Completions、OpenAI / DeepSeek Responses 与 Anthropic Messages 统一转换为内部正文、`reasoning_content`、工具调用、用量与运行事件；工具聚合完毕后执行并通过 `tool_call_id` 严格配对。Responses 协议的原生 Items 保存在 assistant 消息元数据中供下一轮按原协议回放；官方 DeepSeek Responses 根据服务地址与协议自动识别推理、函数调用与服务端搜索特性。
+- **取消优先与有界网络重试**：用户点击停止时立即触发目标运行的取消令牌（绕过正文流积压，先取消活跃工具进程树再关闭模型流），并将已完成部分持久化。模型与网络瞬时错误最多进行 5 次可见重试，绝不因重连而重复执行已生效的工具调用。
 
-```text
-assistant(tool_calls) → tool(A) → tool(B) → assistant(next response)
-```
+### 上下文与缓存
 
-Responses 的原生 Items 保存在 assistant 消息协议元数据中，下一轮按协议回放。官方 DeepSeek Responses 由服务地址与协议共同识别，处理 reasoning、message、function call 和服务端搜索；标准 OpenAI Responses 保持自己的请求配置。
+模型请求上下文严格划分为三段，最大化服务端 KV Cache 命中率，同时绝不为缓存牺牲工具可见性准确性或会话隔离：
 
-模型原生图片生成暂时下线。`LLMFactory` 创建模型实例时统一停用此能力，旧配置、运行快照和企业模型不再自动附加 Responses `image_generation` 工具；保存的旧配置不被改写。图片输入、普通函数工具及历史图片引用与协议回放保留。受影响模型的工具前缀会变化，后续请求重新建立对应缓存。[多媒体技能](#多媒体技能)通过普通工具调用配置的生成服务，不重新启用模型原生图片生成路径。
-
-`core/llm/chat_completions_stream.py` 负责解析流分片，Provider 管理连接和请求，Agent 负责工具调度。这三个层次分别维护协议转换、传输和任务状态。
-
-## 上下文与缓存
-
-请求上下文分为稳定前缀与动态部分：
-
-| 部分 | 内容 |
+| 分段 | 包含内容与生命周期 |
 | --- | --- |
-| 稳定前缀 | 系统策略、工具与交互规则、Worker 创建时冻结的长期记忆摘要、工作区根目录 `AGENTS.md` |
-| 动态上下文 | 日期、工作目录、模型、运行模式、显式能力及运行快照 |
-| 消息序列 | 用户输入、模型回答、工具往返、按需披露的资料与能力指导 |
+| **稳定前缀（Stable Prefix）** | 系统核心策略、通用工具与交互规则、Worker 创建时冻结的长期记忆摘要、工作目录根下的 `AGENTS.md`（指用户项目内的约定文件，与开发本仓库使用的根 `AGENTS.md` 互不相干） |
+| **动态运行上下文** | 当前日期、工作目录、所选模型、运行模式、显式勾选的能力及标签页提交摘要 |
+| **有序消息序列** | 用户消息、模型回复、工具调用与返回、以及按需追加披露的资料与技能指导 |
 
-### 能力披露与稳定前缀
+- **按需技能披露（防前缀抖动）**：内置技能目录按确定性名称顺序生成摘要；标记为 `prompt_disclosure: full_on_match` 的内置技能在匹配任务时，通过追加式账本消息注入正文（按内容哈希去重，能力停用时追加停用事件而非改写历史消息），避免把所有技能全文塞进系统提示词导致缓存频繁失效。用户未显式勾选的可选技能通过 `tool_search` 按需发现，`references/` 参考文件由模型按路径按需读取。
+- **首轮极简启动与 1M 超长上下文**：
+  - `bootstrap_plugins/session.py` 在 Windows 下对符合条件的官方 DeepSeek 普通新对话采用精简提示词与最小工具集快速完成首轮响应；一旦需要完整工作台能力即无缝移交主循环，保留全部原始输入与附件。
+  - 桌面主对话默认启用 `1M` 上下文目标（可在用量详情切为 `300K` 或关闭）。当工作集接近有效预算时，发起独立整理请求生成摘要检查点（输出额度在截断时可按剩余空间动态上调至 `16,384` tokens，落盘检查点须通过 `4,096` tokens 校验，网络重试与修复共享最多 3 次额度）；早期原始证据仍保存在完整会话历史中，可通过 `history_search` / `history_read` 按会话隔离调阅。
 
-工作区约定和运行环境信息在 Worker 创建时读取。工具顺序、能力目录和历史组织通过既有构造路径管理；变更这些部分时，需要评估 prompt prefix 与缓存影响。
+### 3. 消息账本（RuntimeLedger）与界面投影
 
-Skill 指导使用内容哈希与目录版本管理披露。运行上下文提供按稳定名称排序的内置技能目录，基于实际可用工具、浏览器模式、配置和 Agent 范围生成；部分可用时列出本轮工具。标记 `prompt_disclosure: full_on_match` 的内置技能按任务匹配，在模型请求前通过已有追加式 Skill 状态账本披露说明。同一正文按哈希去重，失去可用范围时追加停用事件，不重写历史。用户选定能力仍在本轮进入上下文，其他启用能力经 `tool_search` 发现；参考正文按需读取。
-
-内置目录、路由策略及任务工具 schema 构成首次请求前缀的一部分；后续目录使用确定顺序，按需正文追加到账本，不往稳定系统提示词反复塞入全部技能全文。缓存收益不能优先于当前工具范围与会话隔离。这里描述的是应用运行时前缀，与开发助手读取的仓库 `AGENTS.md` 分开。
-
-### 首请求与长上下文
-
-`bootstrap_plugins/session.py` 管理极简首请求。适用的新对话先使用精简提示与工具，需要继续时进入完整能力路径，并沿用原始输入和附件。
-
-超长上下文在完整会话历史之上维护当前工作集及检查点。接近有效预算时，使用独立整理请求生成检查点，提交新窗口后继续任务。`history_search`、`history_read` 按当前会话读取早期证据；完整工具结果先保存，再以摘录和消息引用进入工作集。
-
-桌面主对话在缺少保存值时启用 1M 目标。普通请求在同一观测事件记录预算和文本组成。整理请求从有界输出额度开始，截断后可在配置和剩余空间内提高到 16,384 tokens，保存的检查点仍须通过 4,096 tokens 校验。网络重试与摘要修复共用最多三次额度。耗尽后仅在确认原窗口仍符合预算时继续使用，否则按聊天失败终态收尾，并根据实际可用空间提供恢复入口。诊断记录所用额度、重试次数和终止原因。
-
-## 消息保存与界面投影
-
-协议消息保持 `user / assistant / tool` 的事实顺序；`ui_timeline_v1` 表达 thinking、工具、阶段正文和补充消息的展示位置。UI 元数据在送入 Worker 时剥离，持久化过滤由 `core/message_persistence.py` 统一处理。
-
-保存流程：
-
-1. 一次提交的用户消息、去重回执和运行登记组成一个逻辑记录；结束输出与终态同样成组。
-2. `RuntimeLedger` 在一个数据目录内共用写入者，顺序追加带校验和、游标的 JSONL。同步成功后才确认接受、更新运行投影并发布事件。
-3. 后台整理器在同一个 SQLite 事务写入消息、完整过程事件、运行记录和处理游标，保持 `WAL + FULL`。
-4. 数据库提交后回收已覆盖的封闭日志段；完整工具详情、思考及交互回执继续保留在数据库。SQLite 自身 WAL 由 SQLite 管理。
-
-初始批次为 `16 ms / 64 条 / 256 KiB`。待写队列按条数与字节数限制，按会话公平取批；整理积压达到边界时对生产者施加背压。相邻文本可合并，工具、问卷与终态保留边界。历史编辑、删除、撤销和长上下文保存回执进入同一日志链路，重放不会恢复已删除内容。
-
-历史、搜索与导出在请求开始时固定日志游标，等待 SQLite 整理到该位置后读取；等待期间界面显示状态。重启只重放完整日志并恢复数据与中断状态，不自动重做外部操作。不完整末尾记录保存诊断后截断，中间损坏明确失败，不跳过。
-
-实时界面订阅已持久化的增量；历史分页后生成展示投影，未变消息保留对象身份。后台会话和折叠过程保留事实，按需呈现。搜索和提问导航使用持久化消息 ID。
-
-运行中补充输入由所属任务接收，在安全节点进入消息序列。首次保存前统一补充消息的 `turn_id`、`request_id` 和接收时间，保存与 Worker 入账复用同一身份，防止结束时产生已提交账本冲突。前端按持久化事件时间展示补充消息；只在完整事件可验证正文、思考和工具调用时拆分展示，部分日志保留原有内容，显示片段不写入模型历史。问卷回执按请求与工具调用身份归位，答案来自实际提交结果。待处理队列与运行回调使用会话、运行和消息身份校验。`LLMWorker.stop()` 先发出工具取消，再处理模型流关闭；已发生的工具和消息继续按原身份保存。
-
-### 一次对话的完整路径
+为兼顾高频流式事件低延迟与崩溃零丢数，持久化采用**“单写者顺序 JSONL WAL + 后台批量 SQLite 事务整理”**架构：
 
 ```mermaid
 sequenceDiagram
-    participant U as 界面与稳定宿主
+    participant U as 宿主界面
     participant S as DesktopService / RuntimeCoordinator
-    participant L as RuntimeLedger
+    participant L as RuntimeLedger (JSONL WAL)
     participant W as LLMWorker / Tool Registry
-    participant D as SQLite
-    U->>S: 固定 request_id 提交输入与上下文
-    S->>L: 用户消息、接收回执和运行登记
-    L-->>S: 日志同步成功
-    S-->>U: 接收确认
-    S->>W: 启动所属运行
-    loop 模型与工具循环
-        W->>S: 正文、过程、工具及交互事件
-        S->>L: 保存对应事实
-        L-->>U: 发布已持久化事件
-        L->>D: 批量整理完整事件与游标
+    participant D as SQLite (WAL + FULL)
+    U->>S: 携带稳定 request_id 提交消息与上下文
+    S->>L: 原子写入用户消息、去重回执与运行登记
+    L-->>S: 刷盘同步完成
+    S-->>U: 返回接收确认（仅清空本次已发输入）
+    S->>W: 启动所属会话运行
+    loop 模型流式生成与工具循环
+        W->>S: 产生正文、思考、工具输出与问卷事件
+        S->>L: 追加带游标与校验和的事件记录
+        L-->>U: 推送已持久化事件增量
+        L->>D: 按 16ms / 64条 / 256KiB 批量落库并推进游标
     end
-    W->>S: 最终结果或失败
-    S->>L: 结果与运行终态一同提交
-    L-->>U: 终态与保留内容
+    W->>S: 运行完成、停止或失败
+    S->>L: 成组提交最终消息与运行终态
+    L-->>U: 更新终态与完整保留内容
 ```
 
-接收回执丢失时按原请求查询，连接恢复不自动重发命令；同会话维持一个顶层活动运行，运行中输入通过补充进入原任务。停止先取消所属执行，再收尾保存，不能排在普通输出积压之后。进程重启恢复已保存事实并标记中断，不自动重做可能已经生效的外部操作。恢复阅读与恢复执行是两个不同边界。
+- **崩溃恢复与读取一致性**：历史读取、全文搜索与记录导出在开始时锁定当前账本游标，等待 SQLite 整理器追平该游标后再查询；已覆盖的封闭 WAL 段在事务提交后自动回收。进程异常重启时仅重放完整账本记录并将会话标为 `interrupted`，**绝不自动重跑可能已产生外部副作用的工具**（末尾半条损坏记录留存诊断后截断，中间记录损坏显式报错不静默跳过）。
+- **运行中补充（Steer）与分页归位**：运行中发出的补充要求在首次落盘前即绑定统一的 `turn_id`、`request_id` 与接收时间戳，前端按 `ui_timeline_v1` 事件时序将其穿插展示在真实发生位置（展示切分不篡改底层模型协议历史）。长对话向上分页加载时，未变消息保持稳定对象引用，历史执行过程与耗时按轮次身份精确归位，不会错挂到最新回复下方。
 
-### 后台工具与观测
+### 4. 后台长工具、实时输出与观测
 
-`core/tool_tasks.py` 为长工具维护任务身份。达到等待窗口后返回 `background_tool`、`task_id`、状态及耗时，原操作继续；模型可通过 `wait_tool` 等待或请求取消。
+- **长工具无缝转后台**：`core/tool_tasks.py` 为耗时超过前台等待窗口的工具分配稳定 `task_id` 并返回 `background_tool` 状态，底层线程继续执行；模型后续调用 `wait_tool` 等待或取消时，前端将其合并展示在同一条原工具记录中，并通过交付收据确保原路返回与异步完成通知严格去重。
+- **独立流式输出日志**：`core/tool_output.py` 为 Python（无缓冲模式）、JavaScript、Shell 与依赖安装按“会话 + 运行 + 调用 ID”维护独立 JSONL 日志。增量解码落盘后生成最多 `8 行 / 8 KiB` 的预览检查点供前端展开区每 `250 ms` 轻量读取（右侧详情按 `64 KiB` 分段读取，单次日志默认上限 `50 MiB` 可由 `COWORK_TOOL_LOG_BYTES` 调整，超限仅停止写盘并继续排空管道保留真实退出码），从而避免将海量终端输出刷入会话消息库。大型工具返回同样自动归档，供模型通过 `text_file_read` 的 `next_offset` 分段按需读取。
+- **观测与界面自动联动**：内置网页首次由当前会话任务创建时发布带会话与运行身份的 `browser_opened`，由常驻宿主判断是否自动展开工作区（用户手动收起或切换标签后不再强行打断）。用量浮窗由 `desktop/src/usageMetrics.ts` 基于观测事件独立计算实时速率、服务端上报 Token 与同次请求的本地上下文估算，不介入模型请求构造。
 
-执行线程先保存结果，再公布完成状态。完成结果经原工具返回或隐藏的 `tool_completion` 事件交付，两条路径共用交付收据去重，界面更新原工具卡。
-
-`core/tool_output.py` 按会话、运行和原调用身份保存独立 JSONL 日志；stdout/stderr 使用各自的增量解码器持续读取，Python 使用无缓冲模式。正文先持久化，再发布最多 8 KiB／8 行的预览检查点。可见且展开的记录每 250 ms 读取检查点，右侧每次读取不超过 64 KiB，不把日志增量写入消息历史。进程返回值按通道限制为 16 KiB，普通大型工具结果也单独归档，AI 可沿现有 `text_file_read` 的 `next_offset` 分段读取。
-
-单次日志默认上限为 50 MiB，可通过 `COWORK_TOOL_LOG_BYTES` 配置。达到上限仅停止记录，继续排空输出管道并保留真实退出状态；实际写盘失败停止相关执行。取消检查独立于日志读取锁，并终止进程树。历史与详情 RPC 校验会话和运行归属，`wait_tool` 的展示归并到原记录，协议消息仍正常保存。
-
-依赖安装使用同一输出采集器和按技能环境的进程锁；显式重新安装清除失败缓存。Node 临时代码优先解析项目依赖，再解析应用管理的环境，兼容 `require` 与 `import`。这些变化不修改工具定义、固定提示词或模型请求的稳定前缀。
-
-内置网页创建成功后发布含会话、运行与标签身份的 `browser_opened`；常驻宿主决定是否展开右侧，避免工作区未挂载时丢失通知。用户主动选择和后台聊天隔离优先于自动展示。
-
-用量浮窗读取宿主观测事件，不参与请求构造。`desktop/src/usageMetrics.ts` 计算实时速度、已上报用量和同次请求的上下文估算；浮窗开关保留在本机，指标和浏览状态按会话切换。历史尚未完整载入时标明统计范围，服务上报用量不与文本估算混为一谈。
-
-## 工具与执行授权
-
-Tool Registry 保存名称、说明、JSON Schema、来源、风险属性、运行范围以及 Handler 或 MCP 映射。来源由注册根目录确定：
-
-| 来源 | 注册类别 | 披露 |
-| --- | --- | --- |
-| `skills/` | `core_builtin` | 符合运行上下文的工具首轮可见 |
-| `ai_skills/` | `optional` | 显式选择或按需发现 |
-| 用户能力目录 | `user_extension` | 按启用、选择和发现规则处理 |
-| MCP 服务 | `mcp` | 连接后注册为工具 Provider |
-
-执行授权由宿主创建并随任务传递，单次审批绑定动作及参数。`parallel_tools` 调度独立的只读调用；文件修改、命令和交互沿各自的执行路径处理。
-
-拷问模式在运行上下文中保存周期和轮次，使用交互检查点选择继续讨论或进入执行。模式切换由同一 Worker 更新工具集合。
-
-### 文件工具
-
-| 工具 | 职责 |
-| --- | --- |
-| `glob` / `grep` | 发现路径、定位文本 |
-| `text_file_read` | 解码并按需读取文本，支持指定编码和行范围 |
-| `apply_patch` | 普通文本的创建、修改、移动与删除 |
-| `workspace_rename_path` / `workspace_delete_path` | 目录级操作 |
-
-`apply_patch` 先解析全部操作并校验路径。局部修改按当前文件中的原文和上下文唯一匹配，保留编码、BOM 和换行风格。用户显式指定的编码可复用到同一文件内容。已有文件在 `os.replace` 前检查预检以来的实际编辑冲突，新文件采用拒绝覆盖的提交方式。删除仍以一次汇总确认为提交边界。
+---
 
 ## Skill 与 MCP 开发
 
-**Tool 是执行面，Skill 是指导与经验包，MCP 是外部工具连接方式。** 专家在同一运行循环上绑定角色、模型和能力范围。
+**核心分工：Tool 是统一执行面，Skill 是工作流指导与经验资产包，MCP 是外部工具接入协议，专家（Expert）是在同一运行循环上绑定的角色提示词与能力子集。**
 
-### 包结构与元数据
+### 1. 工具注册表、执行授权与原子文件工具
+
+`Tool Registry` 统一管理所有工具的 Schema、风险等级、可见范围与执行处理器，按注册来源分为四类：
+
+| 来源目录 / 通道 | 注册类别 | 上下文可见性规则 |
+| --- | --- | --- |
+| `skills/` | `core_builtin` | 满足当前平台与运行上下文的内置工具首轮立即可用 |
+| `ai_skills/` | `optional` | 用户显式选择，或启用后经 `tool_search` 按需发现 |
+| 用户与企业能力目录 | `user_extension` | 按启用状态、会话选择或企业本轮绑定快照注入 |
+| MCP 服务连接 | `mcp` | 握手连接成功后映射为标准工具 Provider，共用同一套审批与日志链路 |
+
+- **执行授权与模式切换**：宿主为每次运行签发授权策略（`请求批准`模式下单次审批精确绑定工具动作与参数摘要；`完全访问`模式下在当前系统用户权限内直接放行）。`parallel_tools` 仅并行调度互不干扰的只读工具。拷问模式（内置 `cowork.grilling`）在运行上下文中维护讨论轮次与问卷确认检查点，确认执行后由同一 Worker 原位解锁执行工具集。
+- **精确文件补丁（`apply_patch`）**：文本发现与读取由 `glob`、`grep`、`text_file_read` 承担；文本新建、局部修改、移动与删除统一走 `apply_patch`（目录级重命名/删除使用 `workspace_rename_path` / `workspace_delete_path`）。`apply_patch` 先全量解析并校验目标路径，局部修改基于原文上下文唯一匹配，严格保留原文件编码、BOM 与换行符风格，并在最终 `os.replace` 提交前核对预检以来的外部并发写冲突（新建文件默认拒绝覆盖同名已有文件）。
+
+### 2. Skill 包结构、快照目录与安装分发
 
 ```text
 example-skill/
-  SKILL.md
-  skill.json
-  impl.py
-  references/
-  scripts/
-  assets/
-  experience/entries.jsonl
+  SKILL.md                 # 核心流程指导（含 YAML 头信息 name / description）
+  skill.json               # 可选：原生工具绑定、配置表单、依赖与展示元数据
+  impl.py                  # 可选：Python 工具实现（首次调用时延迟导入）
+  references/              # 按需读取的详细参考文档
+  scripts/                 # 通过 script_entries 声明并由 run_skill_script 执行的脚本
+  assets/                  # 模板原件与静态资源
+  experience/entries.jsonl # 经用户审阅沉淀的专项经验条目
 ```
 
-`SKILL.md` 维护工作流程；Cowork 原生能力通过 `skill.json` 描述展示、配置、工具及运行元数据。Tool Handler 可绑定到 `impl.py:function`，首次调用时延迟导入；脚本通过 `script_entries` 声明，由 `run_skill_script` 执行。
+- **不可变目录快照与隔离依赖**：`SkillCatalogService` 将全量技能编译为不可变快照供 UI 与后台无锁读取；安装、编辑或启停技能触发 `SkillChangeEvent`，正在运行的 Worker 在下一个模型请求边界平滑切换新快照。内置 `documents`（Office/PDF 读写）、`presentations`（可编辑 PPTX）、`data-analysis`（口径核验、统计计算与干净内核 `.ipynb` 顺序执行）与 `visualize`（主题自适应交互卡片）共享随包 Python 环境；第三方技能的额外包由 `DependencyCoordinator` 按技能与依赖哈希在独立环境中合并安装。
+- **MCP 接入**：独立 MCP 保存各自连接与认证信息；随技能分发的托管 MCP 在 `skill.json` 的 `mcp_server_presets` 中声明（支持 `stdio` 与 `Streamable HTTP`，自动展开 `{{ENV_NAME}}` 变量，设 `runtime: skill_python` 时复用所属技能的隔离 Python 环境）。
+- **统一安装器**：`core/skill_install.py` 统一解析本地文件夹/ZIP、HTTPS Git 仓库（固定真实 commit）与直接 ZIP/Markdown 地址，在临时副本完成解析后交由 `core/skill_package.py` 做路径安全与结构校验并原子发布（同名冲突拒绝覆盖，批量安装部分失败时保留原技能完好，安装成功与“待完成连接配置”状态分开报告）。SkillHub 安装通过 `.skillhub.json` 记录上游来源基线；需要外部身份授权的技能通过受信任 `authorization.provider` 在隔离流程中签发凭据。
 
-`SkillCatalogService` 将目录编译为不可变快照，UI 与 daemon 各自使用快照。任务提交建立轻量运行视图，创建、更新或启停能力后通过 `SkillChangeEvent` 发布变更，Worker 在模型请求边界应用新目录。
+### 3. 长期记忆、自主经验与“沉淀为 Skill”
 
-安装标准 Skill 时，工具将源内容暂存一次，在该副本上解析、验证并发布。同名冲突保留原技能。显式提供的摘要在安装实际使用的内容上验证一次。模板资源更新按指定路径操作，发布前比较该资源在本次更新中的实际并发冲突。
-
-内置 `documents` 负责 Office/PDF 读取与 Word 创作，`presentations` 负责 PPTX，`data-analysis` 负责口径、质量、计算与结论，`visualize` 负责对话中的交互表达。创作与分析复用现有 Python 运行时；多个交付格式共用已核验的结果。`SKILL.md` 保留核心流程，`references` 按任务读取，加载后的指导提供实际文件路径，默认不把参考正文一并注入。
-
-`document_read`、`document_copy` 与 `document_render` 分别负责内容读取、任务副本和页面检查，创作结果通过现有文件能力保存和审阅。技能摘要、指导与工具定义都参与模型请求；变更时评估前缀影响，详细参考按需读取，展示状态不进入模型上下文。
-
-### 配置与依赖
-
-`config_fields` 支持 `text`、`secret`、`select`，以及必填、默认值、选项、条件规则、帮助信息和声明的环境变量。配置保存在 `skill_configs`，执行时注入对应字段。
-
-`DependencyCoordinator` 以 Skill 和依赖哈希组织隔离环境准备；相同请求合并处理，保存准备状态。能力目录发现、实现导入与依赖准备分别进行。
-
-### MCP
-
-独立 MCP 服务保存自身连接与认证配置。托管 MCP 由 Skill 的 `mcp_server_presets` 声明，支持 stdio 与 Streamable HTTP，保存时展开 `{{ENV_NAME}}` 并关联 `source_skill`。`runtime: skill_python` 使用所属 Skill 的 Python 环境。
-
-远端工具统一进入 Tool Registry，继续使用宿主执行授权、结果协议和运行事件。
-
-### 安装与分发
-
-本地文件夹和 ZIP 经结构、路径及内容校验后原子发布。标准 Agent Skill 保留上游指导并添加本地索引。
-
-统一安装器 `core/skill_install.py` 解析本地包、HTTPS Git 仓库和直接 ZIP/Markdown 下载，固定实际来源、commit 与内容摘要；`core/skill_package.py` 校验并发布同一份内容。网页安装说明需先解析为真实来源，不再使用独立安装 Agent 或固定二次确认。批量校验失败保留已有技能，同名冲突拒绝覆盖；安装完成与配置就绪分开报告。SkillHub 使用公开目录与官方 ZIP，`.skillhub.json` 记录来源及安装基线。
-
-能力需要额外授权时，由清单引用受信任 Provider ID，例如 `authorization.provider=wecom_cli`。Provider 在隔离位置完成授权与身份检查，再发布凭据。
-
-### 经验与会话沉淀
-
-AI 在执行阶段自主判断是否调用 `update_experience(scope, experience, previous_experience?)`，将已验证且可复用的经验写入现有全局或项目摘要的“可复用经验”小节。先读取并合并相近内容；工具精确去重或替换单条经验，不修改 Skill，也不增加独立经验库。拷问阶段只读；创造模式是独立聊天，不继承来源项目的记忆写入目标。项目归属由宿主在运行开始时绑定，普通聊天目录不作为项目。
-
-经验写入、显式记忆追加和人工保存共用 MemoryStore 文件锁、原子替换及备份；人工保存使用内容比较避免覆盖并发更新。仅确切的应用内置经验处理函数可免逐次执行审批，工具名称本身不授予权限。写入失败保留原文件，记忆更新只影响下一轮模型上下文。
-
-用户审阅的 Skill 经验仍保存在目标包的 `experience/entries.jsonl`，包含方法、工具、任务类别、来源和时间；必须指定已有目标 Skill，不再自动创建通用经验包。
-
-“沉淀为 Skill”先提取用户选定会话范围并生成可编辑的复用分析，再生成草稿；发布前检查 Schema、证据引用、敏感内容、资源路径、Python AST 和目标 revision。指导、脚本和经验在同一包中组织。
+- **自主经验更新**：执行阶段模型验证出值得跨轮次复用的项目惯例或避坑结论时，可调用内置 `update_experience(scope, experience, previous_experience?)` 将其合并写入项目或全局长期记忆摘要的“可复用经验”小节（精确去重或更新旧条，拷问阶段只读，创造模式设计会话与普通无项目聊天不会污染全局或原项目记忆）。底层与人工编辑、“从历史更新”共用 `MemoryStore` 文件锁、内容比对防覆盖与原子备份，修改从下一轮任务生效。
+- **会话沉淀为 Skill**：用户触发“沉淀为 Skill”后，系统先提取选定消息范围生成可编辑的复用分析与技能草稿，点击保存前依次校验 JSON Schema、敏感凭据泄露、资源相对路径、Python AST 语法与目标技能 `revision`，支持创建新技能或向已有可编辑技能安全追加方法与模板资产。
 
 ### 多媒体技能
 
-多媒体通过 `ai_skills/multimedia/SKILL.md` 与 `skill.json` 注册为可选技能，启停复用 `enabled_skills` / `disabled_skills`，模型绑定保存在 `skill_configs.multimedia.bindings`（沿用通用技能配置的字符串值，以 JSON 编码）。旧 `experimental_multimedia` 一次性迁移，显式技能选择优先；旧图片理解与音频绑定保留但不公开为新任务能力。`core/desktop_media.py` 负责宿主租约、中断恢复与任务记录，`core/multimedia/` 继续承载执行和服务适配。停用阻止新任务，已有任务和恢复操作持有租约，结束后释放实例。
+多媒体能力（`ai_skills/multimedia/`）作为可选技能运行，图片生成/编辑、视频生成与视频理解分别绑定独立的模型服务配置（保存在 `skill_configs.multimedia.bindings`，API Key 始终留在加密的模型渠道配置中，绝不进入技能提示词、任务记录或工具返回）：
 
-技能配置页按图片／视频分组，支持图片生成、视频生成与视频理解，选择模型或原位新增服务。保存复用宿主配置事务与修订检查，不发起远端请求；凭据留在受保护的模型服务配置中，不进入技能说明、任务记录、工具结果或日志。每轮 Worker 固定模型和服务快照。技能摘要随启用状态进入现有技能发现机制，完整说明按需加载；`media_create` 与 `media_task` 保持固定注册顺序和延迟披露，服务配置及进度不进入稳定前缀。新增技能说明和收敛后的工具 schema 会使对应上下文缓存重新建立。主模型不支持图片时，已配置图片生成能力允许附件作为文件引用交给工具，不假装主模型具备视觉能力。
+- **宿主租约与精确重试边界**：`core/desktop_media.py` 与 `core/multimedia/` 基于 `DesktopJobs` 管理异步生成与恢复租约。未配模型时保存 `needs_configuration` 快照，补齐配置后通过 `media.continue` 原位续跑；仅在 Agnes 视频服务明确返回未接单的 `video_queue_full` 时自动重试最多 3 次，普通 `5xx`、网络超时或缺少服务端回执绝不盲目重发生成请求（防止重复扣费）。轮询查询瞬时错误最多连续重试 5 次（单轮等待上限 10 分钟），下载瞬时失败最多重试 3 次并通过 `.part` 临时文件原子落盘。
+- **连续视频归位与流式播放**：每次视频创建持久化所属 `tool_call_id` 与 SQLite 记录版本号；前端按“会话 + 轮次 + 创建调用”将多段视频卡片精确挂载回各自发起的回复下方（历史未分页载入时先在工作区“任务”标签兜底展示，载入后自动归位）。成片预览通过宿主受控的 `cowork-local:` 协议按需签发临时地址，完整支持 HTTP `Range` 分段流播放，收起卡片或卸载组件时立即释放文件流句柄。
 
-后台复用 `DesktopJobs`，按会话、逻辑执行 ID 和请求摘要去重。没有对应模型时保存 `needs_configuration` 和原请求；配置后通过 `media.continue` 继续同一任务。提交前先保存状态；只有 Agnes 视频明确返回未接单的 `video_queue_full` 才自动重试（最多 3 次），耗尽后通过 `media.retry` 使用同一任务和原请求。普通 5xx、超时或缺少回执不重发。视频查询临时失败最多连续重试 5 次，单轮等待最多 10 分钟；临时下载错误最多重试 3 次，不回到生成阶段。
+---
 
-远端回执、下载来源和成果沿用宿主 SQLite `media:` 记录及工作目录回执。重启时，有回执的未完成任务继续查询或保存。明确未提交的任务仅在原服务凭据仍匹配时继续提交，在途且无回执则标为未确认。`media.resume` 使用原任务回执，停用技能后仍可查询或下载已有任务。主动「停止等待」会保留记录，远端生成可能继续。
+## 工作区、编辑器与交付物引擎
 
-视频创建记录保存 `tool_call_id`。桌面按会话、轮次和创建调用将卡片放回消息组，分页同时读取关联任务。工作区从同一份记录展示未定位的卡片。SQLite 记录版本用于合并视频事件和快照，显式重试以对应版本为提交条件。工具调用仍返回当时的结果，视频进度订阅在卡片内。
+### 1. 文件编辑事务、原生表面与代码沙箱
 
-`media.refresh` 使用已保存的远端 ID 查询一次。`media.resume` 可从原产物恢复缺失的成片，下载遇到签名地址拒绝时可查询一次原作业以获取更新的地址。复用 `.part` 写入和原子发布。
+- **统一文件能力与防冲突保存**：`core/file_capabilities.py` 统一注册各扩展名的预览与编辑方式，`core/deliverable_editing.py` 维护会话级编辑快照。保存文件时经临时文件校验、上一版备份与原子替换完成，利用内容 `SHA-256` 检测磁盘外部并发修改（冲突时完整保留编辑器内草稿并提示用户处理，不静默覆盖）。写作页草稿持久保存在会话状态中，首次显式保存时才在工作目录创建文件；内置富文本与表格编辑器通过受限命令桥与宿主通信（单次传输上限 `64 MiB`）。
+- **终端与双模式浏览器**：
+  - 终端由后端服务持久持有，前端切页重连按游标拉取缓冲输出而不重启 Shell；用户“接管 / 交还”递增 `control_revision` 阻断过期的 AI 输入，xterm 的 `DA / DSR` 终端查询应答走独立白名单以防阻塞 ConPTY。
+  - 浏览器默认使用按会话隔离的 Electron `WebContentsView` 内置网页，也可通过启用 BrowserSkill 切换至外部 Chrome / Edge（新任务启动时固定后端租约，运行中不混用）。内置自动化将**“动作已派发”**与**“后续页面等待结果”**解耦：等待超时不自动重发点击或提交；确实无法确认派发状态时仅冻结当前标签页的后续写输入，仍允许读取观察或由用户手动接管核实。
+- **隔离代码预览与内联可视化**：
+  - `desktop/electron/snippets.cjs` 在完全断网、禁导航、无 Node 与宿主接口的独立沙箱中运行用户主动点击预览的 HTML / 原生 JavaScript 代码块（单段上限 `256 KB`、同屏最多 16 个实例、前台无响应 `10 秒` 自动熔断，输出与报错仅作临时界面状态，不写入消息库）。
+  - Visualize 使用 `core.inline_visualization` 封装交互片段（上限 `2 MiB`、持久化筛选状态 `64 KiB`），由 `desktop/src/theme.ts` 注入当前主题色板变量并在切换明暗/主题时派发 `cowork:themechange` 事件无刷新重绘。
 
-Agnes 图片与视频、火山方舟视频使用独立请求契约。OpenAI 兼容接口支持图片生成／编辑和视频理解；Videos 使用服务的创建／查询／内容接口，不能假定第三方完全实现相同协议。旧图片理解与音频适配保留用于已有任务恢复，但新工具 schema 不披露这些能力。服务要求 URL 的素材不自动上传，也不静默改用组合解析。任务状态、结果和恢复入口统一位于所属聊天。
+### 2. Office/PDF 页面渲染与独立模型审稿
 
-音视频成果复用宿主授权的 `cowork-local:` 文件协议，聊天与工作区提供播放器。视频任务卡展开时申请临时预览地址，收起或卸载时撤销地址并取消流读取。协议保留 Range 头并启用流媒体能力，文件链接继续复用工作区。
+- **快照渲染与进程安全**：`document_render` 读取一次源文件生成不可变快照，按“文件指纹 + 渲染器版本 + 阅读参数”隔离缓存转换出的 PDF 与页面图片（由独立进程 PDFium 转图，阅读端采用离线 PDF.js 与随包字体，用户手动点击刷新前不打断当前阅读位置）。`core/office_renderers.py` 在 Windows 下按注册表与位数发现本机 Microsoft Office / WPS（不在应用启动时预激活 COM；转换只关闭本次临时文档副本，绝不强杀用户已打开的办公软件进程；WPS 按套件串行且不篡改用户共享配置），缺少本机办公套件时支持一键校验安装提取版 LibreOffice。Excel 额外提供 `excel_options` 区分**区域阅读**（按实际列宽智能分片、保留合并单元格组并重复指定标识列/标题行）与**打印预览**。
+- **独立视觉审稿预算与证据链**：`core/document_review.py` 复用当前会话所选模型与授权发起独立的看图审稿请求（每批细节最多 4 页、长边 `2000 px`，跨页总览最多将 24 页合成为 4 张图且不替代细节页计数；Responses 协议等待匹配的 `response.completed` 完整正文解析页码与问题）。单轮任务跨文件共享 **24 次请求、80 页次、6 分钟及累计像素/Token 上限**（用量未知时停止继续追加请求）。送审原图摘要、覆盖页码与结论保存在 `browser_previews/sessions/` 下供阅读器底部“检查记录”核查；AI 修改办公文档默认通过 `document_copy` 在 `.cowork/office-drafts/` 创建任务副本（此设计为防误改原件的工作流保护，并非操作系统级文件沙箱）。
 
-## 工作区与交付物
+### 3. 本轮文件记录 vs Git 工作目录变更
 
-### 文件身份与保存
+系统同时提供两套严格隔离的文件差异机制，互不冒充数据源：
 
-每个会话保存工作目录和文件身份。`core/file_capabilities.py` 为预览、编辑和文件链接提供共同注册表，`core/deliverable_editing.py` 维护编辑会话、内容快照及事务保存。
+| 维度 | 本轮文件记录（`core/turn_files.py`） | Git 工作目录变更（`core/workspace_changes.py`） |
+| --- | --- | --- |
+| **展示位置** | 每轮 AI 回复下方的“本轮文件”卡片及只读“文件记录”面板 | 工作区顶栏打开的实时“变更”标签及编辑器内“显示更改” |
+| **采集机制** | Worker 线程绑定固定运行归属，在应用内置写入/补丁/删除/移动的文件锁内精确抓取前后快照（非 Git 普通文件夹同样可用；无明确写入证据的自由 Shell 脚本不靠猜测硬凑归属） | 调用随包 Git 只读对比当前工作目录相对 `HEAD`（无提交时对比空树）的已暂存、未暂存与未忽略新文件，反映磁盘实时全貌（含外部软件修改） |
+| **存储与配额** | 独立存于历史目录 `turn_files.sqlite`，单版本上限 `2 MiB`、单轮压缩正文 `16 MiB`、全局 `256 MiB`（超额按时间淘汰最早已结束任务的正文，永久保留文件清单、增删行数统计与清理原因说明；超过 20,000 行的超大文本标记 `diff_limit`） | 不落盘历史副本，按需实时读取并随文件保存自动刷新 |
+| **上下文隔离** | 纯界面只读投影，不进入模型消息历史，不影响稳定 Prompt Prefix | 纯界面只读查询，不进入模型消息历史 |
 
-文件保存通过临时文件重新解析、上一版备份和原子替换完成，内容 SHA-256 用于判断外部修改。UI 共用离开守卫；编辑内容由独立会话维护。
+---
 
-`WorkbenchStore` 按聊天保存文件、网页和终端标签。提交消息时，通过 `submission_context` 保存标签元数据，并以隐藏运行上下文传入当前任务。网页 Profile、文件编辑器和终端分别管理各自实例。
+## 自动化调度与企业协同平台
 
-网页通过 `core/browser_backend.py` 保存后端选择与运行租约。桌面桥接按会话、run_id 和请求 ID 领取工具请求，网页观察版本与控制权用于后续动作校验。
+### 1. 常用任务调度、消息网关与资料库
 
-终端使用 ConPTY／POSIX PTY 和离线 xterm.js，后台线程读取，UI 分批呈现；Windows Job 或 POSIX 会话管理所属进程。Office 预览通过后台 helper 或可选 LibreOffice 生成阅读副本，`core/preview_versions.py` 按内容版本组织缓存，界面通过显式刷新加载新内容。
+- **持久防重调度（`TaskAutomationService`）**：`task-automation` 的 7 个工具、`favorites.*` 桌面 RPC 与后台 `DesktopScheduler` 共用同一服务实例，通过 `revision` 拦截并发编辑冲突。定时点到达时，先原子写入 `task_id + scheduled_at` 领取记录，再创建独立会话走标准提交流程（应用重启后核对真实状态，绝不重放结果未明的外部任务）。新计划保存标准 IANA 时区（随包携带 `tzdata`，正确处理夏令时跳过、重复时刻单次执行与月末天数对齐，旧计划兼容保留 `local`）。任务完成后，消息渠道通知进入独立的持久化投递队列分段发送，任务终态与投递终态分开记录。
+- **跨进程 IM 渠道与子任务**：`core/im_gateway_registry.py` 通过 `ProviderSpec` 统一注册飞书、钉钉、企业微信、QQ 与微信渠道，由 `core/daemon.py` 经认证本地接口转发至同一 `RuntimeCoordinator`；`SessionAgentManager` 为子任务维护独立上下文与收件队列，父会话只接收精炼汇总，子会话保留完整工具轨迹。
+- **本地与云端资料库**：`core/local_library.py` 管理独立于项目的公共资料库（含应用内回收站整批还原）并按规范路径去重汇总未归档项目目录；WeKnora、腾讯文档与腾讯乐享适配器在任务提交时绑定账号身份与选定范围，缓存按授权代次严格隔离。
 
-### 页面渲染与成果审阅
+### 2. 企业管理中心、部门授权与合规审计
 
-`document_render` 读取一次文件，用这份快照缓存 PDF、转图和关联审稿记录。Office 复用本机 Office/WPS 或显式选择的 LibreOffice，PDFium 在独立进程转图。细节每批至多 4 页、长边 2000 像素。按需总览将最多 24 页合成 4 张图，总览只计为跨页检查。Excel `excel_options` 区分区域阅读和原打印。区域模式按实际列宽分片，保留合并列组并重复指定的标识列或标题行，过宽列组显式拒绝。UI 使用离线 PDF.js 和随包字体等资源。用户刷新才重新转换，阅读亮度只作用于屏幕。
+独立部署在 Linux 服务器上的企业中心（`web/platform/`，基于 FastAPI + PostgreSQL）统一承载身份认证（本地账号密码 / OIDC / OAuth2 / LDAP）、多级部门授权、模型代理、企业能力仓库、合规审计、团队空间与客户端分发：
 
-`core/office_renderers.py` 从注册信息、程序版本和位数发现渲染器，不在启动时激活 COM。首次实际转换成功并完成清理后按软件版本／文档类型记录可用性，软件变化使记录失效；这不保证任意字体或文档都可转换。Office helper 只关闭本次副本，不 Quit／强杀办公软件。超时停止等待，实例在旧任务清理完成前暂停接收新转换；重新检测先核对互斥和残留状态，不向挂起实例再发 COM 调用。WPS 按套件串行，并拒绝在已有打开文档时改变共享设置；失败后只能由用户明确选择其他渲染方式。
+- **部门树并集授权与能力分发**：`web/platform/server/departments.py` 计算多级部门继承关系，员工可用模型与能力取**个人直接授权与所在部门、全部上级部门授权的并集**。管理员上传的 Skill / 专家 ZIP 由 `web/platform/server/capability_packages.py` 在内存中完成无解压安全校验（拒绝路径穿越、符号链接、加密包、私钥凭据及超过 `4 MiB` 的内容，专家包支持随附 1–8 个关联 Skill 草稿）。发送消息时，`core/enterprise_capabilities.py` 锁定本轮已发布能力版本并由 `core/enterprise_capability_runtime.py` 注入运行环境；企业 Streamable HTTP MCP 的员工个人 Bearer 令牌仅加密保存在桌面本机。
+- **脱敏最新请求审计**：`core/enterprise_chat_audit.py` 在客户端请求发出前剥离认证凭据、密钥文本与所有内嵌文件/媒体二进制数据（单条净化后上限 `4 MiB`，超限仅上报元数据并标记正文未保存），写入本地加密 SQLite 待传队列（最多缓存 64 个会话，按指数退避重试，**队列只重传审计副本，绝不重放模型推理请求**，且严格校验企业身份代次防串号）。服务端 `web/platform/server/chat_audit.py` 按“成员 + 会话”保留最新一条记录 **30 天**，平台管理操作记录独立保留 **90 天**，支持多维检索、JSON 正文折叠复制与 Excel 导出。
 
-`core/document_review.py` 使用同一已选模型和授权的独立传输。最终协议请求核对实际提交的图片，宿主将回执关联到本次请求和快照，模型只返回页码与发现。独立审稿不展示正文分片。Responses 在身份匹配的 `response.completed` 到达后读取最终正文，分片差异记入诊断。主对话接收结构化结果与实际覆盖，查看新版时旧快照结论进入历史。每轮跨文件与版本共享 24 请求、80 页次、6 分钟、累计像素和已报告 Token 限制。内部自动重试关闭，用量缺失时停止新增请求。Token 阈值用于限制请求次数，实际费用以服务用量为准。
-
-预览 PDF、图片证据和检查回执位于应用数据 `browser_previews/sessions/<会话摘要>/`，按版本／配置分离；永久删除会话清理对应缓存，归档和软删除保留可恢复记录。用户原件与最终修改稿不在缓存目录。`review=false` 的临时图片位于工作区 `.cowork/document-previews/`；`document_copy` 仅在 `.cowork/office-drafts/<任务摘要>/` 原子创建副本，重复调用保留已有修改。此默认流程不是操作系统写入沙箱，通用 Python／命令权限边界未改变，也不提供一键替换原件。
-
-写作页在会话中维护标题、正文和恢复副本，首次保存创建 Markdown 文件。富编辑器使用隔离 iframe 与限定命令的父页面桥接，前端资源由 `web/editors/` 构建并随应用分发。
-
-### Git 工作目录变更
-
-`core/workspace_changes.py` 使用运行时 Git 只读查询当前目录相对 `HEAD` 的变化；没有提交时使用空树作为基线。范围包含已暂存、未暂存与未忽略的新文件，限制在当前工作目录。`desktop/src/WorkspaceChanges.tsx` 的实时“变更”标签复用该结果与编辑器标签，切换差异视图保留编辑草稿。结果代表磁盘现状，不能归因为某一轮 AI 独自产生，也不作为聊天历史卡片的数据源。
-
-聊天卡片通过 `core/turn_files.py` 保存按会话与运行隔离的记录。Worker 在线程内绑定固定归属，原子写入、补丁、删除、移动在现有文件锁内采集；准备记录先落盘，提交后记录实际内容。完成记录失败保留待核对状态与日志，不能把已执行的写入变成可重试错误。同轮连续修改合并到首个基线；中间出现外部修改则标明基线不完整。没有写入证据的 Shell 输出不参与归属，也没有全盘扫描或目录监控；明确写入的目标不因处于忽略目录而丢失。
-
-`turn_files.sqlite` 将元数据、压缩正文和已确认引用分开保存。每个文件版本上限 2 MiB，压缩正文每轮 16 MiB、全局 256 MiB；超额优先淘汰最早已结束任务正文，保留清单、统计及清理原因。运行中记录不自动淘汰，配额不足只保存元数据。附件与源文件不在回收池。只读 `workspace.file_history` 校验会话归属；失败显式呈现，不读取当前磁盘冒充旧版本。`render_messages` 附加显示记录，运行中补充造成的展示拆分只在末片保留历史卡片。记录、配额与界面状态不进入模型历史，未改变系统／开发者提示词、工具定义及顺序，稳定 prompt prefix 不受影响。
-
-### 浏览器后端与代码预览
-
-内置浏览器默认启用，外部 BrowserSkill 通过技能启停选择，新任务固定后端租约，运行中不改后端。内置自动化将动作派发与等待结果分开，明确已派发的动作不会因等待超时重发；不确定结果只限制原标签后续输入。语义定位、坐标局部画面校验、用户接管和取消复用同一操作边界。
-
-`desktop/electron/snippets.cjs` 隔离执行用户主动打开的 HTML/JavaScript 代码预览。历史载入与主题变化不执行源码，切换显示保留实例，重新运行重建实例；禁止联网、导航、Node 与宿主接口，输出和错误只作为界面状态，不写入消息事实或模型上下文。
-
-## 后台任务与企业协作
-
-### 常用任务与调度
-
-`task-automation` 用七个有类型工具覆盖查询、读取、保存、计划设置、运行、历史与删除。工具适配器、`favorites.*` 桌面 RPC 与 `DesktopScheduler` 共用宿主 `TaskAutomationService`；技能实现不自行创建 ConfigManager，不返回仅供前端解释的启动指令。旧 favorites 存储键和任务 ID 保留，运行配置中的 `favorites-manager` 标识归一为新技能，历史消息不改写。
-
-任务编辑使用 revision 防止覆盖并发修改；保存与运行的逻辑操作标识用于回执丢失后的去重。定时触发先保存 `task_id + scheduled_at` 对应的持久领取记录，再创建独立会话并调用标准发送流程，接受回执才表示进入运行。重启核对真实运行状态，不自动重放结果不确定的外部操作。手动任务正文与计划专用正文／交付配置分开，纯技能组合只创建待输入会话。运行记录保留任务版本、模型 ID、所选技能说明摘要与会话 ID，当前审批和运行控制仍走普通 Agent。
-
-新计划保存 IANA 时区，旧计划保留 `local` 及已有下次触发时间。绝对时间要求偏移，相对时间由后端计算；夏令时缺失时刻跳过并记录诊断，重复墙钟时刻只执行一次，每月日期超过当月天数时取月末。Windows 发行物包含 `tzdata`，发行检查拒绝残留旧技能目录。
-
-计划消息投递通过独立持久化作业处理：最终回答保存后入队，渠道网关消费作业并记录分段回执。任务终态与投递终态分别保存。
-
-### 消息接入与子任务
-
-桌面与计划任务由本地服务调用统一运行核心，daemon 提供消息渠道的跨进程适配。
-
-`core/im_gateway_registry.py` 用 `ProviderSpec` 注册消息渠道及其配置、启动和交付能力。
-
-`SessionAgentManager` 为子任务维护独立运行上下文与消息队列，父会话接收汇总结果，子会话保存完整过程。
-
-### 资料库与企业中心
-
-公共资料由 `core/local_library.py` 管理，支持导入、目录编辑、剪切复制及应用内回收站；文件与原件分开保存。项目资料按已登记项目及聊天工作目录汇总文件，按规范路径去重并排除已归档项目，不搬动原文件；添加到聊天复用附件提交边界。远程资料库通过各来源适配器访问 WeKnora、腾讯文档和乐享。任务提交时绑定来源、身份和选定资料范围；目录和正文缓存按身份与授权代次组织。
-
-企业中心采用 FastAPI、PostgreSQL 和同源静态页面，处理认证、部门与成员、模型授权与代理、企业能力、聊天请求审计、客户端分发及团队空间。空间共享对象保存在中心，本机任务在桌面运行，员工主动选择内容发布为团队成果。服务部署和配置见[企业部署指南](enterprise/deployment.md)。
-
-`web/platform/server/departments.py` 计算部门继承权限，资源可用范围为个人授权与所在部门、上级部门授权的并集。企业 Skill、MCP 和专家先保存草稿、检查并发布，再分配给成员或部门；专家及其关联能力分别检查权限。`core/enterprise_capabilities.py` 在发送时确定本轮能力版本和企业身份，`core/enterprise_capability_runtime.py` 将其装入本轮运行环境。新发布版本供后续轮次使用，停用或撤权阻止后续调用；账号切换保持身份隔离。MCP 支持 Streamable HTTP，员工凭据保存在本机。
-
-`core/enterprise_chat_audit.py` 与 `web/platform/server/chat_audit.py` 保存符合策略的请求副本。每个成员的每个聊天只保留最近一次请求，保留 30 天；平台操作独立保留 90 天。副本省略认证凭据和内嵌文件数据，超过 4 MiB 时记录正文未保存。自配模型执行企业任务的审计由管理员启用，默认关闭。审计上传队列只重试上传副本，不重放模型请求。管理页支持成员、时间和关键词筛选、Excel 元数据导出，以及已保存 JSON 正文的展开、折叠和复制。
-
-数据库结构版本 6 增加部门与资源授权，版本 5 增加企业能力和聊天审计；升级通过既有迁移入口执行并保留原个人授权。Linux x86_64 与 ARM64 可原生构建后台，现有离线镜像包仅覆盖 amd64；可信内网 HTTP 使用独立 Compose 配置。桌面企业包绑定平台地址，推荐版本检查与下载无需企业登录，安装仍由员工确认。企业后台部署包与桌面发行 ZIP 分别构建。
-
-## 主题设置与数据处理
-
-主题包使用 Schema、资产清单及稳定 Surface/Component ID。`preview_id + revision` 标识用户预览的候选，确认后提交已保存主题；界面使用统一 token 和共享控件。
-
-内联可视化使用 `core.inline_visualization.build_visualization_document` 的生产包装，开发验收也复用它。`desktop/src/theme.ts` 将当前主题映射为片段实际使用的背景、文字、边界、控件和六个系列颜色变量，首次渲染前注入；后续只更新主题 CSS 并派发 `cowork:themechange`。Canvas/图表库监听事件解析颜色后重绘，不重载 iframe 或重置展示状态。片段仍受 2 MiB、状态 64 KiB、会话与内容哈希绑定、沙箱和静态资源白名单约束。
-
-设置保存按配置、记忆和外观分区处理。配置使用 `batch_save`，记忆按作用域写入，外观提交主题状态并刷新界面。管理表单将浏览位置、保存基准和实际修改分开：切换消息渠道不会改变启停配置；新草稿只恢复相对基准的修改字段。缺少可信基准的旧消息连接草稿由用户主动恢复或丢弃，不自动覆盖已保存配置。密码不写入持久化恢复副本。
-
-`VariableStore` 独立保存变量，敏感值通过共享凭据保护接口加密。`lookup_app_variable` 按明确名称和授权读取变量。资料库和脱敏映射复用该接口，企业账号凭据目前使用 Windows 实现。
-
-数据安全宿主位于 `core/data_security.py`，插件位于 `bundled_plugins/data_security/`，提供任务策略、能力检查、请求投影和参数处理。启用后在附件展开与 SDK 发送之间处理用户及工具文本副本，会话令牌映射独立保存。
+---
 
 ## 构建与发布
 
 ### 开发与 Windows 构建
 
-准备现有 Python 依赖和固定运行时后，安装前端依赖并启动：
+准备 Python 虚拟环境与随包运行时后，安装前端及离线编辑器依赖即可启动开发桌面：
 
 ```powershell
 npm --prefix desktop ci
 npm --prefix web/editors ci
 node desktop/node_modules/electron/install.js
 .\.venv\Scripts\python.exe scripts/run_desktop.py
-# 已构建界面时可加 --no-build；--data-dir 指定隔离数据目录。
+# 前端无改动时可加 --no-build 快速启动；可用 --data-dir 指定隔离测试数据目录
 ```
 
-当前 Electron 45 的 npm 包与可执行运行时分开安装。`npm ci` 完成后仍需执行上述 `install.js`；安装器按包内摘要校验下载或缓存的压缩包。下载失败时保留错误并修复网络或提供同版本已校验缓存，不能把 npm 依赖安装成功当作桌面运行环境就绪。
+> **开发与打包关键约束**：
+> - Electron 的 npm 依赖包与二进制运行时分离，`npm ci` 后必须执行 `node desktop/node_modules/electron/install.js` 完成摘要校验安装。
+> - Electron 启动后端服务时通过 `COWORK_ELECTRON_EXE` 传入自身路径，`run_node_code` 仅对目标子进程局部设置 `ELECTRON_RUN_AS_NODE=1` 复用宿主 Node.js 运行时，不污染 Python、Bash 或桌面主进程环境。
+> - 随包 Python 环境（`python_env`）通过 `requirements-data-analysis.txt` 锁定完整科学计算、绘图、Notebook 与 Office/PDF 处理依赖。BrowserSkill 固定为 `0.5.0`，升级时须同步 `core/browser_skill_component.py`、`resources/browser_skill/bundle.json`、`scripts/fetch_runtimes.ps1`、`deepseek-cowork.spec` 与 `scripts/package_release.py` 五处的版本号及 SHA-256。
 
-Windows 构建沿用 `deepseek-cowork.spec` 的依赖和资源；只使用独立服务入口，显式排除 Qt 绑定、插件和旧界面，再由 Electron Packager 组装目录。版本读取 `core/app_version.py` 的 `APP_VERSION`。
-
-BrowserSkill 的 CLI 与扩展固定为 0.5.0。升级时须同步 `core/browser_skill_component.py`、`resources/browser_skill/bundle.json`、`scripts/fetch_runtimes.ps1`、`deepseek-cowork.spec` 与 `scripts/package_release.py` 的版本、归档名、下载地址及 SHA-256；构建和发行审计均拒绝不一致或损坏的资源。打包只收集清单与许可证及其中指定的两个 ZIP，本地缓存的旧版本不会进入发行包。`test/test_packaging_runtime.py` 核对上述五处的一致性，`test/test_package_release.py` 使用真实清单生成隔离夹具并验证发行审计。
-
-文档和数据分析依赖统一放在随包 `python_env`。`requirements-data-analysis.txt` 锁定数据分析库及完整传递依赖，由 `requirements.txt` 引入；spec 核验构建环境版本并收集包文件、元数据、原生库与资源。生成 ZIP 前，`scripts/package_release.py` 使用随包 Python 在隔离目录验证导入、科学计算、机器学习、并行 worker、图表与 Office/PDF 文件读写；失败阻止出包。应用不再提供组件管理页、下载源或安装超时配置，也不加载旧工具包目录。通用 Python 工具优先使用随包库，第三方技能保留独立依赖环境与内部默认安装参数。
-
-Electron 启动服务时通过 `COWORK_ELECTRON_EXE` 传递自身可执行文件，通用 JavaScript 工具可复用宿主 Node.js。版本探测和实际执行仅对目标子进程设置 `ELECTRON_RUN_AS_NODE=1`，Python、Bash 与桌面宿主不继承该模式。`run_node_code` 保留原进程取消和输出路径；npm/npx 的交付范围不变。独立运行 Python 服务且没有 Electron 宿主时，仍可显式配置独立 Node.js。
+在 Windows 构建机生成正式发行包的完整命令：
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 $env:COWORK_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
+# 若默认输出目录有程序正在运行，可先指定新输出目录：$env:COWORK_PACKAGE_OUT_DIR = (Join-Path (Get-Location) 'dist/desktop-release')
 npm --prefix desktop run package:win
 ```
 
-如果默认输出目录中的程序正在使用，先设置 `$env:COWORK_PACKAGE_OUT_DIR = (Join-Path (Get-Location) 'dist/desktop-release')` 再构建，避免覆盖运行中的安装目录。该目录同时接收完整程序、ZIP 和清单；不要直接覆盖员工正在使用的安装目录。
-
-输出为 `desktop/out/DeepSeek Cowork-win32-x64/deepseek-cowork.exe`，必须保留相邻文件和 `resources/service`；同时生成 `cowork-desktop-v版本号-windows-x64.zip` 和 `latest-desktop-windows-x64.json`。ZIP 内顶层目录为 `Cowork`，成员路径最多 185 个 UTF-16 代码单元，为资源管理器的目标目录留出余量。打包排除用户数据、Python 字节码缓存和 Qt 运行时。应用显示名为 DeepSeek Cowork，可执行文件为 `deepseek-cowork.exe`；更新器按应用结构识别新旧包，也兼容早期 Electron 包的 `Cowork.exe` 入口。Windows 旧运行日志的按需读取在文件 I/O 边界使用扩展路径，不依赖系统开启长路径策略，持久化配置仍保存普通绝对路径。新包必须带 `desktop-release.json`；更新清单使用 `app_layout: electron`，在线地址为 `updates/desktop-windows-x64/latest.json`，与旧版更新源隔离。设置页支持检查、准备本地包和重启更新，沿用校验、保存退出、替换、启动确认与回滚事务。打包不会执行签名或公开发布；Mac 与 Linux 的新宿主安装包仍待目标系统验证。
+打包完成后，建议在与源码仓库无关的工作目录对冻结后端服务执行端到端回归：
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s test -p test_desktop_service.py -v
 npm --prefix desktop test
 npm --prefix desktop run build
-# 在与源码无关的工作目录验证冻结服务：
 $env:COWORK_TEST_DESKTOP_SERVICE = (Resolve-Path "desktop/out/DeepSeek Cowork-win32-x64/resources/service/cowork-service.exe").Path
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s test -p test_desktop_service.py -v
 Remove-Item Env:COWORK_TEST_DESKTOP_SERVICE
 ```
 
-### 桌面发行包
+### 1. 确定性打包审计、更新清单与安装器事务
 
-构建命令见[项目首页](../README_CN.md#构建发行包)。`core/app_version.py` 的 `APP_VERSION` 是代码版本来源；升版同步 `desktop/package.json`、`desktop/package-lock.json` 的根包版本、现行手册声明与版本说明，不修改依赖包自身的版本。历史发布说明保持原貌。
+- **单一版本源与出包审计**：`core/app_version.py` 中的 `APP_VERSION` 是唯一代码版本源（升版同步更新 `desktop/package.json`、`desktop/package-lock.json` 根版本、现行文档版本声明及 `docs/releases/版本号.md`，不动历史发布记录）。`desktop/scripts/package.mjs` 组装前端、离线编辑器与冻结 Python 服务后，调用 `scripts/package_release.py` 在隔离目录实测随包 Python 科学计算/图表/文档导入，审计宿主结构、运行时摘要、许可证与空白默认配置（严禁夹带个人配置或退役的 Qt / 旧技能残留，ZIP 顶层目录固定为 `Cowork` 且内部路径控制在 185 个 UTF-16 代码单元以内），最终输出确定性 `cowork-desktop-v版本号-windows-x64.zip` 与 `latest-desktop-windows-x64.json`（其中 `app_layout: "electron"`，`notes` 自动写入对应版本说明全文）。
+- **公共源与企业源更新隔离**：
+  - 个人标准包优先查询公共更新地址（`updates/desktop-windows-x64/latest.json`），网络不可达时回退 GitHub Releases（共享最多 5 次网络重试，版本、字节数与 SHA-256 严格锁定，清单或哈希不符立即中止）。
+  - 企业客户端根据安装目录内的 `enterprise_connection.json` 锁定更新源（免登录检查下载，安装前二次向企业中心确认该推荐版本未被撤下，失败绝不串入公共源）。企业后台离线部署包由 `scripts/package_enterprise.py` 独立构建 Linux `amd64` 镜像并生成 `deployment.json` 与 `SHA256SUMS`。
+- **增量准备与独立安装器回滚状态机**：
+  1. `core/desktop_update_payload.py` 对比目标 ZIP 清单与本地现存文件，仅解压准备有差异的文件并持久化缓存（重启后自动核验复用；选择同版本本地 ZIP 则逐项校验修复损坏文件）。
+  2. 用户点击“重启并更新”后，宿主生成安装事务 ID，保存全部草稿与恢复副本，关闭新任务入口并启动独立安装器进程。宿主每 `250 ms` 轮询握手，**最多等待 30 秒确认安装器就绪**（超时或用户点击取消则安全终止准备进程并恢复当前版本正常使用）。
+  3. 握手成功后写入持久 `commit` 并退出主程序；安装器等待主进程完全释放文件（最长 45 秒，全程使用 Windows 扩展路径与独占访问检查），完成备份与原子替换后拉起新版本，通过单实例锁回传校验新窗口与后端服务版本一致后自动清理备份并退出。若新版未能就绪，自动回滚旧版并将诊断原因写入更新页，无法自动恢复时保留可见恢复窗口供用户重试或释放安装锁。
 
-开发态读取仓库资源，PyInstaller onedir 冻结态从 `sys._MEIPASS` 读取随包资源。运行时准备脚本获取固定版本的 Git、ripgrep 与组件；spec 扫描动态 Skill 的 `core.*` 导入并加入 hidden imports。编辑器分发资源位于 `web/editors/dist/`。
+### 2. 历史兼容与退役资源边界
 
-`desktop/scripts/package.mjs` 构建前端、编辑器和冻结 Python 服务，组装完整目录，再调用 `scripts/package_release.py` 审计 Electron 宿主、冻结服务、运行时、许可证、空白默认配置及两份离线编辑器的一致性；通过后生成确定性 ZIP 和带 `app_layout: electron` 的 `latest-desktop-windows-x64.json`。脚本要求 ZIP 文件名与 `APP_VERSION` 一致，且 `docs/releases/版本号.md` 已存在；该文件全文写入清单的 `notes`。审计报告仅在显式传入 `--report` 时生成。
+历史数据库记录、用户配置与已生成文件按原存储边界长期兼容可读，但不再激活已下线的旧执行链路：
 
-旧版语音转文字技能、组件与打包脚本已下线；技能发现拒绝旧版残留的同名技能，历史音频文件和转写结果不删除。当前多媒体技能不提供新的音频转写；旧任务与文件仍保留。Word/PPT 预览由所选本机渲染器生成 PDF，通过会话绑定的异步任务发布；缺少本机 Office/WPS 时可安装 LibreOffice。Windows x64 组件使用固定版本、大小与 SHA-256 校验，MSI 管理提取到应用数据目录，验证启动后原子发布，不设置系统关联。预览使用独立源文件副本与用户配置目录，缓存按源指纹及渲染程序版本隔离；取消、转换失败或源版本变化均显式报错，不转用文本预览。
-
-### 更新清单
-
-新版 Windows 更新清单与旧 Qt 包隔离，必须标记 `app_layout: electron`。Mac／统信的新版构建与更新交付尚未完成，不能复用旧平台安装包或进入 Windows 自动安装流程；尚无对应发行物时明确提示当前平台安装包未发布。
-
-普通版读取公共更新地址；地址为空时使用 GitHub。公共源网络、服务或资源缺失时可切换 GitHub，仍共用最多 5 次尝试；清单、身份或摘要错误直接停止。GitHub 的 `latest` 仅用于发现清单，ZIP 固定到 `/download/v版本号/文件名`，换源保持已选版本、大小和 SHA-256。
-
-企业发行身份来自当前安装目录，登录状态不改变渠道。企业中心只支持 Windows x64 Electron 发行物；推荐接口默认 Electron，显式 Qt 请求返回停止支持。数据库结构版本 4 撤下旧 Qt 记录并保留业务数据，旧记录不能重新发布。安装在线缓存前重新读取推荐记录，已撤回或更换的推荐包不能继续安装；企业源失败不切到公共源。企业 ZIP 与其专用清单通过同一发布状态和文件存在性检查，清单记录封装后的大小和摘要，供本地更新复用。
-
-`scripts/package_enterprise.py` 从允许分发的源码快照构建 Linux amd64 中心镜像，核对镜像内文件与源码摘要后导出离线部署包。`deployment.json` 绑定应用版本、源码摘要、镜像 ID 和文件摘要；启动脚本先核验再导入并选择固定镜像，缺失或损坏时明确失败，不使用旧镜像冒充当前构建。交付流程不携带 `.env.local` 或业务卷，实际部署与备份步骤见[企业部署指南](enterprise/deployment.md)。
-
-静态公共服务器的目录为：
-
-```text
-updates/desktop-windows-x64/latest.json
-updates/desktop-windows-x64/cowork-desktop-v5.4.3-windows-x64.zip
-```
-
-清单字段如下：
-
-| 字段 | 值或来源 |
-| --- | --- |
-| `schema_version` | `1` |
-| `app_layout` | `electron` |
-| `version` | `APP_VERSION`，不带 `v` |
-| `target_os` / `arch` | `windows` / `x64` |
-| `filename` | `cowork-desktop-v版本号-windows-x64.zip` |
-| `size` / `sha256` | ZIP 实际字节数和 SHA-256 |
-| `notes` | `docs/releases/版本号.md` 全文，本版为 `docs/releases/5.4.3.md` |
-
-发布顺序为：确定版本与说明 → 构建 EXE → 打包并审计 → GitHub Release 附加 ZIP 和清单 → 公共服务器上传同一 ZIP → 原子替换清单。GitHub 标签采用 `v版本号`。
-
-`DesktopUpdates` 持有同一个 `UpdateCoordinator`，设置页与侧栏经宿主状态订阅增量及快照；修订号防止迟到响应覆盖新状态。完整 Windows 包启动后延迟 15 秒恢复缓存或检查，每 24 小时再检查；开发运行只查询版本。取消、关闭提示和安装均为显式操作。
-
-准备清单持久化在渠道缓存目录，绑定安装目录、渠道、企业身份及来源配置。`core/desktop_update_payload.py` 按 ZIP 文件清单与当前文件生成变更计划，只准备需要替换的文件；旧包无清单时逐项读取 ZIP 建立同一计划。重启核验准备记录及文件摘要后复用暂存内容，安装前再次校验计划与来源，不能无条件信任缓存。安装事务与诊断日志保留在稳定根目录。同版本本地包逐项核对以修复缺失或损坏文件，低版本拒绝；企业身份须与当前发行一致，本地准备不查询网络，不能离线确认管理员撤回状态。
-
-用户触发安装后，宿主保存协调器保留草稿、编辑和设置恢复副本；宿主在请求前生成事务编号，服务端原子关闭新任务入口并立即接受准备请求，文件比对已在后台准备阶段完成，安装阶段通过 `begin_desktop_install` 领取已准备计划。宿主每 250 ms 查询同一事务；30 秒未收到查询会撤销，取消持续传递到计划校验和安装器准备，移除原重复准备流程的固定 10 分钟等待。取消与提交在同一短锁内决定，耗时工作不持有该锁；提交前可取消，取消完成须等准备线程及独立安装器退出，随后解除输入限制。迟到准备结果不能启动已取消的事务。启动扫描撤销未提交的中断准备，已提交安装不重新执行。
-
-独立安装器 ready 握手完成后，宿主再次保存草稿，服务保存退出成功后才写入 commit。提交结果丢失时核对持久 commit，不盲目撤销或重新提交。安装器等待提交最多 60 秒，收到提交后等待原主进程退出最多 45 秒，超时不得直接替换仍在使用的文件。替换、备份、复制、哈希、删除及回滚均使用 Windows 扩展路径；Restart Manager 不支持的超长文件用独占文件访问检查占用。
-
-Electron 单实例通过 `additionalData` 转交更新启动请求，窗口实际就绪后由服务核验安装目录、事务、提交状态和实际版本；宿主与服务版本必须一致。启动进程退出码为 0 不能代替回执。更新成功，或失败回滚后旧版确认打开，安装器自动退出；无法打开／无法恢复时保留可见窗口和“结束更新”。关闭与异常退出在 `finally` 中释放互斥锁和窗口资源，失败退出码不冒充成功。失败原因持久保留并在更新页展示，成功重试覆盖先前失败结果。
-
-### 历史兼容与退役资源
-
-历史消息、配置和用户资产按各自存储边界保留，兼容读取不重新启用退役执行路径。文档技能使用 `documents`，旧 `document-reader` ID 没有别名或自动迁移；常用任务保留原存储键及任务 ID，运行配置中的旧技能标识归一为 `task-automation`。
-
-专门的 PPT 助手已下线，Frontend Slides 不再随包提供。旧会话的 PPT 元数据和内部阶段消息仍按历史兼容规则读取；新任务丢弃旧 PPT 专属运行参数，并停用由旧模式带来的 HTML-first 工作流。界面提前说明后续使用普通对话，不改写已有消息或文件。系统稳定提示词、普通工具定义及顺序保持原样；Huashu Design、Guizang PPT 不再内置；用户自行安装的副本仍按普通技能规则管理。重新打包时必须重建冻结服务，发行审计会拒绝包含旧 Frontend Slides 资源的构建目录。
+- **模型原生生图停用**：`LLMFactory` 统一关闭聊天主模型的原生 `image_generation` 附加工具（不改写用户已保存的旧配置文件，视觉看图输入与历史图片消息回放正常保留）；图片与视频生成统一由可选的 `multimedia` 技能通过标准工具调用独立配置的服务完成。
+- **内置技能归一与退役组件**：旧 `document-reader` 由内置 `documents` 取代；旧 `favorites-manager` 在运行配置中自动归一为 `task-automation`，原常用任务与计划无缝保留。早期专属 PPT 助手模式、内置 Frontend Slides / Huashu Design / Guizang PPT 以及旧语音转文字技能均已下线（打包审计拒绝残留旧资源，打开历史 PPT 助手会话时提示后续按普通对话处理）。
 
 ### Mac 与统信原生构建
 
-桌面发行目标为 Windows。Mac 与统信保留共享业务和平台边界，Electron 安装包、签名、公证和更新仍需在目标系统实现与验收；Linux 容器检查不能替代统信实机验收。
+Apple Silicon macOS 与统信 UOS V25（`x86_64`）复用全部业务核心与前文[平台适配边界](#平台适配边界)，其 Electron 原生打包、签名公证与系统级安装流程须在对应真实硬件与目标操作系统上构建和验收（容器测试或 Windows 下跳过的 POSIX 用例不能替代目标机实测）。实机验收须逐项覆盖：首次启动、离线富文本/表格编辑器、中文输入法、明暗与自定义主题、系统密钥环加解密、并发文件保存锁、POSIX 终端启停清理、LibreOffice 页面预览、后台长任务以及覆盖升级后的数据完整保留。
 
-Mac／统信的新宿主发行流程尚待实现。构建应在目标 CPU 和系统进行，组合 Python 服务与对应 Electron 运行时，沿用运行时清单的来源和摘要校验；旧发行流程可通过 Git 历史查阅。
+### 3. 开发与测试验证
 
-每个目标桌面的验收应覆盖首次启动、网页编辑器、中文输入、默认／自定义主题、凭据锁定与解锁、文件并发保存、终端停止与退出、Office 可选转换、后台任务、更新保留数据。底层平台测试入口为 `test/test_cross_platform.py` 和 `test/test_platform_integration.py`；真实 POSIX 项在 Windows 跳过，不能把跳过结果作为目标平台已通过验收。
-
-## 开发与测试
-
-测试使用仓库 `.venv`，安装运行依赖后按需安装 pytest：
+在本地运行自动化测试前，先将临时目录与应用数据目录指向仓库 `.tmp/` 下的隔离空间（符合仓库卫生规范，且绝不触碰本机日常使用的真实聊天库与凭据）：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install pytest
-```
-
-开发检查先设置临时目录及独立配置，避免使用日常账号、会话和工作目录：
-
-```powershell
+# 首次测试按需安装 pytest：.\.venv\Scripts\python.exe -m pip install pytest
 $taskRoot = Join-Path (Get-Location) '.tmp/local-tests'
 New-Item -ItemType Directory -Force -Path "$taskRoot/temp", "$taskRoot/appdata", "$taskRoot/localappdata" | Out-Null
 $env:TEMP = "$taskRoot/temp"
@@ -610,23 +366,23 @@ $env:PYTHONDONTWRITEBYTECODE = '1'
 $env:PYTHONUTF8 = '1'
 $env:COWORK_EXTERNAL_BACKGROUND_SERVICES = '0'
 $env:COWORK_QA_ROOT = $taskRoot
-.\.venv\Scripts\python.exe -X utf8 -B -m pytest --collect-only -q -p no:cacheprovider test/test_desktop_service.py test/test_desktop_management.py test/test_desktop_workbench.py
 ```
 
-按改动选择相应测试组：
+按改动影响面运行对应测试集：
 
-| 范围 | 入口 |
+| 验证领域 | 测试入口 |
 | --- | --- |
-| 文档结构、链接、图片与版本 | `scripts/check_docs.py`、`test/test_documentation.py` |
-| 消息与运行 | `test/test_desktop_service.py`、`test/test_desktop_reconnect.py`、`test/test_runtime_tasks.py`、`test/test_runtime_ledger.py`、`test/test_subagent_reliable_runtime.py` |
-| 历史、项目与界面 | `test/test_desktop_upgrade.py`、`desktop/tests/drafts.test.mjs`、`desktop/tests/runtime.test.mjs`、`desktop/tests/host.test.mjs`、`desktop/tests/plugins.test.mjs`、`desktop/tests/plugin-page.test.mjs` |
-| 文件、网页与编辑器 | `test/test_desktop_workbench.py`、`test/test_desktop_management.py`、`desktop/tests/files.test.mjs`、`desktop/tests/editor-bridge.test.mjs`、`desktop/tests/browser.test.mjs` |
-| 图片、流程图与多媒体 | `desktop/tests/attachments.test.mjs`、`desktop/tests/mermaid.test.mjs`、`desktop/tests/media-preview.test.mjs`、`test/test_multimedia.py` |
-| 模型与能力 | `test/test_desktop_management.py`、`test/test_tool_registry.py`、`test/test_skill_system_v2.py` |
-| 打包与更新 | `test/test_package_release.py`、`test/test_package_default_config.py`、`test/test_packaging_runtime.py`、`test/test_desktop_upgrade.py`、`test/test_update_coordinator.py`、`test/test_updater.py`；冻结服务集成入口见上文 |
-| 企业中心 | `test/test_enterprise_platform.py`、`test/test_enterprise_deployment.py`、`test/test_enterprise_client.py` |
+| **文档版本、链接、配图与源码路径** | `scripts/check_docs.py`、`test/test_documentation.py` |
+| **会话运行、账本与子任务可靠性** | `test/test_desktop_service.py`、`test/test_desktop_reconnect.py`、`test/test_runtime_tasks.py`、`test/test_runtime_ledger.py`、`test/test_subagent_reliable_runtime.py` |
+| **草稿恢复、宿主状态与 UI 插件** | `test/test_desktop_upgrade.py`、`desktop/tests/drafts.test.mjs`、`desktop/tests/runtime.test.mjs`、`desktop/tests/host.test.mjs`、`desktop/tests/plugins.test.mjs`、`desktop/tests/plugin-page.test.mjs` |
+| **工作区文件、差异、阅读器与网页** | `test/test_desktop_workbench.py`、`test/test_document_render.py`、`test/test_document_review.py`、`desktop/tests/files.test.mjs`、`desktop/tests/turn-files.test.mjs`、`desktop/tests/pdf-reader.test.mjs`、`desktop/tests/editor-bridge.test.mjs`、`desktop/tests/browser.test.mjs` |
+| **图片、Mermaid 与多媒体任务** | `desktop/tests/attachments.test.mjs`、`desktop/tests/mermaid.test.mjs`、`desktop/tests/media-preview.test.mjs`、`test/test_multimedia.py` |
+| **模型协议、工具注册与 Skill 系统** | `test/test_desktop_management.py`、`test/test_tool_registry.py`、`test/test_skill_system_v2.py`、`test/test_skill_catalog.py` |
+| **打包审计与更新回滚事务** | `test/test_package_release.py`、`test/test_package_default_config.py`、`test/test_packaging_runtime.py`、`test/test_update_coordinator.py`、`test/test_updater.py` |
+| **企业管理平台、客户端与部署** | `test/test_enterprise_platform.py`、`test/test_enterprise_capability_packages.py`、`test/test_enterprise_deployment.py`、`test/test_enterprise_client.py` |
+| **跨平台底层适配** | `test/test_cross_platform.py`、`test/test_platform_integration.py` |
 
-文档检查覆盖当前手册、UI SDK、维护规范、本地链接及明确列出的源码路径。跨代码和文档的维护跳过仅用于纯文档任务的保护路径检查：
+完成文档或版本号更新后，执行以下命令校验全仓链接、标题锚点、图片引用与空白格式：
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 -B scripts/check_docs.py --skip-protected-diff
@@ -634,20 +390,10 @@ $env:COWORK_QA_ROOT = $taskRoot
 git diff --check
 ```
 
-Electron 前端测试在 `desktop/` 运行 `npm test`，以该目录为工作目录；端到端服务测试需要设置 `COWORK_PYTHON`。实际窗口另行检查布局、输入与保存恢复。Python 测试使用原生线程和事件接口，界面行为通过现行 Electron 测试验收。截图、性能与诊断工具输出到 `.tmp/<任务名>/`；正式配图经审阅后进入 `docs/images/`，测试结果在任务交付中报告，不保存历史验证报告。
-
-当前回归范围不再包含退役 Qt smoke 入口与 WebEngine 性能选项。默认配置审计使用 Electron 的 `resources/service/_internal/config.json`，继续拒绝私有配置、旧路径和大小写变体；验证禁止打包 Qt 的负向测试仍保留。
-
-内置浏览器后台截图与点击问题已在源码修复，`desktop/tests/browser.test.mjs` 和 `desktop/tests/browser.fixture.cjs` 恢复真实 Electron 交互覆盖，包括不同缩放、隐藏／最小化窗口、单次提交、页面版本和会话隔离。夹具使用本地页面，不代表任意外部网站或外部 BrowserSkill 已完成验收。Anthropic 真实 SDK 的请求快照／团队模型集成用例仍暂缓，SDK 初始化兼容问题仍待专项处理；其他测试通过不能替代该项验证。
-
-`PYTHONUTF8=1` 同时传给子进程；仅给父解释器加 `-X utf8` 不会自动改变子进程编码。前端开发需要带 npm 的 Node.js；若依赖已经安装，也可用随包 Node 直接执行 `node --test tests/*.test.mjs`，不要把精简运行时误认为完整 npm 开发环境。版本号与文档编辑完成后再运行一致性检查，避免测试进程读到混合的新旧版本。
-
-本地并发与持久化压力使用确定性模型输出和真实文件工具，包含子任务及慢界面消费者；它不代表真实模型或网络吞吐：
+评估运行核心与 SQLite 账本在多会话并发及慢速 UI 消费场景下的吞吐与延迟基线时，可执行确定性本地压测（测试数据自动隔离在 `.tmp/benchmark_runtime/`）：
 
 ```powershell
-.venv/Scripts/python.exe -X utf8 -B scripts/benchmark_runtime.py --sessions 1 --children --slow-ui-ms 5
-.venv/Scripts/python.exe -X utf8 -B scripts/benchmark_runtime.py --sessions 8 --children --slow-ui-ms 5
-.venv/Scripts/python.exe -X utf8 -B scripts/benchmark_runtime.py --sessions 32 --children --slow-ui-ms 5
+.\.venv\Scripts\python.exe -X utf8 -B scripts/benchmark_runtime.py --sessions 1 --children --slow-ui-ms 5
+.\.venv\Scripts\python.exe -X utf8 -B scripts/benchmark_runtime.py --sessions 8 --children --slow-ui-ms 5
+.\.venv\Scripts\python.exe -X utf8 -B scripts/benchmark_runtime.py --sessions 32 --children --slow-ui-ms 5
 ```
-
-输出包括接收回执、首段输出、停止、重启读取、队列峰值、日志大小及 SQLite 事务数。每次使用独立 `.tmp/benchmark_runtime/` 数据，`--source` 可选择基线源码覆盖目录。事务量需要结合完整过程是否进入 SQLite 解释，不能把未保存事实的少写入计为优化。崩溃、磁盘失败和历史修订由运行日志回归测试覆盖。

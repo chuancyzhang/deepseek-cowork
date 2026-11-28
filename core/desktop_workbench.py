@@ -423,7 +423,7 @@ class DesktopFiles:
                 payload["binary"] = base64.b64encode(payload["binary"]).decode()
             return {"id": session_id, "path": str(path), "name": path.name, "fingerprint": session.initial_fingerprint, "payload": payload, "conflict": conflict}
         if method in {"file.save", "file.save_copy", "file.preview"}:
-            from core.deliverable_editing import serialize_editor_payload, atomic_save_session
+            from core.deliverable_editing import serialize_editor_payload, atomic_save_session, save_copy
             owner, session = self.file_sessions.get(p["id"], (None, None))
             if owner != cid or session is None:
                 raise ValueError("编辑会话已失效，请保留内容并重新打开文件。")
@@ -445,23 +445,8 @@ class DesktopFiles:
                 log.info("html_preview_ready session=%s file_session=%s", cid, p["id"])
                 return {"path": session.path, "payload": {"kind": "preview", "preview_kind": "html", "preview_html": html}}
             if method == "file.save_copy":
-                import tempfile
                 destination = self.checked_file(cid, p["name"])
-                if destination.suffix.lower() != Path(session.path).suffix.lower():
-                    raise ValueError("副本必须保留原文件格式。")
-                temporary = None
-                try:
-                    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".cowork-copy-", delete=False) as handle:
-                        temporary = handle.name
-                        handle.write(data)
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    # Atomically publish the complete file, never replace an
-                    # existing destination or touch the changed source.
-                    os.link(temporary, destination)
-                finally:
-                    if temporary:
-                        os.unlink(temporary)
+                save_copy(session, data, str(destination))
                 log.info("file_copy_saved session=%s file_session=%s", cid, p["id"])
                 return self.dispatch("file.open", {"conversation_id": cid, "path": str(destination)})
             result = atomic_save_session(session, data, event_logger=lambda event, **details: log.info("file_save session=%s file_session=%s stage=%s", cid, p["id"], event))

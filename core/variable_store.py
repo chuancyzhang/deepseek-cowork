@@ -224,13 +224,12 @@ class VariableStore:
         return self._snapshot
 
     def _write(self, snapshot):
-        validated = self._validate_snapshot(snapshot)
         os.makedirs(self.data_dir, exist_ok=True)
         data_fd, temp_path = tempfile.mkstemp(prefix=".app_variables-", suffix=".tmp", dir=self.data_dir)
         backup_temp = ""
         try:
             with os.fdopen(data_fd, "w", encoding="utf-8", newline="\n") as stream:
-                json.dump(validated, stream, ensure_ascii=False, indent=2)
+                json.dump(snapshot, stream, ensure_ascii=False, indent=2)
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -253,7 +252,7 @@ class VariableStore:
                         os.remove(pending)
                     except OSError:
                         logger.warning("variable_store.temp_cleanup_failed path=%s", pending)
-        self._snapshot = validated
+        self._snapshot = snapshot
         self._signature = self._file_signature()
 
     def restore_previous(self):
@@ -316,9 +315,7 @@ class VariableStore:
             "id": entry["id"],
             "name": entry["name"],
             "kind": entry["kind"],
-            "allow_ai_read": (
-                True if entry["kind"] == VARIABLE_KIND_TEXT else bool(entry.get("allow_ai_read", False))
-            ),
+            "allow_ai_read": entry["allow_ai_read"],
             "description": str(entry.get("description") or ""),
             "created_at": int(entry.get("created_at") or 0),
             "updated_at": int(entry.get("updated_at") or 0),
@@ -375,7 +372,7 @@ class VariableStore:
                 return {"status": "not_found", "name": str(name or "").strip()}
             variable_id = entry["id"]
             kind = entry["kind"]
-            if kind == VARIABLE_KIND_SECRET and not bool(entry.get("allow_ai_read", False)):
+            if not entry["allow_ai_read"]:
                 logger.info(
                     "variable_store.ai_read.denied variable_id=%s kind=%s reason=restricted",
                     variable_id,
@@ -423,7 +420,8 @@ class VariableStore:
         description = str(description or "").strip()
         now = int(time.time())
         with self._lock:
-            snapshot = copy.deepcopy(self._load())
+            loaded = self._load()
+            snapshot = {**loaded, "entries": list(loaded["entries"])}
             current = None
             if variable_id:
                 current = next((item for item in snapshot["entries"] if item["id"] == variable_id), None)
@@ -431,6 +429,9 @@ class VariableStore:
                     raise ValueError("要编辑的变量不存在。")
                 if current["kind"] != kind:
                     raise ValueError("变量类型创建后不能修改。")
+                index = snapshot["entries"].index(current)
+                current = dict(current)
+                snapshot["entries"][index] = current
             duplicate = next(
                 (
                     item for item in snapshot["entries"]
@@ -484,7 +485,8 @@ class VariableStore:
 
     def delete(self, variable_id):
         with self._lock:
-            snapshot = copy.deepcopy(self._load())
+            loaded = self._load()
+            snapshot = {**loaded, "entries": list(loaded["entries"])}
             before = len(snapshot["entries"])
             snapshot["entries"] = [item for item in snapshot["entries"] if item["id"] != variable_id]
             if len(snapshot["entries"]) == before:

@@ -63,7 +63,7 @@ function Fixture(){const [cid,setCid]=useState('a'),[views,setViews]=useState(()
   return <StoreContext.Provider value={store}><div className={'fixture '+(dark?'dark':'')} style={{'--workspace-width':'46%',display:'flex',height:'100vh',background:'var(--bg)',color:'var(--text)'}}><main style={{flex:1,minWidth:0,display:'flex',flexDirection:'column',padding:24}}>
     <h2>客户访谈整理</h2><p>已核对来源并归纳结论，可以继续审阅成果。</p><div className="button-row"><button id="switch" onClick={()=>setCid(cid==='a'?'b':'a')}>切换会话</button><button id="theme" onClick={()=>{setDark(!dark);document.documentElement.dataset.theme=dark?'light':'dark';}}>切换主题</button><button id="reopen" onClick={()=>openReview('skill')}>打开审阅</button></div><div style={{flex:1}}/>
     <Composer conversation={conversation} conversations={[]} settings={{models:[]}} text={text} setText={setText} attachments={attachments} setAttachments={setAttachments} skills={meta.selected_skill_names||[]} active={false} sending={false} textarea={textarea} ensureConversation={async()=>cid} preferences={async patch=>setPreferences(previous=>({...previous,[cid]:{...meta,...patch}}))} send={no} stop={no} attach={no} permission={no} selectModel={no} route={no} error={error} browseLibrary={async()=>change({libraryOpen:true,selected:'library'})}/>
-  </main><Workspace key={cid} conversation={conversation} value={value} change={change} expanded={false} expand={()=>{}} close={()=>{}} obscured={false} dark={dark} editors={[]} fileTree={{files:[]}} fileContent={null} libraryContent={<Library key={cid} scope={'library:'+cid} projectsKey="fixture" projectsChanged={no} onError={error} onReference={async ref=>setAttachments(previous=>[...previous,ref])} confirm={async()=>1} onDirty={()=>{}}/>} selectFile={no} openFile={no} closeFile={no} refreshFiles={no} createDocument={no} preserve={no} openReview={openReview} registerEditorFlush={()=>{}} error={error} confirm={async()=>1}/></div></StoreContext.Provider>;
+  </main><Workspace key={cid} conversation={conversation} value={value} change={change} expanded={false} expand={()=>{}} close={()=>{}} obscured={false} dark={dark} editors={[]} fileTree={{files:[]}} fileContent={null} libraryContent={<Library key={cid} scope={'library:'+cid} projectsKey="fixture" projectsChanged={no} onError={error} onReference={async (source,items)=>{const ref=await window.cowork.call("library.reference",{source,...items[0]});setAttachments(previous=>[...previous,ref]);}} confirm={async()=>1} onDirty={()=>{}}/>} selectFile={no} openFile={no} closeFile={no} refreshFiles={no} createDocument={no} preserve={no} openReview={openReview} registerEditorFlush={()=>{}} error={error} confirm={async()=>1}/></div></StoreContext.Provider>;
 }
 function TaskPreview(){
   const [state,setState]=useState(null);window.taskPreview=setState;
@@ -78,7 +78,14 @@ function TaskPreview(){
 }
 createRoot(document.getElementById('root')).render(<StoreContext.Provider value={store}><TaskPreview/></StoreContext.Provider>);`);
     await writeFile(path.join(data,'index.html'),'<meta charset="utf-8"><div id="root"></div><script type="module" src="./entry.tsx"></script>');
-    await build({configFile:false,root:data,base:'./',logLevel:'silent',resolve:{alias:{react:path.join(desktop,'node_modules/react'),'react-dom':path.join(desktop,'node_modules/react-dom')}},esbuild:{jsx:'automatic'},build:{outDir:path.join(data,'dist'),rollupOptions:{input:path.join(data,'index.html')}}});
+    await build({configFile:false,root:data,base:'./',logLevel:'silent',plugins:[{
+      name:'review-fixture-host',enforce:'pre',
+      load(id){if(id.replaceAll('\\','/')===path.join(desktop,'src/host/Host.tsx').replaceAll('\\','/'))return `
+        import {useHost} from ${modulePath('host/context.tsx')};
+        export function useWorkbench(){return {host:useHost(),addProject:async()=>{throw Error('Project creation is outside this fixture');}};}
+        export function useOptionalWorkbench(){return null;}
+      `;},
+    }],resolve:{alias:{react:path.join(desktop,'node_modules/react'),'react-dom':path.join(desktop,'node_modules/react-dom')}},esbuild:{jsx:'automatic'},build:{outDir:path.join(data,'dist'),rollupOptions:{input:path.join(data,'index.html')}}});
     const env={...process.env,COWORK_REVIEW_TEST_DATA:data,TEMP:data,TMP:data};delete env.ELECTRON_RUN_AS_NODE;
     const child=spawn(require('electron'),[path.join(directory,'review-workspace.fixture.cjs')],{env,windowsHide:true,stdio:['ignore','pipe','pipe']});
     let output='';child.stdout.on('data',chunk=>output+=chunk);child.stderr.on('data',chunk=>output+=chunk);

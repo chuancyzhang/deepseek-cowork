@@ -221,8 +221,9 @@ class ConfigQuickstartTests(unittest.TestCase):
                 empty = config._normalize_provider_config("openai", {"base_url": base_url})
                 self.assertEqual(empty["models"][0]["bootstrap_plugin"], expected)
                 config.config.update(llm_provider="openai", base_url=base_url, model_name="deepseek-future")
-                legacy = config._normalize_model_provider_configs({})
-                self.assertEqual(legacy["openai"]["models"][0]["bootstrap_plugin"], expected)
+                config._loaded_config_keys.update({"llm_provider", "base_url", "model_name"})
+                legacy = config._normalize_model_channels(None, None)
+                self.assertEqual(legacy[0]["models"][0]["bootstrap_plugin"], expected)
 
     def test_existing_official_recommendation_can_change_without_duplicate_defaults(self):
         original = dict(model_catalog.MODEL_RECOMMENDATIONS[model_catalog.DEEPSEEK_RECOMMENDATION_KEY])

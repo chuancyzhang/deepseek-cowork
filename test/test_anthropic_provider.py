@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+import copy
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,17 @@ from core.llm.providers import AnthropicProvider
 
 
 class TestAnthropicProviderMessages(unittest.TestCase):
+    def test_malformed_historical_arguments_are_reported_without_rewriting_history(self):
+        for raw in ('{"broken":', '[1]', 'true'):
+            with self.subTest(raw=raw):
+                messages = [{"id": "damaged-message", "role": "assistant", "content": "",
+                    "tool_calls": [{"id": "bad-call", "type": "function",
+                                    "function": {"name": "write_file", "arguments": raw}}]}]
+                original = copy.deepcopy(messages)
+                with self.assertRaisesRegex(ValueError, "bad-call"):
+                    self._build_provider()._prepare_messages(messages)
+                self.assertEqual(messages, original)
+
     def test_checkpoint_requires_real_stop_and_preserves_limit_reason(self):
         provider = self._build_provider()
         provider.model_name, provider.base_url = "model", "https://example.test"

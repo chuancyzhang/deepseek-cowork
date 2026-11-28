@@ -305,14 +305,6 @@ def _restore_projected_thinking(slots, timeline_events):
         )
 
 
-def _safe_jsonable(value):
-    try:
-        json.dumps(value, ensure_ascii=False, sort_keys=True)
-        return value
-    except Exception:
-        return str(value)
-
-
 def _join_segments(segments):
     cleaned = []
     for segment in segments or []:
@@ -327,7 +319,7 @@ def _normalize_tool_args(arguments):
     if isinstance(arguments, str):
         try:
             return json.loads(arguments)
-        except Exception:
+        except json.JSONDecodeError:
             return arguments
     return arguments
 
@@ -435,7 +427,7 @@ def _finalize_assistant_group(group):
 
 
 def build_conversation_render_items(messages):
-    messages = project_visible_messages(messages)
+    messages = [message for message in project_visible_messages(messages) if isinstance(message, dict)]
     items = []
     assistant_group = None
 
@@ -447,10 +439,6 @@ def build_conversation_render_items(messages):
         assistant_group = None
 
     for raw_message in messages or []:
-        if not isinstance(raw_message, dict):
-            continue
-        if _is_hidden_context_message(raw_message):
-            continue
         role = raw_message.get("role") or ""
         internal_ppt_stage = is_ppt_agent_internal_stage_message(raw_message)
         if role == "user":
@@ -471,8 +459,6 @@ def build_conversation_render_items(messages):
             if reasoning:
                 assistant_group["reasoning_segments"].append(reasoning)
             content = "" if internal_ppt_stage else raw_message.get("content") or ""
-            if not internal_ppt_stage:
-                content = (raw_message.get("meta") or {}).get("security_display_content", content)
             if content:
                 assistant_group["content_segments"].append(content)
             content_parts = raw_message.get("content_parts")
@@ -482,15 +468,16 @@ def build_conversation_render_items(messages):
                 if not isinstance(tool_call, dict):
                     continue
                 function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                arguments = _normalize_tool_args(function.get("arguments"))
                 tool_entry = _ensure_tool_entry(
                     assistant_group,
                     tool_call.get("id"),
                     fallback_name=function.get("name") or "unknown_tool",
-                    fallback_args=_normalize_tool_args(function.get("arguments")),
+                    fallback_args=arguments,
                 )
                 tool_entry["name"] = function.get("name") or tool_entry["name"]
                 if function.get("arguments") is not None:
-                    tool_entry["args"] = _normalize_tool_args(function.get("arguments"))
+                    tool_entry["args"] = arguments
             continue
         if role == "tool":
             if assistant_group is None:
@@ -500,7 +487,7 @@ def build_conversation_render_items(messages):
             tool_entry = _ensure_tool_entry(assistant_group, tool_call_id)
             tool_entry["result"] = raw_message.get("content") or ""
             if raw_message.get("result_obj") is not None:
-                tool_entry["result_obj"] = _safe_jsonable(raw_message.get("result_obj"))
+                tool_entry["result_obj"] = raw_message["result_obj"]
             meta = raw_message.get("meta")
             if isinstance(meta, dict) and meta:
                 tool_entry["meta"] = meta

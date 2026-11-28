@@ -329,6 +329,7 @@ class TeamSpaces:
             self.employee(db, actor)
             # Serialize this actor's operation keys even across different spaces.
             db.scalar(select(Member).where(Member.id == actor).with_for_update())
+            invitation = None
             if action == "space.create":
                 db.scalar(select(Platform).where(Platform.id == 1).with_for_update())
                 space, membership = None, None
@@ -345,7 +346,7 @@ class TeamSpaces:
                 if old.request_hash != request_hash:
                     raise PlatformError("operation_conflict", "同一操作标识不能用于不同内容，请先确认原提交结果。", 409)
                 return old.result
-            result = self.dispatch(db, actor, space, membership, action, payload)
+            result = self.dispatch(db, actor, space, membership, action, payload, invitation=invitation)
             db.flush()
             db.add(SpaceOperation(id=key, member_id=actor, space_id=space_id or result["id"],
                 request_hash=request_hash, result=result))
@@ -353,7 +354,7 @@ class TeamSpaces:
                  space_id or result.get("id"), key, action)
         return result
 
-    def dispatch(self, db, actor, space, membership, action, p):
+    def dispatch(self, db, actor, space, membership, action, p, *, invitation):
         if action == "space.create":
             fields(p, {"name", "description"})
             space = TeamSpace(id=uid(), name=text(p.get("name"), 120, required=True),
@@ -366,7 +367,6 @@ class TeamSpaces:
             return {"id": space.id, "revision": 1}
         if action == "invite.respond":
             fields(p, {"id", "revision", "response"})
-            invitation = self.object(db, "invite", p.get("id"), space.id)
             version(invitation, p)
             if invitation.state != "pending" or invitation.expires_at <= time.time():
                 raise PlatformError("invite_unavailable", "邀请已处理、撤销或过期，请联系空间管理员。", 409)

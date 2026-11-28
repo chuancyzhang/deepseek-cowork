@@ -1,6 +1,6 @@
 /* Isolated editor transport. No filesystem, Node, or application RPC access. */
 window.connectDesktopBridge = function (name, connected) {
-  const allowed = new Set(['beginLoad', 'appendLoadChunk', 'finishLoad', 'requestSave', 'preparePdfExport', 'command', 'dispose', 'setTheme', 'markClean', 'setReadOnly', 'getViewState', 'write', 'selectAll', 'paste', 'setInput', 'fit', 'focus']);
+  const allowed = new Set(['load', 'requestSave', 'preparePdfExport', 'command', 'dispose', 'setTheme', 'markClean', 'setReadOnly', 'getViewState', 'write', 'selectAll', 'paste', 'setInput', 'fit', 'focus']);
   window.addEventListener('message', async event => {
     if (event.source !== parent || event.data?.channel !== 'cowork-editor-host-v1') return;
     const { method, args = [], id } = event.data;

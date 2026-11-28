@@ -7,11 +7,7 @@ from core.llm.deepseek import (
     DEFAULT_DEEPSEEK_THINKING_ENABLED,
     build_deepseek_request_options,
 )
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
+from openai import OpenAI
 
 class SkillGenerator:
     def __init__(self, config_manager: ConfigManager):
@@ -69,7 +65,7 @@ class SkillGenerator:
         Refactor the given code into a reusable skill function using LLM.
         Returns a dictionary with keys: tool_name, description, description_cn, code, skill_name
         """
-        if not self.api_key or not OPENAI_AVAILABLE:
+        if not self.api_key:
             return {"error": "LLM not available or API key missing"}
 
         system_prompt = """You are a Python Expert and Skill Creator.
@@ -107,7 +103,7 @@ Return ONLY a JSON object with the following structure (no markdown, no extra te
         """
         Generate a wrapper skill for a GitHub repository based on its analysis context.
         """
-        if not self.api_key or not OPENAI_AVAILABLE:
+        if not self.api_key:
             return {"error": "LLM not available or API key missing"}
 
         system_prompt = """You are an Expert Python Developer and AI Skill Creator.

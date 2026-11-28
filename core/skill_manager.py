@@ -31,6 +31,7 @@ from .mcp_client import (
     mcp_package_available,
     mcp_transport_label,
     normalize_mcp_transport,
+    resolve_mcp_timeout_seconds,
     prepare_mcp_server_config,
     summarize_mcp_server,
 )
@@ -77,7 +78,7 @@ def _json_copy(value, fallback):
         return fallback
     try:
         return json.loads(json.dumps(value, ensure_ascii=False))
-    except Exception:
+    except (TypeError, ValueError):
         return fallback
 
 
@@ -197,10 +198,6 @@ class SkillManager:
         )
 
     def _register_skill_root(self, path, source_kind, *, require_exists=False):
-        if not hasattr(self, "skills_dirs"):
-            self.skills_dirs = []
-        if not hasattr(self, "skill_root_kinds"):
-            self.skill_root_kinds = {}
         normalized_path = os.path.abspath(str(path or "")) if path else ""
         if not normalized_path or (require_exists and not os.path.isdir(normalized_path)):
             return
@@ -236,6 +233,8 @@ class SkillManager:
         self.catalog_revision = 0
         self.dependency_coordinator = dependency_coordinator
         self.change_publisher = None
+        self.enterprise_capability_runtime = None
+        self.browser_run_context = None
         self._runtime_lock = threading.RLock()
         self.skills_dirs = []
         self.skill_root_kinds = {}
@@ -391,6 +390,8 @@ class SkillManager:
                 if skill_name in self.skill_records:
                     refreshed.skill_records[skill_name] = copy.deepcopy(self.skill_records[skill_name])
         with self._runtime_lock:
+            refreshed.enterprise_capability_runtime = self.enterprise_capability_runtime
+            refreshed.browser_run_context = self.browser_run_context
             self.__dict__.update(refreshed.__dict__)
             self.catalog_revision = snapshot.revision
         return True
@@ -407,7 +408,7 @@ class SkillManager:
         if raw.startswith("[") and raw.endswith("]"):
             try:
                 return json.loads(raw)
-            except Exception:
+            except json.JSONDecodeError:
                 inner = raw[1:-1].strip()
                 if not inner:
                     return []
@@ -415,14 +416,14 @@ class SkillManager:
         if raw.startswith("{") and raw.endswith("}"):
             try:
                 return json.loads(raw)
-            except Exception:
+            except json.JSONDecodeError:
                 return raw
         if raw.lower() in {"true", "false"}:
             return raw.lower() == "true"
         if raw.isdigit():
             try:
                 return int(raw)
-            except Exception:
+            except ValueError:
                 pass
         return raw.strip("\"'")
 
@@ -452,7 +453,8 @@ class SkillManager:
                 key, val = line.split(":", 1)
                 meta[key.strip()] = self._parse_frontmatter_value(val)
             return meta, body
-        except Exception:
+        except (OSError, UnicodeError) as exc:
+            print(f"[SkillManager] Failed to read SKILL.md at {md_path}: {exc}")
             return {}, ""
 
     def _load_skill_json(self, skill_path):
@@ -463,7 +465,7 @@ class SkillManager:
             with open(skill_json_path, "r", encoding="utf-8-sig") as f:
                 payload = json.load(f)
             return payload if isinstance(payload, dict) else {}
-        except Exception as e:
+        except (OSError, ValueError) as e:
             print(f"[SkillManager] Failed to parse skill.json at {skill_json_path}: {e}")
             return {}
 
@@ -501,25 +503,20 @@ class SkillManager:
             return True
         identity = self._skill_identity(skill_path)
         default_enabled = identity.get("default_enabled", True)
-        if self.config_manager and hasattr(self.config_manager, "is_skill_enabled"):
-            try:
-                return self.config_manager.is_skill_enabled(skill_name, default_enabled=default_enabled)
-            except TypeError:
-                if not default_enabled:
-                    return False
-                return self.config_manager.is_skill_enabled(skill_name)
+        if self.config_manager:
+            return self.config_manager.is_skill_enabled(skill_name, default_enabled=default_enabled)
         return bool(default_enabled)
 
     def _skill_source_kind_for_root(self, skills_dir):
         root = os.path.abspath(str(skills_dir or "")) if skills_dir else ""
-        return getattr(self, "skill_root_kinds", {}).get(root, TOOL_SOURCE_USER_EXTENSION)
+        return self.skill_root_kinds.get(root, TOOL_SOURCE_USER_EXTENSION)
 
     def _skill_source_kind_for_path(self, skill_path):
         parent = os.path.dirname(os.path.abspath(str(skill_path or ""))) if skill_path else ""
         return self._skill_source_kind_for_root(parent)
 
     def _skill_roots_in_load_order(self):
-        indexed = list(enumerate(getattr(self, "skills_dirs", []) or []))
+        indexed = list(enumerate(self.skills_dirs))
         indexed.sort(
             key=lambda item: (
                 0 if self._skill_source_kind_for_root(item[1]) == TOOL_SOURCE_CORE_BUILTIN else 1,
@@ -539,7 +536,7 @@ class SkillManager:
                 parsed = json.loads(text)
                 if isinstance(parsed, list):
                     return [item.strip() for item in parsed if isinstance(item, str) and item.strip()]
-            except Exception:
+            except json.JSONDecodeError:
                 pass
             return [item.strip().strip("\"'") for item in re.split(r"[\r\n,]+", text) if item.strip().strip("\"'")]
         return []
@@ -566,7 +563,7 @@ class SkillManager:
                 parsed = json.loads(text)
                 if isinstance(parsed, list):
                     return [item for item in parsed if isinstance(item, dict)]
-            except Exception:
+            except json.JSONDecodeError:
                 return []
         return []
 
@@ -683,7 +680,8 @@ class SkillManager:
                 "enabled": self._coerce_bool(item.get("enabled"), default=False),
                 "transport": transport,
                 "type": transport,
-                "timeout_seconds": item.get("timeout_seconds") or item.get("startup_timeout_ms") or DEFAULT_MCP_TIMEOUT_SECONDS,
+                "timeout_seconds": (item["timeout_seconds"] if item.get("timeout_seconds") not in (None, "")
+                                    else resolve_mcp_timeout_seconds(item)),
                 "command": str(item.get("command") or "").strip(),
                 "args": self._coerce_string_list(item.get("args")),
                 "cwd": str(item.get("cwd") or "").strip(),
@@ -1571,13 +1569,13 @@ class SkillManager:
     def get_skill_config_fields(self, skill_name):
         record = self._record_for_skill_name(skill_name) or {}
         spec = record.get("spec") or {}
-        fields = json.loads(json.dumps(spec.get("config_fields") or [], ensure_ascii=False))
+        fields = copy.deepcopy(spec.get("config_fields") or [])
         return fields
 
     def get_skill_mcp_server_presets(self, skill_name):
         record = self._record_for_skill_name(skill_name) or {}
         spec = record.get("spec") or {}
-        return json.loads(json.dumps(spec.get("mcp_server_presets") or [], ensure_ascii=False))
+        return copy.deepcopy(spec.get("mcp_server_presets") or [])
 
     def _skill_config_values(self, skill_name):
         if not self.config_manager or not hasattr(self.config_manager, "get_skill_config"):
@@ -1586,7 +1584,8 @@ class SkillManager:
 
     def _resolved_skill_config_values(self, skill_name):
         values = dict(self._skill_config_values(skill_name))
-        for field in self.get_skill_config_fields(skill_name):
+        record = self._record_for_skill_name(skill_name) or {}
+        for field in (record.get("spec") or {}).get("config_fields") or []:
             name = str(field.get("name") or "").strip()
             if name and not str(values.get(name, "") or "").strip() and str(field.get("default") or ""):
                 values[name] = str(field.get("default") or "")
@@ -1630,8 +1629,8 @@ class SkillManager:
     def get_skill_config_status(self, skill_name, values=None):
         from .connection_retirement import skill_issue
         issue = skill_issue(skill_name, (self.skill_records.get(skill_name) or {}).get("spec") or {},
-                            getattr(self, "config_manager", None), draft=values is not None)
-        fields = self.get_skill_config_fields(skill_name)
+                            self.config_manager, draft=values is not None)
+        fields = ((self._record_for_skill_name(skill_name) or {}).get("spec") or {}).get("config_fields") or []
         if isinstance(values, dict):
             resolved_values = dict(values)
             for field in fields:
@@ -1670,10 +1669,10 @@ class SkillManager:
 
     def build_skill_config_env(self, skill_name, *, draft=False):
         from .connection_retirement import skill_issue
-        issue = skill_issue(skill_name, (self.skill_records.get(skill_name) or {}).get("spec") or {}, getattr(self, "config_manager", None), draft=draft)
+        issue = skill_issue(skill_name, (self.skill_records.get(skill_name) or {}).get("spec") or {}, self.config_manager, draft=draft)
         if issue:
             raise ValueError(issue)
-        fields = self.get_skill_config_fields(skill_name)
+        fields = ((self._record_for_skill_name(skill_name) or {}).get("spec") or {}).get("config_fields") or []
         values = self._resolved_skill_config_values(skill_name)
         env = {}
         missing = []
@@ -1724,7 +1723,7 @@ class SkillManager:
             rendered = self._render_mcp_preset_value(preset, env_values)
             try:
                 timeout_seconds = int(rendered.get("timeout_seconds") or DEFAULT_MCP_TIMEOUT_SECONDS)
-            except Exception:
+            except (TypeError, ValueError, OverflowError):
                 timeout_seconds = DEFAULT_MCP_TIMEOUT_SECONDS
             timeout_seconds = max(5, min(300, timeout_seconds))
             transport = normalize_mcp_transport(rendered.get("transport", rendered.get("type")))
@@ -1744,9 +1743,9 @@ class SkillManager:
                         "error": f"MCP preset '{rendered.get('id')}' must declare exactly one module or entrypoint.",
                         "servers": [],
                     }
-                dependency_status = self._prepare_skill_dependencies(skill_name, record.get("path") or "")
-                if self.dependency_coordinator is not None:
-                    dependency_status = self.ensure_skill_dependencies_ready(skill_name)
+                dependency_status = (self.ensure_skill_dependencies_ready(skill_name)
+                                     if self.dependency_coordinator is not None else
+                                     self._prepare_skill_dependencies(skill_name, record.get("path") or ""))
                 if not dependency_status.get("ok"):
                     return {"ok": False, "error": dependency_status.get("message") or "Skill dependencies are not ready.", "servers": []}
                 command = get_runtime_executable("python")
@@ -1953,7 +1952,7 @@ class SkillManager:
         self.skill_source_kinds[skill_name] = TOOL_SOURCE_MCP
         tool_refs = []
         used_names = set(self.tools)
-        enterprise_runtime = getattr(self, "enterprise_capability_runtime", None)
+        enterprise_runtime = self.enterprise_capability_runtime
         prepare = enterprise_runtime.mcp_request(skill_name) if enterprise_runtime else None
         server_id = server_config.get("id")
         if prepare:
@@ -2095,7 +2094,7 @@ class SkillManager:
         if not mcp_package_available():
             record["dependency_status"] = {"ok": False, "message": "Python package 'mcp' is not installed."}
             return False
-        enterprise_runtime = getattr(self, "enterprise_capability_runtime", None)
+        enterprise_runtime = self.enterprise_capability_runtime
         prepare = enterprise_runtime.mcp_request(skill_name) if enterprise_runtime else None
         result = list_mcp_server_tools(
             server_config,
@@ -2370,7 +2369,7 @@ class SkillManager:
         normalized_name = str(skill_name or "").strip()
         if not normalized_name or normalized_name in RETIRED_SKILLS:
             return None
-        loaded_path = getattr(self, "loaded_skill_sources", {}).get(normalized_name)
+        loaded_path = self.loaded_skill_sources.get(normalized_name)
         if loaded_path and os.path.isdir(loaded_path):
             return loaded_path
         for skills_dir in self._skill_roots_in_load_order():
@@ -2641,7 +2640,7 @@ class SkillManager:
         skill_name = self._read_skill_name_from_path(source_path)
         if skill_name in RETIRED_SKILLS:
             raise ValueError(RETIRED_SKILLS[skill_name])
-        from core.skill_from_conversation import is_valid_skill_name
+        from core.skill_package import is_valid_skill_name
         if not is_valid_skill_name(skill_name):
             raise ValueError("Invalid skill name")
         target_dir = self._default_writable_skill_root()
@@ -3191,14 +3190,6 @@ class SkillManager:
         return False
 
     def load_skills(self, load_mcp_tools=None):
-        if not hasattr(self, "tool_registry"):
-            self.tool_registry = ToolRegistry()
-        if not hasattr(self, "workspace_dir"):
-            self.workspace_dir = None
-        if not hasattr(self, "config_manager"):
-            self.config_manager = None
-        if not hasattr(self, "load_mcp_tools"):
-            self.load_mcp_tools = True
         self.tools = {}
         self.tool_definitions = []
         self.tool_registry.clear()
@@ -3696,8 +3687,8 @@ class SkillManager:
 
     def _browser_backend(self, run_context=None):
         from .browser_backend import run_backend
-        pinned = getattr(self, "browser_run_context", None)
-        return run_backend(pinned or run_context, getattr(self, "config_manager", None))
+        pinned = self.browser_run_context
+        return run_backend(pinned or run_context, self.config_manager)
 
     @staticmethod
     def _shared_workbench_prompt():
@@ -3723,7 +3714,7 @@ class SkillManager:
         target_skill = ((args or {}).get("skill_name") if resolved_name == "run_skill_script"
                         else self.tool_to_skill_map.get(resolved_name))
         if target_skill:
-            issue = skill_issue(target_skill, (self.skill_records.get(target_skill) or {}).get("spec") or {}, getattr(self, "config_manager", None))
+            issue = skill_issue(target_skill, (self.skill_records.get(target_skill) or {}).get("spec") or {}, self.config_manager)
             if issue:
                 return {"ok": False, "status": "configuration_required", "executed": False, "error": issue}
         effective_context = dict(context or {})
@@ -3804,7 +3795,7 @@ class SkillManager:
         sig = inspect.signature(func)
         args = dict(args or {})
         if resolved_name == "text_file_read" and str(args.get("path") or "").startswith(REFERENCE_SCHEME):
-            runtime = getattr(self, "enterprise_capability_runtime", None)
+            runtime = self.enterprise_capability_runtime
             if runtime is None:
                 return {"ok": False, "error": "当前任务未加载此企业 Skill。"}
             try:
@@ -3817,7 +3808,7 @@ class SkillManager:
             effective_context.setdefault("skill_change_publisher", self.change_publisher)
             args["_context"] = effective_context
         try:
-            runtime = getattr(self, "enterprise_capability_runtime", None)
+            runtime = self.enterprise_capability_runtime
             if resolved_name == "run_skill_script" and runtime and args.get("skill_name") in runtime.skills:
                 runtime.check()
             return func(**args)

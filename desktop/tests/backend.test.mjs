@@ -112,16 +112,23 @@ test('desktop hosts reconnect to the same independent service', { skip: !process
 test('retry after a failed startup launches again without retaining the old exit error', {skip:!process.env.COWORK_PYTHON},async()=>{
   const root=fileURLToPath(new URL('../../',import.meta.url));
   const qa=path.join(root,'.tmp/desktop/host-tests');await fs.mkdir(qa,{recursive:true});
-  const dataDir=await fs.mkdtemp(path.join(qa,'retry-'));let backend,started=false;
+  const dataDir=await fs.mkdtemp(path.join(qa,'retry-'));let backend;
   try {
     await fs.writeFile(path.join(dataDir,'config.json'),'{invalid');
     backend=new Backend({root,dataDir,resources:process.env.COWORK_TEST_DESKTOP_RESOURCES,publish:()=>{}});
     await assert.rejects(backend.ready,/后台启动(?:失败|已停止)/);
     await fs.writeFile(path.join(dataDir,'config.json'),'{}');
-    backend.ready=backend.start();await backend.ready;started=true;
+    const previous=backend.child,launch=backend.launch.bind(backend);
+    backend.launch=()=>{
+      launch();
+      // The old process can exit after its transport has already closed and
+      // the user has retried. Deliver that event before the new handshake.
+      previous.emit('exit',1);
+    };
+    backend.ready=backend.start();await backend.ready;
     assert.ok((await backend.call('app.bootstrap')).settings);
   } finally {
-    if(started)await backend.stop();else backend?.detach();
+    if(backend)await backend.stop();
     for(let i=0;i<100;i++){try{await fs.access(path.join(dataDir,'desktop-service.json'));}catch{break;}await new Promise(resolve=>setTimeout(resolve,100));}
     await fs.rm(dataDir,{recursive:true,force:true,maxRetries:3,retryDelay:100});
   }

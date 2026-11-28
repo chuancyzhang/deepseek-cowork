@@ -13,7 +13,8 @@ export default function OfficeEditor({ file, text, onChange, error, register }: 
     frame.current.contentWindow?.postMessage({channel:'cowork-editor-host-v1',method:'setTheme',args:[theme]}, '*');
   });
   useEffect(() => {
-    let loaded = false, dirty = false, chunks: string[] = [], expected = 0, kind = '', timer: ReturnType<typeof setTimeout>;
+    setReady(false);
+    let loaded = false, dirty = false, timer: ReturnType<typeof setTimeout>;
     let pending: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }[] = [];
     let exporting = false, generation = 0, exportedGeneration = 0;
     const send = (method: string, ...args: any[]) => frame.current?.contentWindow?.postMessage({ channel: 'cowork-editor-host-v1', method, args }, '*');
@@ -37,10 +38,7 @@ export default function OfficeEditor({ file, text, onChange, error, register }: 
           const base = document.querySelector('base[data-cowork-edit-base]');
           if (base) base.setAttribute('href', new URL('.', file.payload.url).href);
           const content = '<!doctype html>\n' + document.documentElement.outerHTML;
-          const size = 192 * 1024, count = Math.max(1, Math.ceil(content.length / size));
-          send('beginLoad', file.id, count);
-          for (let i = 0; i < count; i++) send('appendLoadChunk', i, content.slice(i*size, (i+1)*size));
-          send('finishLoad'); return;
+          send('load', file.id, content); return;
         }
         let payload = file.payload;
         if (latest.current.text) {
@@ -48,25 +46,17 @@ export default function OfficeEditor({ file, text, onChange, error, register }: 
           payload = saved.kind === 'docx_review' ? { ...file.payload, snapshot: { ...file.payload.snapshot, coworkDraft: JSON.parse(saved.value) } }
             : saved.kind === 'docx' ? { kind: 'docx', binary: saved.value } : { kind: saved.kind, snapshot: JSON.parse(saved.value) };
         }
-        const content = payload.kind === 'docx' ? payload.binary : JSON.stringify(payload.snapshot);
-        const size = 192 * 1024, count = Math.max(1, Math.ceil(content.length / size));
-        send('beginLoad', file.id, count);
-        for (let i = 0; i < count; i++) send('appendLoadChunk', i, content.slice(i*size, (i+1)*size));
-        send('finishLoad');
+        send('load', file.id, payload.kind === 'docx' ? payload.binary : payload.snapshot);
         } catch (failure) { latest.current.error('文档草稿无法载入，已保留原始内容：' + (failure as Error).message); }
-      } else if (method === 'editorLoaded') { loaded = true; setReady(true); }
-      else if (method === 'setDirty' && args[0]) {
+      } else if (method === 'editorLoaded' && args[0] === file.id) { loaded = true; setReady(true); }
+      else if (method === 'setDirty' && args[0] === file.id && args[1]) {
         dirty = true; generation++; clearTimeout(timer);
         timer = setTimeout(() => { void flush().catch(failure => latest.current.error(failure.message)); }, 1200);
-      } else if (method === 'beginPayload' && args[0] === file.id) {
-        kind = args[1]; expected = args[2];
-        if (!Number.isInteger(expected) || expected < 1 || expected > 1000) { latest.current.error('编辑器返回的文档过大。'); return; }
-        chunks = new Array(expected);
-      } else if (method === 'appendPayload' && args[0] === file.id && Number.isInteger(args[1]) && args[1] >= 0 && args[1] < expected && typeof args[2] === 'string') chunks[args[1]] = args[2];
-      else if (method === 'finishPayload' && args[0] === file.id) {
-        if (!expected || Array.from(chunks).some(chunk => typeof chunk !== 'string')) { latest.current.error('文档传输不完整，请重新保存。'); return; }
+      } else if (method === 'payload' && args[0] === file.id) {
+        const [, kind, content] = args;
         if (kind !== file.payload.kind) { latest.current.error('编辑器返回的文件类型不匹配。'); return; }
-        const value = kind === 'html' ? chunks.join('') : JSON.stringify({ kind, value: chunks.join('') }); chunks = []; expected = 0; exporting = false;
+        const value = kind === 'html' ? content : JSON.stringify({ kind, value: kind === 'docx' ? content : JSON.stringify(content) });
+        exporting = false;
         dirty = generation !== exportedGeneration;
         latest.current.text = value; latest.current.onChange(value);
         if (dirty) { exporting = true; exportedGeneration = generation; send('requestSave'); }
@@ -81,5 +71,5 @@ export default function OfficeEditor({ file, text, onChange, error, register }: 
     return () => { clearTimeout(timer); register(file.path); window.removeEventListener('message', listener); for (const entry of pending) { clearTimeout(entry.timer); entry.reject(new Error('编辑器已关闭，未保存草稿仍保留。')); } };
   }, [file.id]);
   const page = file.payload.kind === 'docx_review' ? 'docx-review' : file.payload.kind;
-  return <div className="plugin-editor">{!ready && <div className="editor-loading">正在打开文档…</div>}<iframe ref={frame} title={file.name} sandbox="allow-scripts allow-same-origin" src={`cowork-editor://builtin/${page}.html`}/></div>;
+  return <div className="plugin-editor">{!ready && <div className="editor-loading">正在打开文档…</div>}<iframe key={file.id} ref={frame} title={file.name} sandbox="allow-scripts allow-same-origin" src={`cowork-editor://builtin/${page}.html`}/></div>;
 }

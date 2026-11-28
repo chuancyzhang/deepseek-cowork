@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 
 from cryptography.fernet import Fernet
@@ -168,7 +169,10 @@ class TeamSpaceTests(unittest.TestCase):
         invite = self.command("owner", "invite.create", member_id="member")
         op = uuid.uuid4().hex
         args = dict(id=invite["id"], revision=1, response="accept", operation_id=op)
-        first = self.command("member", "invite.respond", **args)
+        spaces = self.app.state.team_spaces
+        with patch.object(spaces, "object", wraps=spaces.object) as lookup:
+            first = self.command("member", "invite.respond", **args)
+        self.assertEqual(sum(call.args[1] == "invite" for call in lookup.call_args_list), 1)
         self.assertEqual(first, self.command("member", "invite.respond", **args))
         self.assertEqual(len([m for m in self.get()["members"] if m["id"] == "member"]), 1)
 

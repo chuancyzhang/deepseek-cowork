@@ -121,9 +121,9 @@ function capabilityUpload(kind, item) {
       } catch {
         throw new Error("上传连接中断。文件选择已保留，请先查看列表确认草稿是否已保存。");
       }
-      const result = await response.json().catch(() => ({}));
+      const text = await response.text();
       if (generation !== routeGeneration) return;
-      if (!response.ok) throw new Error(result.error?.message || `上传失败（${response.status}），文件选择已保留。`);
+      const result = parseApiResponse(text, response.status);
       dirty = false;
       history.replaceState({}, "", `${base}${page}/${result.id}`);
       await render();

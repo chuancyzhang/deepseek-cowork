@@ -321,7 +321,7 @@ class TestAgentManagerTools(unittest.TestCase):
             def __init__(self, *_args, **_kwargs):
                 pass
 
-            def get_tool_definitions(self):
+            def get_tool_definitions(self, run_mode=None, discovered_tool_names=None, run_context=None):
                 defs = []
                 for name in sorted(AGENT_MANAGEMENT_TOOLS | {"bash"}):
                     defs.append({"type": "function", "function": {"name": name, "description": "", "parameters": {}}})
@@ -329,6 +329,12 @@ class TestAgentManagerTools(unittest.TestCase):
 
             def check_for_updates(self):
                 return False
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
 
         from core.agent import LLMWorker
 

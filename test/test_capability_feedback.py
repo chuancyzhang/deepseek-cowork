@@ -13,7 +13,7 @@ class CapabilityFeedbackTests(unittest.TestCase):
         draft = {"skill_name": "客户资料整理", "description": "整理资料", "instructions_md": "按客户整理资料。", "quality": "high"}
         self.assertEqual(normalize_skill_draft(draft)["skill_name"], draft["skill_name"])
         self.assertTrue(is_valid_skill_name(draft["skill_name"]))
-        for name in ("../outside", "CON", "a/b", "a" * 129):
+        for name in ("../outside", "CON", "a/b", "a" * 129, " skill", "skill "):
             self.assertFalse(is_valid_skill_name(name))
         with tempfile.TemporaryDirectory() as root:
             result = save_new_skill(draft, root)

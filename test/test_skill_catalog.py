@@ -264,6 +264,7 @@ class TestSkillCatalogService(unittest.TestCase):
         event = SkillChangeEvent.create("created", ["same-turn-tool"], source="ai")
         snapshot = SimpleNamespace(revision=2)
         worker = SimpleNamespace(
+            _enterprise_capability_runtime=None,
             skill_manager=runtime,
             run_context={"browser_backend": {"backend": "external", "generation": 0}},
             _pending_skill_snapshot=None,

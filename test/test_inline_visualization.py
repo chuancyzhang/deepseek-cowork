@@ -27,14 +27,18 @@ class TestInlineVisualization(unittest.TestCase):
             return module
         visualize = load("test_visualize_impl", "visualize")
         runner = load("test_visualize_runner", "python-runner")
+        from core.execution_authorization import ExecutionAuthorization
         context = {"conversation_id": "viz-test", "skill_manager": SimpleNamespace(
-            skill_records={"visualize": {}}, tools={"run_python_code": runner.run_python_code})}
-        process = Mock(returncode=1)
-        process.communicate.return_value = (b"partial output", b"Traceback: failure")
+            skill_records={"visualize": {}}, tools={"run_python_code": runner.run_python_code}),
+            "execution_authorization": ExecutionAuthorization("viz-test", "run", True, "")}
+        from io import BytesIO
+        process = SimpleNamespace(pid=42, returncode=1, poll=lambda: 1,
+                                  stdout=BytesIO(b"partial output"),
+                                  stderr=BytesIO(b"Traceback: failure"), stdin=None)
         with tempfile.TemporaryDirectory() as workspace, patch.object(runner, "get_runtime_executable", return_value="python"), patch.object(runner, "run_in_sandbox", return_value=process), patch.object(visualize, "visualization_staging_dir", return_value=workspace), patch("core.inline_visualization.visualization_staging_dir", return_value=workspace):
             result = visualize.run_visualization_python(workspace, "print(1)", context)
             self.assertFalse(result["ok"])
-            self.assertIn("exited with code 1", result["content"])
+            self.assertEqual(result["exit_code"], 1)
             self.assertIn("partial output", result["content"])
         cancelled = {"ok": False, "status": "cancelled", "error": "stopped"}
         context["skill_manager"].tools["run_python_code"] = Mock(return_value=cancelled)

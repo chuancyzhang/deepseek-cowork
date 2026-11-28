@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import requests
+from core.im_gateway_response import parse_response_json
 import os
 import re
 import mimetypes
@@ -595,14 +596,10 @@ class FeishuProvider(IMProvider):
                 json={"app_id": self.app_id, "app_secret": self.app_secret},
                 timeout=5
             )
-            token_body = None
-            try:
-                token_body = token_resp.json()
-            except Exception:
-                token_body = _truncate_text(getattr(token_resp, "text", ""))
+            token_body = parse_response_json(token_resp)
             _log_gateway(f"feishu token_resp status={token_resp.status_code} ok={token_resp.ok} body={_safe_json_dump(token_body)}")
-            if token_resp.ok:
-                token_data = token_body or {}
+            if token_resp.ok and isinstance(token_body, dict) and token_body.get("code") in (0, "0"):
+                token_data = token_body
                 tenant_token = token_data.get("tenant_access_token")
                 expires_in = token_data.get("expire") or token_data.get("expire_in") or 0
                 if tenant_token:
@@ -675,11 +672,7 @@ class FeishuProvider(IMProvider):
                 json=payload,
                 timeout=5
             )
-            body = None
-            try:
-                body = resp.json()
-            except Exception:
-                body = _truncate_text(getattr(resp, "text", ""))
+            body = parse_response_json(resp)
             _log_gateway(f"feishu card_create status={resp.status_code} ok={resp.ok} body={_safe_json_dump(body)}")
             if resp.ok and isinstance(body, dict):
                 data = body.get("data") or {}
@@ -704,13 +697,9 @@ class FeishuProvider(IMProvider):
                 json=payload,
                 timeout=5
             )
-            body = None
-            try:
-                body = resp.json()
-            except Exception:
-                body = _truncate_text(getattr(resp, "text", ""))
+            body = parse_response_json(resp)
             _log_gateway(f"feishu card_update status={resp.status_code} ok={resp.ok} body={_safe_json_dump(body)}")
-            return bool(resp.ok and isinstance(body, dict) and body.get("code") in (0, "0", None))
+            return bool(resp.ok and isinstance(body, dict) and body.get("code") in (0, "0"))
         except Exception as e:
             _log_gateway(f"feishu card_update failed: {e}")
         return False
@@ -731,13 +720,9 @@ class FeishuProvider(IMProvider):
                 json={"msg_type": "interactive", "content": content},
                 timeout=5
             )
-            body = None
-            try:
-                body = resp.json()
-            except Exception:
-                body = _truncate_text(getattr(resp, "text", ""))
+            body = parse_response_json(resp)
             _log_gateway(f"feishu card_reply status={resp.status_code} ok={resp.ok} body={_safe_json_dump(body)}")
-            if resp.ok and isinstance(body, dict) and body.get("code") in (0, "0", None):
+            if resp.ok and isinstance(body, dict) and body.get("code") in (0, "0"):
                 data = body.get("data") or {}
                 return data.get("message_id")
             if isinstance(body, dict):
@@ -752,13 +737,9 @@ class FeishuProvider(IMProvider):
                         json={"msg_type": "interactive", "content": fallback_content},
                         timeout=5
                     )
-                    fallback_body = None
-                    try:
-                        fallback_body = fallback_resp.json()
-                    except Exception:
-                        fallback_body = _truncate_text(getattr(fallback_resp, "text", ""))
+                    fallback_body = parse_response_json(fallback_resp)
                     _log_gateway(f"feishu card_reply fallback status={fallback_resp.status_code} ok={fallback_resp.ok} body={_safe_json_dump(fallback_body)}")
-                    if fallback_resp.ok and isinstance(fallback_body, dict) and fallback_body.get("code") in (0, "0", None):
+                    if fallback_resp.ok and isinstance(fallback_body, dict) and fallback_body.get("code") in (0, "0"):
                         data = (fallback_body.get("data") or {})
                         return data.get("message_id")
             return None
@@ -779,13 +760,9 @@ class FeishuProvider(IMProvider):
                 json=payload,
                 timeout=5
             )
-            body = None
-            try:
-                body = resp.json()
-            except Exception:
-                body = _truncate_text(getattr(resp, "text", ""))
+            body = parse_response_json(resp)
             _log_gateway(f"feishu card_edit status={resp.status_code} ok={resp.ok} body={_safe_json_dump(body)}")
-            if resp.ok and isinstance(body, dict) and body.get("code") in (0, "0", None):
+            if resp.ok and isinstance(body, dict) and body.get("code") in (0, "0"):
                 return True
             if isinstance(body, dict):
                 code = body.get("code")
@@ -799,13 +776,9 @@ class FeishuProvider(IMProvider):
                         json=fallback_payload,
                         timeout=5
                     )
-                    fallback_body = None
-                    try:
-                        fallback_body = fallback_resp.json()
-                    except Exception:
-                        fallback_body = _truncate_text(getattr(fallback_resp, "text", ""))
+                    fallback_body = parse_response_json(fallback_resp)
                     _log_gateway(f"feishu card_edit fallback status={fallback_resp.status_code} ok={fallback_resp.ok} body={_safe_json_dump(fallback_body)}")
-                    return bool(fallback_resp.ok and isinstance(fallback_body, dict) and fallback_body.get("code") in (0, "0", None))
+                    return bool(fallback_resp.ok and isinstance(fallback_body, dict) and fallback_body.get("code") in (0, "0"))
         except Exception as e:
             _log_gateway(f"feishu card_edit failed: {e}")
         return False
@@ -816,27 +789,25 @@ class FeishuProvider(IMProvider):
     def send_message(self, text, event=None):
         message_id = (event or {}).get("message_id")
         _log_gateway(f"feishu send_message start message_id={message_id} text_len={len(text or '')}")
-        if self.app_id and self.app_secret and message_id:
-            tenant_token = self._get_tenant_token()
-            if tenant_token:
-                content = json.dumps({"text": text}, ensure_ascii=False)
-                try:
-                    reply_resp = requests.post(
-                        f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply",
-                        headers={"Authorization": f"Bearer {tenant_token}"},
-                        json={"msg_type": "text", "content": content},
-                        timeout=5
-                    )
-                    reply_body = None
-                    try:
-                        reply_body = reply_resp.json()
-                    except Exception:
-                        reply_body = _truncate_text(getattr(reply_resp, "text", ""))
-                    _log_gateway(f"feishu reply_resp status={reply_resp.status_code} ok={reply_resp.ok} body={_safe_json_dump(reply_body)}")
-                except Exception as e:
-                    _log_gateway(f"feishu reply request failed: {e}")
-            return {"code": 0, "msg": "success"}
-        return self.build_reply(text)
+        if not self.app_id or not self.app_secret or not message_id:
+            return {"ok": False, "error": "飞书应用凭据或回复目标缺失。"}
+        tenant_token = self._get_tenant_token()
+        if not tenant_token:
+            return {"ok": False, "error": "飞书应用认证失败，消息未发送。"}
+        try:
+            response = requests.post(
+                f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply",
+                headers={"Authorization": f"Bearer {tenant_token}"},
+                json={"msg_type": "text", "content": json.dumps({"text": text}, ensure_ascii=False)},
+                timeout=5,
+            )
+            body = parse_response_json(response)
+            ok = bool(response.ok and isinstance(body, dict) and body.get("code") in (0, "0"))
+            _log_gateway(f"feishu reply_resp message_id={message_id} status={response.status_code} ok={ok} body={_safe_json_dump(body)}")
+            return {"ok": ok, "response": body, "error": "" if ok else "飞书消息发送失败，请检查渠道连接后重试。"}
+        except requests.RequestException as exc:
+            _log_gateway(f"feishu reply request failed message_id={message_id}: {exc}")
+            return {"ok": False, "error": "飞书消息发送结果未确认，请核对后重试。"}
 
     def _create_proactive_message(self, target, msg_type, content, idempotency_key):
         receive_id_type = str((target or {}).get("target_type") or "").strip()
@@ -859,11 +830,8 @@ class FeishuProvider(IMProvider):
                 json=payload,
                 timeout=12,
             )
-            try:
-                body = resp.json()
-            except Exception:
-                body = {"message": _truncate_text(getattr(resp, "text", ""))}
-            ok = bool(resp.ok and isinstance(body, dict) and body.get("code") in (0, "0", None))
+            body = parse_response_json(resp)
+            ok = bool(resp.ok and isinstance(body, dict) and body.get("code") in (0, "0"))
             if ok:
                 return {"ok": True}
             return {
@@ -907,11 +875,8 @@ class FeishuProvider(IMProvider):
                     files={field: (os.path.basename(path), handle, mime)},
                     timeout=30,
                 )
-            try:
-                body = resp.json()
-            except Exception:
-                body = {"message": _truncate_text(getattr(resp, "text", ""))}
-            if resp.ok and isinstance(body, dict) and body.get("code") in (0, "0", None):
+            body = parse_response_json(resp)
+            if resp.ok and isinstance(body, dict) and body.get("code") in (0, "0"):
                 key_name = "image_key" if is_image else "file_key"
                 key = str((body.get("data") or {}).get(key_name) or "")
                 if key:
@@ -1050,11 +1015,8 @@ class DingTalkProvider(IMProvider):
                 json=self.build_reply(str((item or {}).get("text") or "")),
                 timeout=12,
             )
-            try:
-                body = resp.json()
-            except Exception:
-                body = {}
-            app_ok = not isinstance(body, dict) or body.get("errcode") in (None, 0, "0")
+            body = parse_response_json(resp)
+            app_ok = isinstance(body, dict) and body.get("errcode") in (0, "0")
             if resp.ok and app_ok:
                 return {"ok": True}
             return {
@@ -1408,6 +1370,13 @@ def _has_effective_output(text):
     return value not in placeholders
 
 
+def _coerce_number(value, converter, default):
+    try:
+        return converter(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def _resolve_streaming_config(config_manager):
     cfg = {
         "min_chars": 1200,
@@ -1427,34 +1396,13 @@ def _resolve_streaming_config(config_manager):
     raw_think_chars = config_manager.get("feishu_stream_thinking_min_chars", cfg["thinking_min_chars"])
     raw_think_interval = config_manager.get("feishu_stream_thinking_min_interval", cfg["thinking_min_interval"])
     raw_backoff_interval = config_manager.get("feishu_stream_backoff_min_interval", cfg["backoff_min_interval"])
-    try:
-        cfg["min_chars"] = int(raw_chars)
-    except Exception:
-        cfg["min_chars"] = 1200
-    try:
-        cfg["min_interval"] = float(raw_interval)
-    except Exception:
-        cfg["min_interval"] = 2.0
-    try:
-        cfg["answer_min_chars"] = int(raw_answer_chars)
-    except Exception:
-        cfg["answer_min_chars"] = cfg["min_chars"]
-    try:
-        cfg["answer_min_interval"] = float(raw_answer_interval)
-    except Exception:
-        cfg["answer_min_interval"] = cfg["min_interval"]
-    try:
-        cfg["thinking_min_chars"] = int(raw_think_chars)
-    except Exception:
-        cfg["thinking_min_chars"] = max(cfg["answer_min_chars"], cfg["min_chars"])
-    try:
-        cfg["thinking_min_interval"] = float(raw_think_interval)
-    except Exception:
-        cfg["thinking_min_interval"] = max(cfg["answer_min_interval"], cfg["min_interval"])
-    try:
-        cfg["backoff_min_interval"] = float(raw_backoff_interval)
-    except Exception:
-        cfg["backoff_min_interval"] = 2.8
+    cfg["min_chars"] = _coerce_number(raw_chars, int, 1200)
+    cfg["min_interval"] = _coerce_number(raw_interval, float, 2.0)
+    cfg["answer_min_chars"] = _coerce_number(raw_answer_chars, int, cfg["min_chars"])
+    cfg["answer_min_interval"] = _coerce_number(raw_answer_interval, float, cfg["min_interval"])
+    cfg["thinking_min_chars"] = _coerce_number(raw_think_chars, int, max(cfg["answer_min_chars"], cfg["min_chars"]))
+    cfg["thinking_min_interval"] = _coerce_number(raw_think_interval, float, max(cfg["answer_min_interval"], cfg["min_interval"]))
+    cfg["backoff_min_interval"] = _coerce_number(raw_backoff_interval, float, 2.8)
     cfg["min_chars"] = max(300, min(cfg["min_chars"], 5000))
     cfg["answer_min_chars"] = max(300, min(cfg["answer_min_chars"], 5000))
     cfg["thinking_min_chars"] = max(cfg["answer_min_chars"], min(cfg["thinking_min_chars"], 5000))
@@ -1963,12 +1911,29 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
                 {"name": "feedback", "label": "反馈"},
             ]
             if action_name == "stop":
-                if conversation_id:
-                    try:
-                        daemon_client.stop_session(conversation_id)
-                    except Exception:
-                        pass
-                provider.update_card_message(open_message_id, "已停止当前任务。", thinking=thinking_text, collapse_thinking=False, content_parts=content_parts, interactive_actions=actions_running)
+                try:
+                    if not conversation_id:
+                        raise RuntimeError("未找到当前任务，请在客户端核对。")
+                    result = daemon_client.stop_session(conversation_id)
+                    if not isinstance(result, dict):
+                        raise RuntimeError("停止请求未收到有效响应。")
+                    if result.get("status") != "ok":
+                        raise RuntimeError(result.get("error") or "停止请求未被接收。")
+                    if result.get("save_error"):
+                        raise RuntimeError("任务已请求停止，但内容保存失败，请在客户端恢复。")
+                    if result.get("stopped") and result.get("released"):
+                        stop_text = "已停止当前任务。"
+                    elif result.get("stopped"):
+                        stop_text = "停止请求已接收，正在结束当前任务。"
+                    else:
+                        stop_text = "当前没有可停止的任务。"
+                    _log_gateway(f"feishu stop_result conversation_id={conversation_id} result={_safe_json_dump(result)}")
+                except Exception as exc:
+                    _log_gateway(f"feishu stop_failed conversation_id={conversation_id} error={exc}")
+                    stop_text = f"停止未完成：{exc}"
+                provider.update_card_message(open_message_id, stop_text, thinking=thinking_text, collapse_thinking=False,
+                                             content_parts=[*content_parts, {"type": "text", "text": stop_text}],
+                                             interactive_actions=actions_running)
             elif action_name == "toggle_thinking":
                 collapse = bool(ctx.get("thinking_expanded"))
                 with _CARD_CONTEXT_LOCK:
@@ -2142,14 +2107,8 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
         return None
     if (not sent_any and has_output) or ((not total_text.strip()) and has_output):
         _log_gateway(f"{provider_name} daemon ok result={_safe_json_dump(result)} output_len={len(output or '')}")
-        if hasattr(provider, "send_card_reply"):
-            if card_message_id:
-                return None
-            if card_attempted:
-                return None
-            message_id = provider.send_card_reply(event, card_content=display_output, title="🤖 AI 助手", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True, content_parts=output_parts, interactive_actions=final_actions)
-            if message_id:
-                return None
+        if card_message_id or card_attempted:
+            return None
         provider.send_card_reply(event, card_content=display_output, title="🤖 AI 助手", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True, content_parts=output_parts, interactive_actions=final_actions)
     return None
 

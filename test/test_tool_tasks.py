@@ -399,11 +399,17 @@ class ToolTasksWorkerTest(unittest.TestCase):
             def get_tool_record(self, name): return {"source_kind": "core_builtin", "read_only": True}
             def call_tool(self, name, args, context=None): return execute(name, args, context)
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class Provider:
             provider_name, model_name, base_url = "stub", "stub", "https://provider.example/v1"
             api_protocol, thinking_enabled = "chat_completions", False
             requires_responses_replay = requires_deepseek_responses_replay = False
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 requests.append(copy.deepcopy(messages))
                 if len(requests) > 10:
                     raise AssertionError("model busy loop")
@@ -681,7 +687,7 @@ class ToolTasksWorkerTest(unittest.TestCase):
             messages = [{"role": "tool", "tool_call_id": "call", "result_obj": {
                 "background_tool": True, "status": "running", "task_id": "task"}}]
             generated = []
-            owner = SimpleNamespace(runtime_journal=journal, session_id="session", request_id="new", turn_id="turn",
+            owner = SimpleNamespace(runtime_journal=journal, session_id="session", request_id="new", turn_id="turn", _tool_tasks_recovered=False,
                                     _ensure_tool_tasks=lambda: SimpleNamespace(tasks={}),
                                     _append_ledger_message=lambda m, g, item: (m.append(item), g.append(item)),
                                     _checkpoint_generated_ledger=lambda *a, **k: None)

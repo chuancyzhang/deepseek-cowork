@@ -31,6 +31,9 @@ from .theme_package import (
     THEME_PACKAGE_SUFFIX,
     THEME_SCHEMA_VERSION,
     build_asset_record,
+    _bounded_number,
+    _bounded_integer,
+    _normalize_color as normalize_package_color,
     normalize_theme_manifest,
     read_theme_package,
     write_theme_package,
@@ -102,10 +105,7 @@ COLOR_TOKEN_PREFIXES = (
 )
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$")
-_RGBA_COLOR_RE = re.compile(
-    r"^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}"
-    r"(?:\s*,\s*(?:0(?:\.\d+)?|1(?:\.0+)?))?\s*\)$"
-)
+
 
 
 def append_theme_log(data_dir: str, event: str, **fields: Any) -> None:
@@ -313,35 +313,15 @@ def theme_geometry_errors(tokens: dict[str, Any]) -> list[str]:
 
 
 def _normalize_color(value: Any) -> str:
-    text = str(value or "").strip()
-    if _HEX_COLOR_RE.fullmatch(text):
-        return text.lower()
-    if _RGBA_COLOR_RE.fullmatch(text):
-        channels = [item.strip() for item in text[text.find("(") + 1 : -1].split(",")]
-        if any(int(item) > 255 for item in channels[:3]):
-            raise ValueError(f"颜色通道超出范围：{text}")
-        return text
-    raise ValueError(f"颜色必须使用 #RRGGBB、#RRGGBBAA、rgb() 或 rgba()：{text}")
+    return normalize_package_color(value, "颜色")
 
 
 def _coerce_float(value: Any, *, field: str, minimum: float, maximum: float) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"{field} 必须是数字。") from None
-    if number < minimum or number > maximum:
-        raise ValueError(f"{field} 必须位于 {minimum:g}–{maximum:g} 之间。")
-    return round(number, 4)
+    return round(_bounded_number(value, field, minimum, maximum), 4)
 
 
 def _coerce_int(value: Any, *, field: str, minimum: int, maximum: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"{field} 必须是整数。") from None
-    if number < minimum or number > maximum:
-        raise ValueError(f"{field} 必须位于 {minimum}–{maximum} 之间。")
-    return number
+    return _bounded_integer(value, field, minimum, maximum)
 
 
 def _normalize_name(value: Any) -> str:
@@ -918,55 +898,65 @@ class ThemeRepository:
         active = str(payload.get("active_theme_id") or DEFAULT_THEME_ID)
         if active not in BUILTIN_THEMES and active not in seen_ids:
             raise ValueError(f"活动主题不存在：{active}")
-        canonical = {
-            "active_theme_id": active,
-            "themes": [self._manifest_from_record(item) for item in themes],
-        }
+        return self._snapshot(active, themes)
+
+    def _snapshot(self, active: str, themes) -> ThemeStoreSnapshot:
+        themes = sorted(themes, key=lambda item: str(item["id"]) +
+                        (".json" if item.get("source_format") == "legacy_json" else THEME_PACKAGE_SUFFIX))
+        canonical = {"active_theme_id": active,
+                     "themes": [self._manifest_from_record(item) for item in themes]}
         revision = 0
-        if payload or themes:
+        if active != DEFAULT_THEME_ID or themes:
             digest = hashlib.sha256(
                 json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest()
             revision = int(digest[:15], 16)
         return ThemeStoreSnapshot(revision, active, tuple(themes))
 
-    def _save(self, snapshot: ThemeStoreSnapshot, *, default_tokens: dict[str, Any] | None = None) -> ThemeStoreSnapshot:
+    def _save(self, snapshot: ThemeStoreSnapshot, *, previous: ThemeStoreSnapshot,
+              default_tokens: dict[str, Any] | None = None) -> ThemeStoreSnapshot:
         if default_tokens is None:
             from .theme_tokens import default_design_tokens
             default_tokens = default_design_tokens()
         os.makedirs(self.themes_dir, exist_ok=True)
+        previous_by_id = {item["id"]: item for item in previous.themes}
+        saved = []
         desired_ids = set()
-        for raw in snapshot.themes:
-            record = copy.deepcopy(raw)
-            theme_id = self._validate_id(record.get("id"))
-            desired_ids.add(theme_id)
-            assets = record.pop("_asset_bytes", None)
-            if assets is None:
-                assets = self._read_existing_assets(theme_id, default_tokens)
-            manifest = self._manifest_from_record(record)
-            write_theme_package(
-                self.theme_path(theme_id),
-                manifest,
-                assets,
-                validate_overrides=lambda value: validate_theme_overrides(value, default_tokens),
-            )
-            legacy_path = self.legacy_theme_path(theme_id)
-            if os.path.exists(legacy_path):
-                os.unlink(legacy_path)
-        for filename in os.listdir(self.themes_dir):
-            if filename.startswith("_"):
-                continue
-            lower = filename.lower()
-            if lower.endswith(THEME_PACKAGE_SUFFIX):
-                theme_id = filename[: -len(THEME_PACKAGE_SUFFIX)]
-            elif lower.endswith(".json"):
-                theme_id = filename[:-5]
-            else:
-                continue
-            if theme_id not in desired_ids:
-                os.unlink(os.path.join(self.themes_dir, filename))
+        # Validate and serialize every changed package before replacing any
+        # published file. A later invalid theme must leave the whole store intact.
+        with tempfile.TemporaryDirectory(prefix=".theme-save-", dir=self.themes_dir) as staging:
+            replacements = []
+            for raw in snapshot.themes:
+                theme_id = self._validate_id(raw.get("id"))
+                desired_ids.add(theme_id)
+                manifest = self._manifest_from_record(raw)
+                existing = previous_by_id.get(theme_id)
+                if (existing is not None and "_asset_bytes" not in raw
+                        and manifest == self._manifest_from_record(existing)
+                        and (existing.get("source_format") != "legacy_json" or raw.get("source_format") == "legacy_json")):
+                    saved.append(existing)
+                    continue
+                assets = raw.get("_asset_bytes")
+                if assets is None:
+                    assets = self._read_existing_assets(theme_id, default_tokens)
+                staged_path = os.path.join(staging, theme_id + THEME_PACKAGE_SUFFIX)
+                normalized = write_theme_package(
+                    staged_path, manifest, assets,
+                    validate_overrides=lambda value: validate_theme_overrides(value, default_tokens),
+                )
+                saved.append(self._record_from_manifest(normalized))
+                replacements.append((theme_id, staged_path))
+            for theme_id, staged_path in replacements:
+                os.replace(staged_path, self.theme_path(theme_id))
+                legacy_path = self.legacy_theme_path(theme_id)
+                if os.path.exists(legacy_path):
+                    os.unlink(legacy_path)
+        for theme_id in previous_by_id.keys() - desired_ids:
+            for path in (self.theme_path(theme_id), self.legacy_theme_path(theme_id)):
+                if os.path.exists(path):
+                    os.unlink(path)
         _atomic_write_json(self.store_path, snapshot.to_dict())
-        return self.load()
+        return self._snapshot(snapshot.active_theme_id, saved)
 
     def replace_state(
         self,
@@ -1001,7 +991,7 @@ class ThemeRepository:
                 "name": name,
                 "base": DEFAULT_THEME_ID,
                 "schema_version": THEME_SCHEMA_VERSION,
-                "overrides": validate_theme_overrides(raw.get("overrides") or {}, default_tokens),
+                "overrides": _json_copy(raw.get("overrides") or {}),
                 "assets": _json_copy(raw.get("assets", base.get("assets", {})) or {}),
                 "workspace_scene": _json_copy(
                     raw.get("workspace_scene", base.get("workspace_scene", DEFAULT_WORKSPACE_SCENE))
@@ -1012,7 +1002,6 @@ class ThemeRepository:
             }
             if "_asset_bytes" in raw:
                 record["_asset_bytes"] = raw["_asset_bytes"]
-            validate_theme_manifest(self._manifest_from_record(record), default_tokens)
             normalized.append(record)
             seen_ids.add(theme_id)
             seen_names.add(name.casefold())
@@ -1021,7 +1010,7 @@ class ThemeRepository:
             raise ValueError(f"活动主题不存在：{active}")
         return self._save(
             ThemeStoreSnapshot(current.revision, active, tuple(normalized)),
-            default_tokens=default_tokens,
+            previous=current, default_tokens=default_tokens,
         )
 
     def get_theme(self, theme_id: str) -> dict[str, Any] | None:
@@ -1068,7 +1057,7 @@ class ThemeRepository:
             "name": normalized_name,
             "base": DEFAULT_THEME_ID,
             "schema_version": THEME_SCHEMA_VERSION,
-            "overrides": validate_theme_overrides(overrides, default_tokens),
+            "overrides": _json_copy(overrides),
             "assets": _json_copy(assets if assets is not None else existing.get("assets", {})),
             "workspace_scene": _json_copy(
                 workspace_scene
@@ -1081,17 +1070,16 @@ class ThemeRepository:
         }
         if asset_bytes is not None:
             record["_asset_bytes"] = asset_bytes
-        validate_theme_manifest(self._manifest_from_record(record), default_tokens)
         if existing_index >= 0:
             themes[existing_index] = record
         else:
             themes.append(record)
         saved = self._save(
             ThemeStoreSnapshot(snapshot.revision, snapshot.active_theme_id, tuple(themes)),
-            default_tokens=default_tokens,
+            previous=snapshot, default_tokens=default_tokens,
         )
-        record.pop("_asset_bytes", None)
-        return {"theme": _json_copy(record), "revision": saved.revision}
+        saved_record = next(item for item in saved.themes if item["id"] == record["id"])
+        return {"theme": _json_copy(saved_record), "revision": saved.revision}
 
     def activate_theme(self, theme_id: str) -> ThemeStoreSnapshot:
         snapshot = self.load()
@@ -1099,7 +1087,7 @@ class ThemeRepository:
         if target not in BUILTIN_THEMES and target not in {item.get("id") for item in snapshot.themes}:
             raise ValueError(f"主题不存在：{target}")
         _atomic_write_json(self.store_path, {} if target == DEFAULT_THEME_ID else {"active_theme_id": target})
-        return self.load()
+        return self._snapshot(target, snapshot.themes)
 
     def delete_theme(self, theme_id: str) -> ThemeStoreSnapshot:
         target = str(theme_id or "").strip()
@@ -1110,7 +1098,7 @@ class ThemeRepository:
         if len(themes) == len(snapshot.themes):
             raise ValueError(f"主题不存在：{target}")
         active = DEFAULT_THEME_ID if snapshot.active_theme_id == target else snapshot.active_theme_id
-        return self._save(ThemeStoreSnapshot(snapshot.revision, active, themes))
+        return self._save(ThemeStoreSnapshot(snapshot.revision, active, themes), previous=snapshot)
 
     @staticmethod
     def _apply_patch_operations(document: dict[str, Any], operations: list[dict[str, Any]] | None) -> dict[str, Any]:
@@ -1166,6 +1154,7 @@ class ThemeRepository:
                 os.fsync(stream.fileno())
             with file_write_lock(self.preview_path):
                 os.replace(temp_path, self.preview_path)
+            preview.update({key: value for key, value in manifest.items() if key != "format"})
         except Exception:
             try:
                 os.unlink(temp_path)
@@ -1234,7 +1223,7 @@ class ThemeRepository:
             "schema_version": THEME_SCHEMA_VERSION,
             "id": "preview_" + (existing["preview_id"] if reuse else uuid.uuid4().hex),
             "name": _normalize_name(name),
-            "overrides": validate_theme_overrides(overrides, default_tokens),
+            "overrides": _json_copy(overrides),
             "assets": _json_copy(assets if assets is not None else (existing or {}).get("assets", {})),
             "workspace_scene": _json_copy(
                 workspace_scene
@@ -1283,9 +1272,8 @@ class ThemeRepository:
             merged["tokens"] = tokens
         else:
             merged.pop("tokens", None)
-        current["overrides"] = validate_theme_overrides(merged, default_tokens)
+        current["overrides"] = merged
         current = self._apply_patch_operations(current, operations)
-        validate_theme_manifest(self._manifest_from_record(current), default_tokens, asset_bytes=asset_bytes)
         current["revision"] = int(current["revision"]) + 1
         current["updated_at"] = int(time.time())
         self._write_preview_package(current, asset_bytes, default_tokens)

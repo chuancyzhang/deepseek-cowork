@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
+from pathlib import Path
 
 from core.theme_tokens import default_design_tokens
 from core.theme_presets import BUILTIN_THEMES, builtin_theme
@@ -29,6 +30,42 @@ class ThemeServiceTests(unittest.TestCase):
         snapshot = self.repository.load()
         self.assertEqual(snapshot.active_theme_id, DEFAULT_THEME_ID)
         self.assertEqual(snapshot.themes, tuple())
+
+    def test_edit_and_delete_only_write_changed_theme_packages(self):
+        from core.theme_service import write_theme_package
+        first = self.repository.upsert_theme(name="First", overrides={}, default_tokens=self.defaults)["theme"]
+        second = self.repository.upsert_theme(name="Second", overrides={}, default_tokens=self.defaults)["theme"]
+        with patch("core.theme_service.write_theme_package", wraps=write_theme_package) as write, \
+             patch.object(self.repository, "load", wraps=self.repository.load) as load:
+            result = self.repository.upsert_theme(theme_id=first["id"], name="First edited",
+                overrides={"radius_scale": 0.8}, default_tokens=self.defaults)
+        self.assertEqual(write.call_count, 1)
+        self.assertEqual(load.call_count, 1)
+        self.assertEqual(result["revision"], self.repository.load().revision)
+        self.assertEqual(self.repository.get_theme(second["id"]), second)
+        with patch("core.theme_service.write_theme_package", wraps=write_theme_package) as write:
+            self.repository.delete_theme(first["id"])
+        write.assert_not_called()
+        self.assertEqual(self.repository.get_theme(second["id"]), second)
+
+    def test_invalid_later_theme_keeps_packages_legacy_files_and_state_unchanged(self):
+        first = self.repository.upsert_theme(name="First", overrides={}, default_tokens=self.defaults)["theme"]
+        second = self.repository.upsert_theme(name="Second", overrides={}, default_tokens=self.defaults)["theme"]
+        legacy_path = Path(self.repository.legacy_theme_path("legacy"))
+        legacy_path.write_text(json.dumps({"format": "cowork-theme", "id": "legacy", "name": "Legacy",
+                                           "overrides": {}}), encoding="utf-8")
+        snapshot = self.repository.load()
+        legacy = next(item for item in snapshot.themes if item["id"] == "legacy")
+        root = Path(self.repository.themes_dir)
+        before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
+        with self.assertRaises(ValueError):
+            self.repository.replace_state(
+                themes=[{**first, "name": "First changed"}, {**legacy, "name": "Legacy migrated"},
+                        {**second, "overrides": {"tokens": {"primary": "not-a-color"}}}],
+                active_theme_id=first["id"], default_tokens=self.defaults)
+        self.assertEqual({path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}, before)
+        self.assertFalse(any(path.is_dir() for path in root.iterdir()))
+        self.assertEqual(self.repository.load().revision, snapshot.revision)
 
     def test_primary_override_derives_interaction_colors(self):
         resolved = resolve_theme(

@@ -333,7 +333,7 @@ class ConversationActions:
             return self.store.summarize_conversations(self.storage.list_conversation_summaries(conversation_ids=identities))
         if method in {"conversation.pin", "conversation.restore", "conversation.delete", "conversation.preferences"}:
             with self.service.lock:
-                self.record(cid)
+                record = self.record(cid)
                 if method == "conversation.pin":
                     patch = {"pinned": bool(p.get("pinned"))}
                 elif method == "conversation.restore":
@@ -347,7 +347,7 @@ class ConversationActions:
                         additions = p["append_knowledge_refs"]
                         if not isinstance(additions, list) or any(not isinstance(ref, dict) for ref in additions):
                             raise ValueError("请选择可引用的资料。")
-                        refs = list(self.record(cid)["meta"].get("knowledge_refs") or [])
+                        refs = list(record["meta"].get("knowledge_refs") or [])
                         for ref in additions:
                             if ref not in refs:
                                 refs.append(copy.deepcopy(ref))
@@ -357,7 +357,7 @@ class ConversationActions:
                         from core.clarify_mode import normalize_run_mode
                         if patch["mode"] not in {"execution", "grilling"}:
                             raise ValueError("请选择有效的运行模式。")
-                        if self.record(cid)["meta"].get("creation_session") and patch["mode"] != "execution":
+                        if record["meta"].get("creation_session") and patch["mode"] != "execution":
                             raise ValueError("请退出创造模式后，在原对话中使用拷问模式。")
                         require_mode(self.config, normalize_run_mode(patch["mode"]))
                 self.storage.update_conversation_meta(cid, patch)
@@ -574,7 +574,6 @@ class ConversationRuntime:
             record = self.storage.get_conversation_record(cid)
             if not record:
                 raise ValueError("对话不存在。")
-            from core.desktop_conversations import PREFERENCE_KEYS
             preferences = {key: value for key, value in {**record["meta"], **(p.get("preferences") or {})}.items() if key in PREFERENCE_KEYS}
             from core.mode_plugins import require_mode
             require_mode(self.config, preferences.get("mode", "execution"))

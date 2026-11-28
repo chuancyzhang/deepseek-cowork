@@ -100,16 +100,15 @@ def normalize_mcp_transport(value):
     return TRANSPORT_STDIO
 
 
-def _resolve_timeout_seconds(server_config):
-    raw_ms = server_config.get("startup_timeout_ms")
-    if raw_ms not in (None, ""):
-        try:
-            return max(5, int(raw_ms) // 1000 or DEFAULT_MCP_TIMEOUT_SECONDS)
-        except Exception:
-            pass
+def resolve_mcp_timeout_seconds(server_config):
+    seconds = server_config.get("timeout_seconds")
+    milliseconds = server_config.get("startup_timeout_ms")
     try:
-        return max(5, int(server_config.get("timeout_seconds") or DEFAULT_MCP_TIMEOUT_SECONDS))
-    except Exception:
+        value = float(seconds) if seconds not in (None, "") else (
+            float(milliseconds) / 1000 if milliseconds not in (None, "") else DEFAULT_MCP_TIMEOUT_SECONDS
+        )
+        return max(5, value)
+    except (TypeError, ValueError, OverflowError):
         return DEFAULT_MCP_TIMEOUT_SECONDS
 
 
@@ -189,7 +188,7 @@ def _jwt_expiry(token):
         payload = parts[1] + "=" * (-len(parts[1]) % 4)
         decoded = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
         expiry = int(decoded.get("exp"))
-    except Exception as exc:
+    except (ValueError, TypeError, UnicodeError, AttributeError) as exc:
         raise ValueError("Superset access token does not contain a valid exp claim.") from exc
     if expiry <= 0:
         raise ValueError("Superset access token contains an invalid exp claim.")
@@ -242,7 +241,7 @@ def _superset_response_error(response, action):
         payload = response.json()
         if isinstance(payload, dict):
             detail = str(payload.get("message") or payload.get("detail") or "").strip()
-    except Exception:
+    except ValueError:
         detail = ""
     suffix = f": {detail}" if detail else ""
     return RuntimeError(f"Superset {action} failed ({response.status_code} {response.reason_phrase}){suffix}")
@@ -266,7 +265,7 @@ def _superset_login(values, timeout_seconds):
             timeout=timeout_seconds,
             follow_redirects=True,
         )
-    except Exception:
+    except httpx.HTTPError:
         logger.exception("mcp_auth.login.error host=%s", values["base_url"])
         raise
     if response.status_code != 200:
@@ -297,7 +296,7 @@ def _superset_refresh(values, cached, timeout_seconds):
             timeout=timeout_seconds,
             follow_redirects=True,
         )
-    except Exception:
+    except httpx.HTTPError:
         logger.exception("mcp_auth.refresh.error host=%s", values["base_url"])
         raise
     if response.status_code == 401:
@@ -320,7 +319,7 @@ def _superset_refresh(values, cached, timeout_seconds):
 def _superset_access_token(server_config, config_manager, force_login=False):
     values = _superset_auth_values(server_config, config_manager)
     cache_key = _superset_cache_key(server_config, values)
-    timeout_seconds = _resolve_timeout_seconds(server_config)
+    timeout_seconds = resolve_mcp_timeout_seconds(server_config)
     with _SUPERSET_TOKEN_CACHE_LOCK:
         cached = _SUPERSET_TOKEN_CACHE.get(cache_key)
         if force_login or not cached:
@@ -471,7 +470,7 @@ async def _open_streamable_http_transport(url, headers, timeout_seconds, *, foll
 @asynccontextmanager
 async def _open_mcp_session(server_config):
     transport = normalize_mcp_transport(server_config.get("transport", server_config.get("type")))
-    timeout_seconds = _resolve_timeout_seconds(server_config)
+    timeout_seconds = resolve_mcp_timeout_seconds(server_config)
 
     try:
         from mcp import ClientSession, StdioServerParameters
@@ -651,13 +650,7 @@ def _ensure_runtime_skill_dependencies(server_config, skill_manager=None):
                 "dependency preparation cannot be verified."
             ),
         }
-    ensure = getattr(skill_manager, "ensure_mcp_server_dependencies", None)
-    if not callable(ensure):
-        return {
-            "ok": False,
-            "message": f"Skill manager cannot prepare runtime Skill '{runtime_skill}' dependencies.",
-        }
-    result = ensure(server_config)
+    result = skill_manager.ensure_mcp_server_dependencies(server_config)
     if not isinstance(result, dict):
         return {
             "ok": False,

@@ -347,6 +347,7 @@ def test_workspace_changes_read_index_and_saved_files_inside_conversation_direct
         assert get_workspace_git() == git
     monkeypatch.setenv('GIT_CONFIG_NOSYSTEM', '1')
     monkeypatch.setenv('GIT_CONFIG_GLOBAL', os.devnull)
+    monkeypatch.setenv('GIT_CONFIG_COUNT', '0')
     monkeypatch.setenv('GIT_CEILING_DIRECTORIES', str(tmp_path.parent))
     root = tmp_path / 'repository'
     folder = root / '报告'

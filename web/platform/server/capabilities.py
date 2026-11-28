@@ -288,8 +288,7 @@ class Capabilities:
                 self.database.audit(db, "capability.zip_imported", member_id=actor, target=skill.id)
                 bundled_skills.append({"id": skill_id, "name": skill_name, "version": skill.current_version})
             if bundled_skills:
-                config["skill_ids"] = string_list(sorted(set(config["skill_ids"]) | {skill["id"] for skill in bundled_skills}),
-                                                  "Skill", identifiers=True)
+                config["skill_ids"] = sorted(set(config["skill_ids"]) | {skill["id"] for skill in bundled_skills})
             values = {"draft_name": name, "draft_description": description, "draft_config": config}
             if row is None:
                 row = Capability(id=capability_id, kind=kind, **values)

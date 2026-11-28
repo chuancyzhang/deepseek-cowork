@@ -1,6 +1,5 @@
 let bridge = null;
 let sessionId = "";
-let chunks = [];
 let snapshot = null;
 let state = null;
 let cleanState = "";
@@ -19,7 +18,7 @@ function notice(message = "") {
   target.hidden = !message;
 }
 function updateDirty() {
-  bridge?.setDirty(serialized() !== cleanState);
+  bridge?.setDirty(sessionId, serialized() !== cleanState);
   document.getElementById("undo").disabled = historyIndex === 0;
   document.getElementById("redo").disabled = historyIndex >= history.length - 1;
 }
@@ -218,12 +217,10 @@ document.getElementById("toggle-revisions").addEventListener("click", event => {
   if (!revisionView.hidden) revisionView.scrollIntoView({ block: "nearest" });
 });
 window.coworkEditor = {
-  beginLoad(id, total) { sessionId = String(id); chunks = new Array(total); },
-  appendLoadChunk(index, value) { chunks[index] = String(value); },
-  finishLoad() {
+  load(id, value) {
     try {
-      if (!chunks.length || chunks.includes(undefined)) throw new Error("Word 编辑内容传输不完整，请重新打开。");
-      snapshot = JSON.parse(chunks.join("")); chunks = [];
+      sessionId = id;
+      snapshot = value;
       state = snapshot.coworkDraft ? clone(snapshot.coworkDraft) : { version: 1, regions: clone(snapshot.regions), revisions: {} };
       cleanState = serialized(); savedPayload = ""; history = [clone(state)]; historyIndex = 0;
       lastEdit = { region: "", time: 0 };
@@ -241,15 +238,11 @@ window.coworkEditor = {
     if (!state) return;
     const payload = serialized();
     savedPayload = payload;
-    const size = 192 * 1024;
-    const count = Math.max(1, Math.ceil(payload.length / size));
-    bridge.beginPayload(sessionId, "docx_review", count);
-    for (let index = 0; index < count; index += 1) bridge.appendPayload(sessionId, index, payload.slice(index * size, (index + 1) * size));
-    bridge.finishPayload(sessionId);
+    bridge.payload(sessionId, "docx_review", state);
   },
   markClean() { cleanState = savedPayload || serialized(); savedPayload = ""; lastEdit = { region: "", time: 0 }; updateDirty(); },
   setTheme(theme) { for (const [key, value] of Object.entries(theme || {})) document.documentElement.style.setProperty(`--cowork-${key}`, value); },
-  dispose() { snapshot = state = null; chunks = []; history = []; documentView.replaceChildren(); revisionView.replaceChildren(); }
+  dispose() { snapshot = state = null; history = []; documentView.replaceChildren(); revisionView.replaceChildren(); }
 };
 window.connectDesktopBridge("deliverableEditorBridge", nativeBridge => {
   bridge = nativeBridge;

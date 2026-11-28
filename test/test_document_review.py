@@ -15,14 +15,14 @@ from unittest.mock import MagicMock, patch
 from PIL import Image
 from core import document_review as review
 from core.document_preview import session_preview_root
-from core.llm.providers import OpenAIProvider, AnthropicProvider
+from core.llm.providers import LLMProvider, OpenAIProvider, AnthropicProvider
 
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('review_document_tools',ROOT/'skills/documents/impl.py')
 documents=importlib.util.module_from_spec(spec);spec.loader.exec_module(documents)
 
 
-class EchoReviewer:
+class EchoReviewer(LLMProvider):
     supports_vision=True
     model_name='test-vision'
     provider_name='fixture'
@@ -30,7 +30,10 @@ class EchoReviewer:
     api_protocol='chat_completions'
 
     def __init__(self, mode='valid'):
-        self.mode=mode;self.calls=[]
+        self.mode=mode;self.calls=[];self.closed=0
+
+    def close(self):
+        self.closed+=1
 
     def chat_stream(self,messages,tools,prompt_cache_key,request_context):
         self.calls.append(copy.deepcopy(messages))
@@ -86,6 +89,15 @@ class DocumentReviewTests(unittest.TestCase):
         records=review.read_reviews('session-a',self.source,fingerprint=new['source_version'],configuration='configuration-a')
         self.assertFalse(records['batches'][-1]['current_version']);self.assertTrue(records['current']['current_version'])
         self.assertEqual(review.read_reviews('session-b',self.source)['batches'],[])
+
+    def test_review_closes_provider_after_success_failure_and_unsupported_vision(self):
+        for mode in ('valid', 'partial', 'unsupported'):
+            with self.subTest(mode=mode):
+                self.context['run_id']=mode
+                self.provider=EchoReviewer(mode)
+                self.provider.supports_vision=mode!='unsupported'
+                self.batch()
+                self.assertEqual(self.provider.closed,1)
 
     def test_returned_page_must_match_the_submitted_evidence(self):
         self.provider.mode='wrong_page';result=self.batch()
@@ -180,6 +192,7 @@ class DocumentReviewTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'guard stops'):
                     list(stream(messages,request_context={'validate_request':validate,'tools_disabled':True}))
                 self.assertEqual(checked,[protocol]);client.chat.completions.create.assert_not_called();client.responses.create.assert_not_called();client.messages.stream.assert_not_called()
+                provider.close();client.close.assert_called_once()
 
     def test_permanent_cleanup_only_removes_owned_conversation_cache(self):
         from core.document_preview import delete_session_previews

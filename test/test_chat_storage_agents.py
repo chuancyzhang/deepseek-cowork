@@ -2,6 +2,9 @@ import os
 import shutil
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from unittest.mock import patch
 
 from core.chat_storage import ChatStorage
 
@@ -77,6 +80,36 @@ class TestChatStorageAgents(unittest.TestCase):
         completed = self.storage.list_agents(self.conversation_id, status_filter="completed")
         self.assertEqual(len(completed), 1)
         self.assertEqual(completed[0]["id"], "agent-2")
+
+    def test_concurrent_appends_preserve_all_rows_and_return_persisted_values(self):
+        self.storage.upsert_agent("agent-1", conversation_id=self.conversation_id, name="worker")
+        barrier = Barrier(4)
+
+        def append(index):
+            barrier.wait()
+            return self.storage.append_agent_messages("agent-1", [
+                {"id": f"m{index}", "role": "assistant", "content": str(index), "reasoning": "why"}])
+
+        with patch.object(self.storage, "replace_agent_messages", side_effect=AssertionError("must append")), \
+             ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(append, range(4)))
+        stored = self.storage.get_agent_messages("agent-1")
+        self.assertEqual({message["id"] for message in stored}, {f"m{i}" for i in range(4)})
+        self.assertEqual([message["meta"]["sequence"] for message in stored], list(range(4)))
+        for result in results:
+            self.assertEqual(result, stored[:len(result)])
+            self.assertTrue(all(message.get("created_at") for message in result))
+            self.assertEqual(result[-1]["reasoning_content"], "why")
+
+    def test_failed_append_rolls_back_entire_batch(self):
+        self.storage.upsert_agent("agent-1", conversation_id=self.conversation_id, name="worker")
+        original = self.storage.append_agent_messages("agent-1", [{"id": "seed", "role": "user", "content": "keep"}])
+        with self.assertRaises(TypeError):
+            self.storage.append_agent_messages("agent-1", [
+                {"id": "good", "role": "assistant", "content": "partial"},
+                {"id": "bad", "role": "assistant", "content": "invalid", "meta": {"value": object()}},
+            ])
+        self.assertEqual(self.storage.get_agent_messages("agent-1"), original)
 
     def test_set_agent_status_and_soft_delete(self):
         self.storage.upsert_agent("agent-1", conversation_id=self.conversation_id, name="a1", status="running")

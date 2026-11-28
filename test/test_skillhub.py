@@ -145,6 +145,7 @@ class SkillHubTests(unittest.TestCase):
     def test_real_config_is_persisted_and_restored_on_refresh_failure(self):
         from core.config_manager import ConfigManager
         config = ConfigManager.__new__(ConfigManager)
+        config._config_load_error = None
         config.data_dir = str(self.root)
         config.config_path = str(self.root/'config.json')
         config.config = {'disabled_skills': [], 'enabled_skills': [], 'mcp_servers': []}

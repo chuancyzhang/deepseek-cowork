@@ -13,6 +13,13 @@ MAX_PACKAGE_BYTES = 50 * 1024 * 1024
 MAX_PACKAGE_FILES = 2000
 
 
+def is_valid_skill_name(skill_name):
+    name = str(skill_name or "")
+    return bool(re.fullmatch(r"[^\W_][\w-]{0,127}", name)) and not re.fullmatch(
+        r"(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])", name
+    )
+
+
 def package_path(root, relative):
     value = str(relative or "").replace("\\", "/")
     parts = value.split("/")
@@ -159,8 +166,6 @@ def write_resources(root, resources, *, workspace_dir=None, original_resources=N
             content = item.get("content")
             if not isinstance(content, str) or not content.strip():
                 raise ValueError(f"Resource has no content: {relative}")
-            if kind == "script" and relative.endswith(".py"):
-                ast.parse(content, filename=relative)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         records.append(result)
@@ -207,13 +212,21 @@ def validate_package(root, name=None, *, tool_names=None):
     for relative in references:
         if not isinstance(relative, str) or not package_path(root, relative).is_file():
             raise ValueError(f"Missing skill resource: {relative}")
+    trees = {}
+
+    def parse_module(path):
+        key = path.resolve()
+        if key not in trees:
+            trees[key] = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+        return trees[key]
+
     functions = set()
     impl = root / "impl.py"
     if impl.exists():
-        tree = ast.parse(impl.read_text(encoding="utf-8-sig"), filename=str(impl))
+        tree = parse_module(impl)
         functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     for path in root.glob("scripts/**/*.py"):
-        ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+        parse_module(path)
     if tool_names is not None:
         declared_names = {item.get("name") for item in metadata.get("tools", []) if isinstance(item, dict)}
         missing = set(metadata.get("tool_refs") or []) - set(tool_names) - functions - declared_names
@@ -231,7 +244,7 @@ def validate_package(root, name=None, *, tool_names=None):
         module = package_path(root, relative)
         if not module.is_file():
             raise ValueError(f"Tool binding file is missing: {relative}")
-        tree = ast.parse(module.read_text(encoding="utf-8-sig"), filename=relative)
+        tree = parse_module(module)
         exports = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
         exports.update(alias.asname or alias.name for node in tree.body if isinstance(node, ast.ImportFrom) for alias in node.names)
         if function not in exports:

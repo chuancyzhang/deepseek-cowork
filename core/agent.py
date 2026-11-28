@@ -7,7 +7,6 @@ import time
 import uuid
 import threading
 import hashlib
-import inspect
 import logging
 from datetime import datetime
 from core.runtime_tasks import EventSource, TaskWorker
@@ -56,7 +55,7 @@ from core.llm.responses_replay import (
     build_provider_replay_namespace,
     provider_replay_namespaces_compatible,
 )
-from core.conversation_integrity import ensure_tool_call_sequence
+from core.conversation_integrity import next_message_sequence, ensure_tool_call_sequence
 from core.filesystem_ops import (
     MAX_TEXT_FILE_BYTES,
     TextFileCodecError,
@@ -64,12 +63,6 @@ from core.filesystem_ops import (
     resolve_path,
 )
 from core.generated_images import GeneratedImageError, persist_generated_image
-
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
 
 APPEND_ONLY_LEDGER_REVISION = 1
 PROVIDER_SEMANTIC_CHUNK_TYPES = {
@@ -690,6 +683,15 @@ class LLMWorker(TaskWorker):
             self.long_context_policy["enabled"] = False
             self.run_context.pop("desktop_long_context", None)
         self.context_window_manager = None
+        self._enterprise_capability_runtime = None
+        self._enterprise_chat_audit = None
+        self._team_space_client = None
+        self._team_space_guard = None
+        self._enterprise_capability_scope = ""
+        self._runtime_stream_pipeline = None
+        self._grill_prompt_reset = False
+        self._tool_tasks_recovered = False
+        self._last_tool_exposure_signature = None
         if self.is_subagent:
             self.run_context["app_variable_access"] = False
         self.started_in_grill_mode = (
@@ -793,7 +795,6 @@ class LLMWorker(TaskWorker):
         self._bind_agent_manager()
         self._prompt_context_date = datetime.now().strftime("%Y-%m-%d")
         self._stable_system_prompt = None
-        self._last_tool_exposure_signature = None
 
     def _publish_skill_change(self, event):
         if self.skill_catalog_service is None:
@@ -821,7 +822,7 @@ class LLMWorker(TaskWorker):
             return
         event, snapshot = pending
         self.skill_manager.apply_snapshot(snapshot)
-        runtime = getattr(self, "_enterprise_capability_runtime", None)
+        runtime = self._enterprise_capability_runtime
         if runtime is not None:
             runtime.install(self.skill_manager)
         self.skill_manager.browser_run_context = self.run_context
@@ -867,60 +868,30 @@ class LLMWorker(TaskWorker):
         if self.bootstrap.active:
             self.tools = json_copy(self.bootstrap.definitions, []) + [json_copy(WAIT_TOOL_DEFINITION, {})]
             return
-        if getattr(self, "long_context_policy", {}).get("enabled"):
+        if self.long_context_policy.get("enabled"):
             from core.long_context import register_history_tools
             register_history_tools(self.skill_manager)
-        if getattr(self, "multimedia_lease", None) is not None:
+        if self.multimedia_lease is not None:
             self.multimedia_lease.register(self.skill_manager)
         for tool_name in self._selected_skill_tool_names():
             self.discovered_tool_names.add(tool_name)
-        try:
-            tools = self.skill_manager.get_tool_definitions(
-                run_mode=self._current_run_mode(),
-                discovered_tool_names=self.discovered_tool_names,
-                run_context=self.run_context,
-            )
-        except TypeError:
-            try:
-                tools = self.skill_manager.get_tool_definitions(
-                    run_mode=self._current_run_mode(),
-                    discovered_tool_names=self.discovered_tool_names,
-                )
-            except TypeError:
-                tools = self.skill_manager.get_tool_definitions()
+        tools = self.skill_manager.get_tool_definitions(
+            run_mode=self._current_run_mode(),
+            discovered_tool_names=self.discovered_tool_names,
+            run_context=self.run_context,
+        )
         filtered = []
         for item in tools:
             func = item.get("function") if isinstance(item, dict) else None
             name = func.get("name") if isinstance(func, dict) else ""
             if self.is_subagent and (name in AGENT_MANAGEMENT_TOOLS or name == "lookup_app_variable"):
                 continue
-            if name and hasattr(self.skill_manager, "is_tool_allowed"):
-                try:
-                    if not self.skill_manager.is_tool_allowed(name, self._current_run_mode()):
-                        continue
-                except Exception:
-                    pass
-            if name and hasattr(self.skill_manager, "is_tool_visible"):
-                try:
-                    if not self.skill_manager.is_tool_visible(
-                        name,
-                        self._current_run_mode(),
-                        self.discovered_tool_names,
-                        run_context=self.run_context,
-                    ):
-                        continue
-                except TypeError:
-                    try:
-                        if not self.skill_manager.is_tool_visible(
-                            name,
-                            self._current_run_mode(),
-                            self.discovered_tool_names,
-                        ):
-                            continue
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+            if name and not self.skill_manager.is_tool_allowed(name, self._current_run_mode()):
+                continue
+            if name and not self.skill_manager.is_tool_visible(
+                name, self._current_run_mode(), self.discovered_tool_names, run_context=self.run_context,
+            ):
+                continue
             filtered.append(item)
         self.tools = [item for item in filtered if item.get("function", {}).get("name") != "wait_tool"]
         self.tools.append(json_copy(WAIT_TOOL_DEFINITION, {}))
@@ -936,38 +907,16 @@ class LLMWorker(TaskWorker):
             return True
         if self.bootstrap.active:
             return name in self.bootstrap.tool_names
-        if hasattr(self.skill_manager, "is_tool_allowed"):
-            try:
-                return self.skill_manager.is_tool_allowed(name, self._current_run_mode())
-            except Exception:
-                return False
-        return True
+        return self.skill_manager.is_tool_allowed(name, self._current_run_mode())
 
     def _is_tool_visible_for_run(self, name):
         if name == "wait_tool":
             return True
         if self.bootstrap.active:
             return name in self.bootstrap.tool_names
-        if hasattr(self.skill_manager, "is_tool_visible"):
-            try:
-                return self.skill_manager.is_tool_visible(
-                    name,
-                    self._current_run_mode(),
-                    self.discovered_tool_names,
-                    run_context=self.run_context,
-                )
-            except TypeError:
-                try:
-                    return self.skill_manager.is_tool_visible(
-                        name,
-                        self._current_run_mode(),
-                        self.discovered_tool_names,
-                    )
-                except Exception:
-                    return True
-            except Exception:
-                return True
-        return True
+        return self.skill_manager.is_tool_visible(
+            name, self._current_run_mode(), self.discovered_tool_names, run_context=self.run_context,
+        )
 
     def _request_user_input_validation_error(self, args):
         return GRILLING.policy.validate_input(self, args)
@@ -1004,20 +953,17 @@ class LLMWorker(TaskWorker):
         if not (self.chat_storage and self.config_manager and self.conversation_id):
             self.agent_manager = None
             return
-        try:
-            registry = get_agent_manager_registry()
-            self.agent_manager = registry.get_session_manager(
-                self.conversation_id,
-                chat_storage=self.chat_storage,
-                config_manager=self.config_manager,
-                workspace_dir=self.workspace_dir,
-                step_signal=self.step_signal,
-                agent_state_signal=self.agent_state_signal,
-                owner_worker=self,
-                worker_factory=self._create_subagent_worker,
-            )
-        except Exception:
-            self.agent_manager = None
+        registry = get_agent_manager_registry()
+        self.agent_manager = registry.get_session_manager(
+            self.conversation_id,
+            chat_storage=self.chat_storage,
+            config_manager=self.config_manager,
+            workspace_dir=self.workspace_dir,
+            step_signal=self.step_signal,
+            agent_state_signal=self.agent_state_signal,
+            owner_worker=self,
+            worker_factory=self._create_subagent_worker,
+        )
 
     def _create_subagent_worker(
         self,
@@ -1287,7 +1233,7 @@ class LLMWorker(TaskWorker):
         self.step_signal.emit("数据安全：" + str(event.get("message") or ""))
 
     def _close_data_security(self):
-        run = getattr(self, "data_security_run", None)
+        run = self.data_security_run
         if run is not None:
             run.close()
 
@@ -1301,10 +1247,9 @@ class LLMWorker(TaskWorker):
         worker_request_id = str(getattr(self, "request_id", "") or "")
         meta = ledger_message.get("meta") if isinstance(ledger_message.get("meta"), dict) else {}
         meta = dict(meta)
-        security_run = getattr(self, "data_security_run", None)
+        security_run = self.data_security_run
         if security_run is not None and self._security_compat and ledger_message.get("role") == "assistant":
-            if getattr(self, "_security_compat", False):
-                meta["data_security_tokens"] = True
+            meta["data_security_tokens"] = True
             original = ledger_message.get("content")
             display = security_run.restore_text(original)
             if display != original:
@@ -1314,18 +1259,7 @@ class LLMWorker(TaskWorker):
         if worker_request_id:
             meta.setdefault("request_id", worker_request_id)
         if "sequence" not in meta:
-            sequences = []
-            for existing in current_messages:
-                existing_meta = existing.get("meta") if isinstance(existing, dict) else None
-                if not isinstance(existing_meta, dict):
-                    continue
-                try:
-                    existing_sequence = int(existing_meta.get("sequence"))
-                except (TypeError, ValueError):
-                    continue
-                if existing_sequence >= 0:
-                    sequences.append(existing_sequence)
-            meta["sequence"] = max(sequences, default=len(current_messages) - 1) + 1
+            meta["sequence"] = next_message_sequence(current_messages)
         if meta:
             ledger_message["meta"] = meta
         current_messages.append(ledger_message)
@@ -1405,7 +1339,7 @@ class LLMWorker(TaskWorker):
             return 0
 
     def _tag_enterprise_skill_context(self, meta):
-        scope = getattr(self, "_enterprise_capability_scope", "")
+        scope = self._enterprise_capability_scope
         if scope:
             from core.enterprise_capabilities import is_enterprise_selection
             if is_enterprise_selection(meta.get("skill_name")):
@@ -1775,7 +1709,7 @@ class LLMWorker(TaskWorker):
             store = MemoryStore(history_dir)
             soul = store.read_soul().strip()
             global_summary = store.read_summary("global").strip()
-            project = getattr(self, "memory_project_dir", "")
+            project = self.memory_project_dir
             workspace_summary = store.read_summary("workspace", project).strip() if project else ""
             if soul:
                 memory_lines.append("\n# 灵魂提示词\n" + soul)
@@ -2055,7 +1989,7 @@ class LLMWorker(TaskWorker):
             "content_hash": content_hash,
             "tools_hash": _stable_json_hash(self.tools or []),
         }
-        scope = getattr(self, "_enterprise_capability_scope", "")
+        scope = self._enterprise_capability_scope
         if scope:
             meta["enterprise_prompt_scope"] = scope
         if previous_hash:
@@ -2153,7 +2087,7 @@ class LLMWorker(TaskWorker):
 
     def _tool_exposure_observability(self):
         selected_tools = set(self._selected_skill_tool_names())
-        discovered_tools = set(getattr(self, "discovered_tool_names", set()) or [])
+        discovered_tools = set(self.discovered_tool_names or [])
         groups = {
             "core_builtin_direct": [],
             "session_selected": [],
@@ -2242,7 +2176,7 @@ class LLMWorker(TaskWorker):
             )
             for item in exposure_event.get("tools") or []
         )
-        if exposure_signature != getattr(self, "_last_tool_exposure_signature", None):
+        if exposure_signature != self._last_tool_exposure_signature:
             self._last_tool_exposure_signature = exposure_signature
             self.observability_signal.emit(exposure_event)
 
@@ -2254,13 +2188,8 @@ class LLMWorker(TaskWorker):
         prompt_cache_key,
         request_context=None,
     ):
-        parameters = inspect.signature(provider.chat_stream).parameters
-        kwargs = {"tools": tools}
-        if "prompt_cache_key" in parameters:
-            kwargs["prompt_cache_key"] = prompt_cache_key
-        if "request_context" in parameters:
-            kwargs["request_context"] = request_context or {}
-        return provider.chat_stream(messages, **kwargs)
+        return provider.chat_stream(messages, tools=tools, prompt_cache_key=prompt_cache_key,
+                                    request_context=request_context or {})
 
     def _document_review_provider(self):
         """A separate transport with the same selected model and authorization.
@@ -2281,8 +2210,8 @@ class LLMWorker(TaskWorker):
                 raise RuntimeError('空间任务目录与原会话不一致，未启动审稿。')
             provider = bind_space_provider(provider, binding,
                 self.run_context.get('selected_model_profile') or self.config_manager.get_model_profile(self.run_context.get('selected_model_id')),
-                client=getattr(self, '_team_space_client', None))
-        capability = getattr(self, '_enterprise_capability_runtime', None)
+                client=self._team_space_client)
+        capability = self._enterprise_capability_runtime
         if capability is not None:
             provider.enterprise_capability_guard = capability.check
             provider.client = provider.client.with_options(max_retries=0)
@@ -2423,7 +2352,7 @@ class LLMWorker(TaskWorker):
             raise RuntimeError(f"provider attempt journal write failed: {exc}") from exc
 
     def _capture_request_snapshot(self, protocol, params, attempt_id):
-        audit = getattr(self, "_enterprise_chat_audit", None)
+        audit = self._enterprise_chat_audit
         if audit is not None:
             try:
                 audit.capture(protocol, params, attempt_id)
@@ -2750,10 +2679,10 @@ class LLMWorker(TaskWorker):
             return self._invoke_run_tool(name, args, context)
 
     def _invoke_run_tool(self, name, args, context):
-        guard = getattr(self, "_team_space_guard", None)
+        guard = self._team_space_guard
         if guard is not None:
             guard()
-        runtime = getattr(self, "_enterprise_capability_runtime", None)
+        runtime = self._enterprise_capability_runtime
         if runtime is not None:
             runtime.check()
         from core.execution_authorization import invoke
@@ -2768,7 +2697,7 @@ class LLMWorker(TaskWorker):
         return self.skill_manager.call_tool(name, args, context=context)
 
     def _ensure_tool_tasks(self):
-        manager = getattr(self, "tool_tasks", None)
+        manager = self.tool_tasks
         if manager is None:
             # Capture the journal and identity, not mutable UI/session selection.
             journal, session_id = self.runtime_journal, self.session_id
@@ -2788,7 +2717,7 @@ class LLMWorker(TaskWorker):
 
     def _drain_tool_events(self):
         import queue
-        manager = getattr(self, "tool_tasks", None)
+        manager = self.tool_tasks
         if manager is None:
             return
         while True:
@@ -2804,7 +2733,7 @@ class LLMWorker(TaskWorker):
             getattr(self, name).emit(*args)
 
     def _close_tool_tasks(self, *_args):
-        manager = getattr(self, "tool_tasks", None)
+        manager = self.tool_tasks
         if manager is not None and not manager.closed.is_set():
             try:
                 manager.close()
@@ -2975,7 +2904,7 @@ class LLMWorker(TaskWorker):
         self._tool_delivery_receipts.clear()
 
     def _recover_tool_task_results(self, current_messages, generated_messages):
-        if getattr(self, "_tool_tasks_recovered", False):
+        if self._tool_tasks_recovered:
             return
         self._tool_tasks_recovered = True
         if self.runtime_journal is None or not self.session_id:
@@ -3079,7 +3008,7 @@ class LLMWorker(TaskWorker):
         self.runtime_journal.record_authorization(self.session_id, self.execution_authorization.run_id,
                                                  payload["tool_call_id"], payload)
         self._authorization_events[str(payload.get("tool_call_id") or "")] = dict(payload)
-        manager = getattr(self, "tool_tasks", None)
+        manager = self.tool_tasks
         if manager is not None and threading.get_ident() != manager.owner_ident:
             ToolEventSignal(manager, "observability_signal").emit(payload)
         else:
@@ -3171,14 +3100,14 @@ class LLMWorker(TaskWorker):
         try:
             self._run_main()
         finally:
-            audit = getattr(self, "_enterprise_chat_audit", None)
+            audit = self._enterprise_chat_audit
             if audit is not None:
                 try:
                     audit.finish()
                 except Exception as exc:
                     logging.getLogger(__name__).error("enterprise.chat_audit_schedule_failed reason=%s", type(exc).__name__)
             self._close_tool_tasks()
-            runtime = getattr(self, "_enterprise_capability_runtime", None)
+            runtime = self._enterprise_capability_runtime
             if runtime is not None:
                 try:
                     runtime.close()
@@ -3253,7 +3182,7 @@ class LLMWorker(TaskWorker):
                 self._enterprise_capability_runtime.install(self.skill_manager)
                 logging.getLogger(__name__).info("enterprise.capability_run_ready session=%s run=%s count=%d",
                     self.conversation_id, self.request_id, len(manifest["items"]))
-            current_messages = scope_prompt_messages(current_messages, getattr(self, "_enterprise_capability_scope", ""))
+            current_messages = scope_prompt_messages(current_messages, self._enterprise_capability_scope)
         except Exception as exc:
             if "enterprise_capabilities" in self.run_context:
                 logging.getLogger(__name__).warning("enterprise.capability_run_unavailable session=%s run=%s reason=%s",
@@ -3306,7 +3235,7 @@ class LLMWorker(TaskWorker):
                 return
             self._append_pending_guidance(current_messages, generated_messages)
 
-            if getattr(self, "_grill_prompt_reset", False):
+            if self._grill_prompt_reset:
                 grill_checkpoint_prompt_attempts = 0
                 self._grill_prompt_reset = False
             # Catalog changes are applied only between model requests.
@@ -3385,21 +3314,21 @@ class LLMWorker(TaskWorker):
                             raise RuntimeError("空间任务目录与原会话不一致，已阻止继续执行。")
                         from core.team_spaces import TeamSpaceClient
                         from core.enterprise_client import EnterpriseStore
-                        if not getattr(self, "_team_space_client", None):
+                        if not self._team_space_client:
                             self._team_space_client = TeamSpaceClient(EnterpriseStore(space_binding["data_dir"]),
                                 identity={"platform_id": space_binding["platform_id"], "member_id": space_binding["member_id"]})
                         provider = bind_space_provider(provider, space_binding,
                             self.run_context.get("selected_model_profile") or self.config_manager.get_model_profile(self.run_context.get("selected_model_id")),
                             client=self._team_space_client)
                         self._team_space_guard = provider.team_space_guard
-                    capability_runtime = getattr(self, "_enterprise_capability_runtime", None)
+                    capability_runtime = self._enterprise_capability_runtime
                     if capability_runtime is not None:
                         provider.enterprise_capability_guard = capability_runtime.check
                         # All retry attempts must pass through the scoped authorization guard.
                         provider.client = provider.client.with_options(max_retries=0)
                         provider.enterprise_replay_scope = (getattr(provider, "enterprise_replay_scope", "")
                             + ":capabilities:" + self._enterprise_capability_scope)
-                    if not hasattr(self, "_enterprise_chat_audit"):
+                    if self._enterprise_chat_audit is None:
                         from core.enterprise_chat_audit import ChatAuditCapture
                         self._enterprise_chat_audit = ChatAuditCapture(self, provider, space_binding)
                     if self.long_context_policy["enabled"] and not self.bootstrap.active:
@@ -4200,21 +4129,34 @@ class LLMWorker(TaskWorker):
                     if tool_calls:
                         # Resolve before journal identity and before any tool in the
                         # batch executes. The assistant/native replay stays original.
+                        parsed_tool_arguments = {}
+                        tool_argument_errors = {}
+                        for tool in tool_calls:
+                            raw = tool.function.arguments
+                            try:
+                                candidate = {} if raw is None or (isinstance(raw, str) and not raw.strip()) else json.loads(raw) if isinstance(raw, str) else raw
+                                if not isinstance(candidate, dict):
+                                    raise ValueError("工具参数必须是 JSON 对象")
+                                parsed_tool_arguments[str(tool.id or "")] = candidate
+                            except (ValueError, TypeError) as exc:
+                                tool_argument_errors[str(tool.id or "")] = f"工具参数无效，未执行：{exc}"
+                                parsed_tool_arguments[str(tool.id or "")] = {"_invalid_json": raw}
+                                self.observability_signal.emit({"type": "tool_arguments_invalid",
+                                    "tool_call_id": str(tool.id or ""), "name": str(tool.function.name or ""),
+                                    "run_id": self.request_id or self.turn_id, "error_type": type(exc).__name__})
                         security_args = {}
                         original_required = False
                         for security_tool in (tool_calls if self._security_compat else []):
-                            try:
-                                raw = security_tool.function.arguments
-                                candidate = json.loads(raw) if isinstance(raw, str) else raw
-                            except (ValueError, TypeError):
-                                continue  # existing invalid-JSON behavior owns this
+                            if str(security_tool.id or "") in tool_argument_errors:
+                                continue
+                            candidate = parsed_tool_arguments[str(security_tool.id or "")]
                             name = str(security_tool.function.name or "")
                             record = self.skill_manager.get_tool_record(name) or {}
                             trusted = record.get("source_kind") == "core_builtin"
                             resolved = self.data_security_run.resolve_tool_arguments(name, candidate, trusted=trusted)
                             if resolved["status"] != "complete":
                                 original_required = True
-                            security_args[str(security_tool.id)] = resolved["arguments"]
+                            security_args[str(security_tool.id or "")] = resolved["arguments"]
                         if original_required:
                             already_raw = self.data_security_run.raw_mode
                             self.data_security_run.use_original()
@@ -4247,17 +4189,7 @@ class LLMWorker(TaskWorker):
                         prepared_tool_executions = {}
                         for tool in tool_calls:
                             prepared_name = str(tool.function.name or "").strip()
-                            prepared_raw_args = tool.function.arguments
-                            if isinstance(prepared_raw_args, dict):
-                                prepared_args = prepared_raw_args
-                            elif isinstance(prepared_raw_args, str) and prepared_raw_args.strip():
-                                try:
-                                    prepared_args = json.loads(prepared_raw_args)
-                                except Exception:
-                                    prepared_args = {"_invalid_json": prepared_raw_args}
-                            else:
-                                prepared_args = {}
-                            prepared_args = security_args.get(str(tool.id), prepared_args)
+                            prepared_args = security_args.get(str(tool.id or ""), parsed_tool_arguments[str(tool.id or "")])
                             execution_id, args_hash = self._tool_execution_identity(
                                 tool,
                                 prepared_args,
@@ -4307,53 +4239,50 @@ class LLMWorker(TaskWorker):
                                         "Tool execution journal is unavailable; the tool batch was not started."
                                     )
                         # --- Loop Detection ---
-                        try:
-                            current_signature = json.dumps(
-                                sorted([{"name": t.function.name, "args": json.loads(t.function.arguments)} for t in tool_calls], key=lambda x: x['name']),
-                                sort_keys=True
+                        current_signature = json.dumps(
+                            sorted([{"name": str(t.function.name or ""), "args": parsed_tool_arguments[str(t.id or "")]} for t in tool_calls], key=lambda x: x['name']),
+                            sort_keys=True
+                        )
+                        if waiting_for_tools:
+                            repetition_count = 0
+                            last_tool_signature = None
+                        elif current_signature == last_tool_signature:
+                            repetition_count += 1
+                        else:
+                            repetition_count = 0
+                            last_tool_signature = current_signature
+
+                        if repetition_count >= 2: # Same toolset called 3 times in a row
+                            repeated_tools = ", ".join(
+                                sorted({str(t.function.name or "unknown") for t in tool_calls})
                             )
-                            if waiting_for_tools:
-                                repetition_count = 0
-                                last_tool_signature = None
-                            elif current_signature == last_tool_signature:
-                                repetition_count += 1
-                            else:
-                                repetition_count = 0
-                                last_tool_signature = current_signature
-                                
-                            if repetition_count >= 2: # Same toolset called 3 times in a row
-                                repeated_tools = ", ".join(
-                                    sorted({str(t.function.name or "unknown") for t in tool_calls})
-                                )
-                                removed_count = self._discard_incomplete_tool_round(
-                                    current_messages,
-                                    generated_messages,
-                                    tool_round_context,
-                                )
-                                tool_round_context = None
-                                if tool_failure_repair_count:
-                                    self.observability_signal.emit({
-                                        "type": "tool_repair_budget_exhausted",
-                                        "repeated_tools": repeated_tools,
-                                        "removed_message_count": removed_count,
-                                        "timestamp": time.time(),
-                                    })
-                                    self.finished_signal.emit({
-                                        "error": "Tool repair budget exhausted.",
-                                        "generated_messages": generated_messages,
-                                        "turn_id": self.turn_id,
-                                        "request_id": self.request_id,
-                                    })
-                                    return
-                                self.step_signal.emit("系统: 🛑 检测到循环 (重复的工具调用)。自动停止。")
-                                final_content = (
-                                    "⚠️ 操作已停止: 检测到连续 3 次重复的工具调用"
-                                    f"（{repeated_tools or 'unknown'}）。请查看上方工具结果，"
-                                    "或调整请求后重新发送。"
-                                )
-                                break
-                        except Exception as e:
-                            print(f"Loop detection error: {e}")
+                            removed_count = self._discard_incomplete_tool_round(
+                                current_messages,
+                                generated_messages,
+                                tool_round_context,
+                            )
+                            tool_round_context = None
+                            if tool_failure_repair_count:
+                                self.observability_signal.emit({
+                                    "type": "tool_repair_budget_exhausted",
+                                    "repeated_tools": repeated_tools,
+                                    "removed_message_count": removed_count,
+                                    "timestamp": time.time(),
+                                })
+                                self.finished_signal.emit({
+                                    "error": "Tool repair budget exhausted.",
+                                    "generated_messages": generated_messages,
+                                    "turn_id": self.turn_id,
+                                    "request_id": self.request_id,
+                                })
+                                return
+                            self.step_signal.emit("系统: 🛑 检测到循环 (重复的工具调用)。自动停止。")
+                            final_content = (
+                                "⚠️ 操作已停止: 检测到连续 3 次重复的工具调用"
+                                f"（{repeated_tools or 'unknown'}）。请查看上方工具结果，"
+                                "或调整请求后重新发送。"
+                            )
+                            break
                         # ----------------------
 
                         self.step_signal.emit(f"Tool Calls Detected: {len(tool_calls)}")
@@ -4372,18 +4301,8 @@ class LLMWorker(TaskWorker):
                             if self.is_stopped: break
                             
                             name = str(tool.function.name or "").strip()
-                            raw_args = tool.function.arguments
-                            args = {}
-                            if isinstance(raw_args, dict):
-                                args = raw_args
-                            elif isinstance(raw_args, str) and raw_args.strip():
-                                try:
-                                    args = json.loads(raw_args)
-                                except Exception:
-                                    args = {}
-                                    self.output_signal.emit(f"Tool Args Parse Fallback: {name} received invalid JSON arguments.")
-                            execution_info = prepared_tool_executions.get(str(tool.id or ""), {})
-                            args = security_args.get(str(tool.id), args)
+                            execution_info = prepared_tool_executions[str(tool.id or "")]
+                            args = security_args.get(str(tool.id or ""), parsed_tool_arguments[str(tool.id or "")])
                             execution_id = str(execution_info.get("execution_id") or "")
                             execution_policy = execution_info.get("policy") or self._tool_execution_policy(name, args)
                             existing_execution = execution_info.get("existing")
@@ -4443,7 +4362,7 @@ class LLMWorker(TaskWorker):
                                 "task_automation_service": getattr(self.config_manager, "task_automation_service", None),
                                 "skill_manager": self.skill_manager,
                                 "chat_storage": self.chat_storage,
-                                "team_space_client": getattr(self, "_team_space_client", None),
+                                "team_space_client": self._team_space_client,
                                 "agent_manager": self.agent_manager,
                                 "file_state": self.file_state_cache,
                                 "agent_state_signal": self.agent_state_signal,
@@ -4476,6 +4395,9 @@ class LLMWorker(TaskWorker):
                                     "status": "invalid_tool_call",
                                     "content": "模型返回了缺少函数名的工具调用，已跳过执行。",
                                 }
+                            elif str(tool.id or "") in tool_argument_errors:
+                                result = {"error": tool_argument_errors[str(tool.id or "")], "blocked_tool": name,
+                                          "status": "invalid_tool_call", "content": "请修正工具参数后重新调用。"}
                             elif unknown_tool_execution:
                                 result = {
                                     "error": (
@@ -4630,7 +4552,7 @@ class LLMWorker(TaskWorker):
                                 if not is_pending_tool_result(result):
                                     task = self._ensure_tool_tasks().tasks.get(execution_id)
                                     result = self._apply_tool_result_effects(name, args, result, task)
-                                    if getattr(self, "_grill_prompt_reset", False):
+                                    if self._grill_prompt_reset:
                                         grill_checkpoint_prompt_attempts = 0
                                         self._grill_prompt_reset = False
                             end_tool_time = time.time()

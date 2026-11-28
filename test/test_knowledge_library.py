@@ -379,6 +379,15 @@ class MultiSourceKnowledgeTests(unittest.TestCase):
         self.lexiang.call(self.lexiang.snapshot(), "whoami", {})
         self.assertEqual(len(self.remote.calls), count + 2)
 
+    def test_cloud_call_decrypts_once_and_rechecks_identity_without_secrets(self):
+        from unittest.mock import patch
+        scope = self.tencent.snapshot()
+        with patch.object(self.tencent, "identity", wraps=self.tencent.identity) as identity, \
+                patch.object(self.store.protector, "unprotect", wraps=self.store.protector.unprotect) as decrypt:
+            self.tencent.call(scope, "get_content", {"file_id": "doc"})
+        self.assertEqual([call.kwargs.get("secret", False) for call in identity.call_args_list], [True, False])
+        decrypt.assert_called_once()
+
     def test_cloud_cache_refresh_failure_and_late_read_invalidation(self):
         scope = self.tencent.snapshot()
         self.tencent.catalog(scope)

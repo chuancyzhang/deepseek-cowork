@@ -5,6 +5,7 @@ import re
 import uuid
 import time
 import copy
+import logging
 from contextlib import contextmanager
 from .env_utils import get_app_data_dir, get_base_dir
 from .llm.deepseek import (
@@ -275,6 +276,7 @@ class ConfigManager:
         self._loaded_config_keys = set()
         self._save_batch_depth = 0
         self._save_pending = False
+        self._config_load_error = None
         
         # Migration: Check if config exists in old location (base_dir)
         base_dir = get_base_dir()
@@ -327,7 +329,6 @@ class ConfigManager:
             },
         }
         self.load_config()
-        self._apply_migrations()
 
     def get_god_mode(self):
         return self.config.get("god_mode", False)
@@ -381,25 +382,42 @@ class ConfigManager:
 
     @contextmanager
     def batch_save(self):
+        outermost = self._save_batch_depth == 0
+        previous = copy.deepcopy(self.config) if outermost else None
         self._save_batch_depth += 1
         try:
             yield self
-        finally:
-            self._save_batch_depth = max(0, self._save_batch_depth - 1)
-            if self._save_batch_depth == 0 and self._save_pending:
-                self._save_pending = False
+            if outermost and self._save_pending:
                 self._write_config()
+        except BaseException:
+            if outermost:
+                self.config = previous
+            raise
+        finally:
+            self._save_batch_depth -= 1
+            if outermost:
+                self._save_pending = False
 
     def load_config(self):
+        self._config_load_error = None
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    if isinstance(data, dict):
-                        self._loaded_config_keys = set(data.keys())
+                    if not isinstance(data, dict):
+                        raise ValueError("配置文件必须是 JSON 对象")
+                    self._loaded_config_keys = set(data.keys())
                     self.config.update(data)
-            except Exception as e:
-                print(f"Error loading config: {e}")
+            except (OSError, ValueError) as exc:
+                self._config_load_error = exc
+                logging.getLogger(__name__).exception("config_load_failed path=%s; original file retained", self.config_path)
+                return
+        self._apply_migrations()
+        from .connection_retirement import register_explicit_refs, RetirementError
+        try:
+            register_explicit_refs(self.data_dir, self.config.get("mcp_servers") or [])
+        except RetirementError:
+            logging.getLogger(__name__).exception("config_mcp_refs_unavailable; listing remains available for repair")
 
     def _apply_migrations(self):
         updated = False
@@ -462,17 +480,17 @@ class ConfigManager:
             self.config.pop("automation_tasks", None)
             self.config.pop("automation_run_history", None)
             updated = True
-        normalized_favorites = self._normalize_favorites(self.config.get("favorites"))
+        normalized_favorites = normalize_favorites(self.config.get("favorites"))
         if normalized_favorites != self.config.get("favorites"):
             self.config["favorites"] = normalized_favorites
             updated = True
-        normalized_favorite_history = self._normalize_favorite_run_history(
+        normalized_favorite_history = normalize_favorite_run_history(
             self.config.get("favorite_run_history")
         )
         if normalized_favorite_history != self.config.get("favorite_run_history"):
             self.config["favorite_run_history"] = normalized_favorite_history
             updated = True
-        normalized_mcp_servers = self._normalize_mcp_servers(self.config.get("mcp_servers"))
+        normalized_mcp_servers = normalize_mcp_servers(self.config.get("mcp_servers"))
         if normalized_mcp_servers != self.config.get("mcp_servers"):
             self.config["mcp_servers"] = normalized_mcp_servers
             updated = True
@@ -629,24 +647,6 @@ class ConfigManager:
             if entry:
                 normalized.append(entry)
         return normalized
-
-    def _normalize_favorites(self, value):
-        return normalize_favorites(value)
-
-    def _normalize_favorite_run_history(self, value):
-        return normalize_favorite_run_history(value)
-
-    def _normalize_mcp_env_or_headers(self, value):
-        return normalize_mcp_env_or_headers(value)
-
-    def _normalize_mcp_string_list(self, value):
-        return normalize_mcp_string_list(value)
-
-    def _normalize_mcp_server(self, server, index=0, used_ids=None):
-        return normalize_mcp_server(server, index=index, used_ids=used_ids)
-
-    def _normalize_mcp_servers(self, value):
-        return normalize_mcp_servers(value)
 
     def _normalize_skill_config_values(self, value):
         if not isinstance(value, dict):
@@ -880,52 +880,6 @@ class ConfigManager:
             "models": normalized_models,
         }
 
-    def _normalize_model_provider_configs(self, value):
-        defaults = self._default_model_provider_configs()
-        source = value if isinstance(value, dict) else {}
-        provider_configs = {}
-        for provider_id in ("openai", "anthropic"):
-            provider_configs[provider_id] = self._normalize_provider_config(
-                provider_id,
-                source.get(provider_id) if isinstance(source.get(provider_id), dict) else defaults.get(provider_id),
-            )
-
-        legacy_provider = str(self.config.get("llm_provider") or "openai").strip().lower()
-        if legacy_provider not in provider_configs:
-            legacy_provider = "openai"
-        if not isinstance(value, dict) or not value:
-            legacy_model = self.config.get("model_name", DEFAULT_DEEPSEEK_MODEL)
-            if should_migrate_legacy_model(legacy_model):
-                legacy_model = DEFAULT_DEEPSEEK_MODEL
-            provider_configs[legacy_provider]["api_key"] = str(self.config.get("api_key", "") or "")
-            provider_configs[legacy_provider]["base_url"] = str(
-                self.config.get(
-                    "base_url",
-                    DEFAULT_DEEPSEEK_BASE_URL if legacy_provider == "openai" else DEFAULT_ANTHROPIC_BASE_URL,
-                )
-                or ""
-            )
-            provider_configs[legacy_provider]["models"] = [
-                self._normalize_model_entry(
-                    legacy_provider,
-                    {
-                        "id": f"{legacy_provider}-default",
-                        "display_name": legacy_model,
-                        "model_name": legacy_model,
-                        "deepseek_thinking_enabled": self.config.get(
-                            "deepseek_thinking_enabled",
-                            DEFAULT_DEEPSEEK_THINKING_ENABLED,
-                        ),
-                        "deepseek_reasoning_effort": self.config.get(
-                            "deepseek_reasoning_effort",
-                            DEFAULT_DEEPSEEK_REASONING_EFFORT,
-                        ),
-                    },
-                    0,
-                    base_url=provider_configs[legacy_provider]["base_url"],
-                )
-            ]
-        return provider_configs
 
     def _channels_from_provider_configs(self, provider_configs, include_missing=True):
         defaults = self._default_model_provider_configs()
@@ -1105,12 +1059,7 @@ class ConfigManager:
         return None
 
     def get_model_channels(self):
-        channels = self._normalize_model_channels(self.config.get("model_channels"))
-        if channels != self.config.get("model_channels"):
-            self.config["model_channels"] = channels
-            self.config["model_provider_configs"] = self._provider_configs_from_channels(channels)
-            self.save_config()
-        return json.loads(json.dumps(channels, ensure_ascii=False))
+        return copy.deepcopy(self.config.get("model_channels", []))
 
     def set_model_channels(self, channels, selected_model_id=None):
         normalized_channels = self._normalize_model_channels(channels)
@@ -1125,11 +1074,7 @@ class ConfigManager:
         self.save_config()
 
     def get_model_provider_configs(self):
-        configs = self._provider_configs_from_channels(self.get_model_channels())
-        if configs != self.config.get("model_provider_configs"):
-            self.config["model_provider_configs"] = configs
-            self.save_config()
-        return json.loads(json.dumps(configs, ensure_ascii=False))
+        return copy.deepcopy(self.config.get("model_provider_configs", {}))
 
     def set_model_provider_configs(self, provider_configs, selected_model_id=None):
         self.set_model_channels(
@@ -1349,11 +1294,7 @@ class ConfigManager:
         return changed
 
     def get_agent_profiles(self):
-        profiles = self._normalize_agent_profiles(self.config.get("agent_profiles"))
-        if profiles != self.config.get("agent_profiles"):
-            self.config["agent_profiles"] = profiles
-            self.save_config()
-        return json.loads(json.dumps(profiles, ensure_ascii=False))
+        return copy.deepcopy(self.config.get("agent_profiles", []))
 
     def set_agent_profiles(self, profiles):
         normalized = self._normalize_agent_profiles(profiles)
@@ -1376,14 +1317,10 @@ class ConfigManager:
         return None
 
     def get_favorites(self):
-        favorites = self._normalize_favorites(self.config.get("favorites"))
-        if favorites != self.config.get("favorites"):
-            self.config["favorites"] = favorites
-            self.save_config()
-        return json.loads(json.dumps(favorites, ensure_ascii=False))
+        return copy.deepcopy(self.config.get("favorites", []))
 
     def set_favorites(self, favorites):
-        normalized = self._normalize_favorites(favorites)
+        normalized = normalize_favorites(favorites)
         if normalized == self.config.get("favorites"):
             return
         self.config["favorites"] = normalized
@@ -1412,18 +1349,14 @@ class ConfigManager:
                 break
         else:
             favorites.insert(0, normalized)
-        self.set_favorites(favorites)
-        return self.get_favorite(identifier)
+        self._set_config_value("favorites", favorites)
+        return copy.deepcopy(normalized)
 
     def get_favorite_run_history(self):
-        history = self._normalize_favorite_run_history(self.config.get("favorite_run_history"))
-        if history != self.config.get("favorite_run_history"):
-            self.config["favorite_run_history"] = history
-            self.save_config()
-        return json.loads(json.dumps(history, ensure_ascii=False))
+        return copy.deepcopy(self.config.get("favorite_run_history", []))
 
     def set_favorite_run_history(self, history):
-        normalized = self._normalize_favorite_run_history(history)
+        normalized = normalize_favorite_run_history(history)
         if normalized == self.config.get("favorite_run_history"):
             return
         self.config["favorite_run_history"] = normalized
@@ -1432,19 +1365,16 @@ class ConfigManager:
     def append_favorite_run_history(self, record):
         history = self.get_favorite_run_history()
         history.insert(0, record)
-        normalized = self._normalize_favorite_run_history(history)[:FAVORITE_RUN_HISTORY_LIMIT]
+        normalized = normalize_favorite_run_history(history)[:FAVORITE_RUN_HISTORY_LIMIT]
         self.config["favorite_run_history"] = normalized
         self.save_config()
         return normalized[0] if normalized else None
 
     def get_projects(self, include_hidden=True):
-        projects = self._normalize_projects(self.config.get("projects"))
-        if projects != self.config.get("projects"):
-            self.config["projects"] = projects
-            self.save_config()
+        projects = self.config.get("projects", [])
         if not include_hidden:
             projects = [item for item in projects if not item.get("archived") and not item.get("hidden")]
-        return json.loads(json.dumps(projects, ensure_ascii=False))
+        return copy.deepcopy(projects)
 
     def set_projects(self, projects, *, strict=False):
         normalized = self._normalize_projects(projects)
@@ -1462,17 +1392,7 @@ class ConfigManager:
             self.save_config()
 
     def get_mcp_servers(self):
-        from .connection_retirement import register_explicit_refs, RetirementError
-        try:
-            register_explicit_refs(self.data_dir, self.config.get("mcp_servers") or [])
-        except RetirementError:
-            # Listing remains available for repair; discovery/calls report the error.
-            pass
-        servers = self._normalize_mcp_servers(self.config.get("mcp_servers"))
-        if servers != self.config.get("mcp_servers"):
-            self.config["mcp_servers"] = servers
-            self.save_config()
-        return json.loads(json.dumps(servers, ensure_ascii=False))
+        return copy.deepcopy(self.config.get("mcp_servers", []))
 
     def prepare_mcp_reconfiguration(self, server_id):
         from .connection_retirement import prepare_mcp_reconfiguration
@@ -1482,7 +1402,9 @@ class ConfigManager:
         from .connection_retirement import register_explicit_refs
         register_explicit_refs(self.data_dir, self.config.get("mcp_servers") or [])
         register_explicit_refs(self.data_dir, servers or [])
-        normalized = self._normalize_mcp_servers(servers)
+        self._set_normalized_mcp_servers(normalize_mcp_servers(servers))
+
+    def _set_normalized_mcp_servers(self, normalized):
         if normalized == self.config.get("mcp_servers"):
             return
         previous = {s.get("id"): s for s in self.config.get("mcp_servers", [])}
@@ -1497,7 +1419,9 @@ class ConfigManager:
 
     def upsert_mcp_servers(self, servers):
         current = self.get_mcp_servers()
-        incoming = self._normalize_mcp_servers(servers)
+        from .connection_retirement import register_explicit_refs
+        register_explicit_refs(self.data_dir, current)
+        incoming = normalize_mcp_servers(servers)
         by_id = {str(server.get("id") or "").strip(): index for index, server in enumerate(current)}
         added = 0
         replaced = 0
@@ -1509,15 +1433,12 @@ class ConfigManager:
             else:
                 current.append(server)
                 added += 1
-        self.set_mcp_servers(current)
-        return {"added": added, "replaced": replaced, "servers": self.get_mcp_servers()}
+        register_explicit_refs(self.data_dir, current)
+        self._set_normalized_mcp_servers(current)
+        return {"added": added, "replaced": replaced, "servers": copy.deepcopy(current)}
 
     def get_skill_configs(self):
-        configs = self._normalize_skill_configs(self.config.get("skill_configs"))
-        if configs != self.config.get("skill_configs"):
-            self.config["skill_configs"] = configs
-            self.save_config()
-        return json.loads(json.dumps(configs, ensure_ascii=False))
+        return copy.deepcopy(self.config.get("skill_configs", {}))
 
     def get_skill_config(self, skill_name):
         name = str(skill_name or "").strip()
@@ -1666,14 +1587,11 @@ class ConfigManager:
         self._write_config()
 
     def _write_config(self):
-        try:
-            os.makedirs(self.data_dir, exist_ok=True)
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(self.config, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            print(f"Error saving config: {e}")
+        self._write_config_or_raise()
 
     def _write_config_or_raise(self):
+        if self._config_load_error is not None:
+            raise RuntimeError(f"配置读取失败，原文件已保留：{self.config_path}。请修复文件后重新加载。") from self._config_load_error
         os.makedirs(self.data_dir, exist_ok=True)
         temp_path = f"{self.config_path}.{uuid.uuid4().hex}.tmp"
         try:
@@ -1764,7 +1682,7 @@ class ConfigManager:
             enabled_skills.discard(skill_name)
         self.config["disabled_skills"] = list(disabled)
         self.config["enabled_skills"] = list(enabled_skills)
-        managed_servers = self._normalize_mcp_servers(self.config.get("mcp_servers"))
+        managed_servers = self.get_mcp_servers()
         managed_updated = False
         for server in managed_servers:
             if str(server.get("source_skill") or "").strip() != str(skill_name or "").strip():

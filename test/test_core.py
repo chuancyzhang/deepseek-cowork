@@ -92,6 +92,57 @@ class TestConfigManager(unittest.TestCase):
 
         self.assertEqual(write_mock.call_count, 1)
 
+    def test_batch_save_failure_rolls_back_without_writing(self):
+        cm = self._create_config_manager()
+        previous = copy.deepcopy(cm.config)
+        with patch.object(cm, "_write_config") as write_mock:
+            with self.assertRaisesRegex(ValueError, "invalid"):
+                with cm.batch_save():
+                    cm.set("api_key", "changed")
+                    with cm.batch_save():
+                        cm.set_god_mode(True)
+                        raise ValueError("invalid")
+        write_mock.assert_not_called()
+        self.assertEqual(cm.config, previous)
+        self.assertFalse(cm._save_pending)
+        self.assertEqual(cm._save_batch_depth, 0)
+
+    def test_batch_commit_failure_rolls_back(self):
+        cm = self._create_config_manager()
+        previous = copy.deepcopy(cm.config)
+        with patch.object(cm, "_write_config", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                with cm.batch_save():
+                    cm.set_god_mode(True)
+        self.assertEqual(cm.config, previous)
+        self.assertFalse(cm._save_pending)
+
+    def test_corrupt_config_is_not_replaced_by_defaults(self):
+        for original in ("{invalid", "[]"):
+            with self.subTest(original=original):
+                with open(self.config_file, "w", encoding="utf-8") as handle:
+                    handle.write(original)
+                cm = self._create_config_manager()
+                with self.assertRaisesRegex(RuntimeError, "配置读取失败"):
+                    cm.set_god_mode(True)
+                with open(self.config_file, encoding="utf-8") as handle:
+                    self.assertEqual(handle.read(), original)
+
+    def test_desktop_getters_do_not_copy_full_config_or_write(self):
+        from core.desktop_config import DesktopConfigManager
+        with patch("core.config_manager.get_app_data_dir", return_value=self.temp_dir), \
+             patch("core.config_manager.get_base_dir", return_value=self.temp_dir):
+            cm = DesktopConfigManager()
+        original = copy.deepcopy
+        with patch("core.desktop_config.copy.deepcopy", wraps=original) as deepcopy_mock, \
+             patch.object(cm, "save_config") as save_mock:
+            for read in (cm.get_model_channels, cm.get_model_provider_configs, cm.get_projects,
+                         cm.get_favorites, cm.get_agent_profiles, cm.get_mcp_servers,
+                         cm.get_favorite_run_history, cm.get_skill_configs):
+                read()
+        save_mock.assert_not_called()
+        self.assertFalse(any(call.args[0] is cm.config for call in deepcopy_mock.call_args_list))
+
     def test_setters_skip_writes_when_values_do_not_change(self):
         cm = self._create_config_manager()
 
@@ -836,6 +887,18 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(stored[0]["args"], ["-y", "mcp-showdoc"])
         self.assertEqual(stored[1]["transport"], "streamable_http")
 
+    def test_upsert_preserves_retirement_of_replaced_legacy_connection(self):
+        from core.connection_retirement import pending
+        cm = self._create_config_manager()
+        old = {"id": "legacy", "name": "Legacy", "enabled": False, "transport": "stdio",
+               "command": "python", "connection_ref": "retired-account"}
+        # A previously unavailable retirement journal can leave a loaded legacy
+        # reference unregistered until this explicit save retries the operation.
+        cm.config["mcp_servers"] = [old]
+        self.assertIsNone(pending(cm.data_dir, "mcp:legacy"))
+        cm.upsert_mcp_servers([{key: value for key, value in old.items() if key != "connection_ref"}])
+        self.assertEqual(pending(cm.data_dir, "mcp:legacy")["stage"], "reconfigure")
+
     def test_parse_mcp_servers_json_supports_named_mcpservers(self):
         payload = parse_mcp_servers_json(
             """
@@ -984,7 +1047,7 @@ class TestConfigManager(unittest.TestCase):
         calls = {}
 
         class FakeAsyncClient:
-            def __init__(self, headers=None, follow_redirects=None, timeout=None):
+            def __init__(self, headers=None, follow_redirects=None, timeout=None, trust_env=True):
                 calls["client_init"] = {
                     "headers": headers,
                     "follow_redirects": follow_redirects,
@@ -1112,20 +1175,11 @@ class TestSkillManager(unittest.TestCase):
         with open(os.path.join(skill_path, "impl.py"), "w") as f:
             f.write("def test_func():\n    return 'hello'")
             
-        # Patch the skills_dirs detection
-        with patch.object(SkillManager, '__init__', return_value=None) as mock_init:
-            sm = SkillManager()
-            sm.skills_dirs = [self.skills_dir]
-            sm.tools = {}
-            sm.tool_definitions = []
-            sm.skill_prompts = []
-            sm.config_manager = None
-            
-            # Call load_skills directly
-            SkillManager.load_skills(sm)
-            
-            self.assertIn("test_func", sm.tools)
-            self.assertEqual(sm.tools["test_func"](), "hello")
+        sm = SkillManager(auto_load=False, load_mcp_tools=False)
+        sm.skills_dirs = [self.skills_dir]
+        sm.load_skills()
+        self.assertIn("test_func", sm.tools)
+        self.assertEqual(sm.tools["test_func"](), "hello")
 
 class TestInteractionBridge(unittest.TestCase):
     def test_bridge_singleton(self):
@@ -1338,6 +1392,12 @@ class _DaemonConfigStub:
 
 
 class _PromptSkillManagerStub:
+    def builtin_skill_catalog(self, available_tool_names, run_context=None):
+        return []
+
+    def select_builtin_skill_prompts(self, task, available_tool_names, run_context=None):
+        return []
+
     def builtin_skill_catalog_prompt(self, *args, **kwargs):
         return ""
 
@@ -1355,6 +1415,12 @@ class _PromptSkillManagerStub:
         return None
     def get_skill_of_tool(self, _tool_name):
         return None
+
+    def is_tool_allowed(self, name, run_mode):
+        return True
+
+    def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+        return True
 
 class TestInteractionService(unittest.TestCase):
     def setUp(self):
@@ -1985,6 +2051,67 @@ class TestDaemonState(unittest.TestCase):
 
 
 class TestAgentSystemPrompt(unittest.TestCase):
+    def test_tool_arguments_parse_once_and_invalid_calls_close_without_execution(self):
+        from core.llm.providers import LLMProvider
+
+        class Skills(_PromptSkillManagerStub):
+            def __init__(self):
+                self.calls = []
+            def check_for_updates(self):
+                return False
+            def get_tool_record(self, name):
+                return {"source_kind": "core_builtin", "read_only": True}
+            def call_tool(self, name, args, context=None):
+                self.calls.append((name, args))
+                return "read result"
+
+        class Provider(LLMProvider):
+            provider_name = "fixture"
+            model_name = "fixture"
+            base_url = ""
+            thinking_enabled = False
+            def __init__(self, raw, call_id):
+                self.raw, self.call_id, self.calls = raw, call_id, 0
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield {"type": "tool_call", "index": 0, "id": self.call_id,
+                           "function": {"name": "read_file", "arguments": self.raw}}
+                else:
+                    yield {"type": "content", "content": "done"}
+
+        cases = [(raw, valid, "argument-call") for raw, valid in [
+            (' {"path": "sample.txt"} ', True), ('', True), (' \n\t ', True),
+            ('{"path":', False), ('[1]', False), ('false', False), ('null', False), ('""', False),
+        ]] + [('{}', False, None)]
+        for raw, valid, call_id in cases:
+            with self.subTest(raw=raw, call_id=call_id), tempfile.TemporaryDirectory() as directory:
+                manager, provider, finished = Skills(), Provider(raw, call_id), []
+                with patch("core.agent.SkillManager", return_value=manager), \
+                     patch("core.agent.LLMFactory.create_provider", return_value=provider):
+                    worker = LLMWorker([{"role": "user", "content": "read"}],
+                        _DaemonConfigStub(directory, values={"api_key": "test-key"}), workspace_dir=directory,
+                        session_id="arguments", request_id="run", turn_id="turn", run_context={"mode": RUN_MODE_EXECUTION})
+                    worker.finished_signal.subscribe(finished.append)
+                    with patch("core.agent.json.loads", wraps=json.loads) as parse:
+                        worker.run()
+                if call_id is None:
+                    self.assertIn("缺少 tool_call_id", finished[0]["error"])
+                    self.assertEqual(manager.calls, [])
+                    self.assertFalse(any(message.get("tool_calls") for message in finished[0]["generated_messages"]))
+                    continue
+                self.assertEqual(sum(call.args[0] == raw for call in parse.call_args_list), int(bool(raw.strip())))
+                self.assertNotIn("error", finished[0])
+                expected_args = {"path": "sample.txt"} if raw.strip() else {}
+                self.assertEqual(manager.calls, [("read_file", expected_args)] if valid else [])
+                generated = finished[0]["generated_messages"]
+                assistant = next(message for message in generated if message.get("tool_calls"))
+                self.assertEqual(assistant["tool_calls"][0]["function"]["arguments"], raw)
+                result = next(message for message in generated if message.get("role") == "tool")
+                self.assertEqual(result["tool_call_id"], "argument-call")
+                if not valid:
+                    self.assertEqual(result["result_obj"]["status"], "invalid_tool_call")
+
     def test_permission_context_does_not_rewrite_stable_prefix_or_tool_definitions(self):
         from core.execution_authorization import ExecutionAuthorization
         with tempfile.TemporaryDirectory() as directory:
@@ -2455,6 +2582,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
 
             worker.skill_manager = SkillManagerStub()
             worker.run_context["selected_skill_names"] = ["browser-automation"]
+            worker.run_context["browser_backend"] = {"backend": "external"}
             worker.discovered_tool_names = {"browser_skill_cli"}
             worker.tools = [
                 {"type": "function", "function": {"name": "bash"}},
@@ -2478,7 +2606,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
     def test_dynamic_status_is_after_stable_policy(self):
         temp_dir = tempfile.mkdtemp()
         try:
-            worker = LLMWorker.__new__(LLMWorker)
+            worker = self._build_prompt_worker(temp_dir)
             from core.execution_authorization import ExecutionAuthorization
             worker.execution_authorization = ExecutionAuthorization("prompt", "run", True, "")
             worker.workspace_dir = temp_dir
@@ -2503,7 +2631,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
     def test_system_prompt_describes_tool_layers_and_document_boundaries(self):
         temp_dir = tempfile.mkdtemp()
         try:
-            worker = LLMWorker.__new__(LLMWorker)
+            worker = self._build_prompt_worker(temp_dir)
             from core.execution_authorization import ExecutionAuthorization
             worker.execution_authorization = ExecutionAuthorization("prompt", "run", True, "")
             worker.workspace_dir = temp_dir
@@ -2708,7 +2836,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 self.assertEqual(next(m for m in replay_wire if m.get("tool_calls"))["reasoning_content"], "")
 
     def test_tool_result_is_kept_when_final_journal_write_fails(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 self.calls = []
 
@@ -2744,6 +2872,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 self.calls.append((name, args))
                 return {"status": "ok", "content": f"result-{len(self.calls)}"}
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -2753,7 +2887,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             requires_responses_replay = False
             requires_deepseek_responses_replay = False
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 yield {
                     "type": "tool_call",
                     "index": 0,
@@ -2810,7 +2944,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
     def test_provider_attempt_persists_request_ids_response_id_and_terminal(self):
         provider_calls = []
 
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def get_tool_definitions(self, *args, **kwargs):
                 return []
 
@@ -2828,6 +2962,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
 
             def get_skill_of_tool(self, name):
                 return ""
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
 
         class _ProviderStub:
             provider_name = "stub"
@@ -2919,6 +3059,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     "capture_request",
                     "enterprise_questions",
                     "enterprise_accepted",
+                    "chat_audit_version",
                 },
             )
             self.assertEqual(provider_calls[0]["request_context"]["enterprise_questions"], [])
@@ -2927,7 +3068,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_responses_without_actionable_output_does_not_create_second_request(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def get_tool_definitions(self, *args, **kwargs):
                 return []
 
@@ -2946,6 +3087,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def get_skill_of_tool(self, name):
                 return ""
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -2957,7 +3104,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def __init__(self):
                 self.call_count = 0
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.call_count += 1
                 yield {
                     "type": "response_items",
@@ -3003,7 +3150,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_repeated_tool_signature_stops_on_third_model_request(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 self.call_count = 0
 
@@ -3029,13 +3176,19 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 self.call_count += 1
                 return {"status": "ok", "content": f"result {self.call_count}"}
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
             base_url = ""
             thinking_enabled = False
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 yield {
                     "type": "tool_call",
                     "index": 0,
@@ -3073,7 +3226,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tool_execution_exception_is_persisted_as_explicit_tool_result(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 self.call_count = 0
 
@@ -3102,6 +3255,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 self.call_count += 1
                 raise RuntimeError("工具后端不可用")
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -3111,7 +3270,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def __init__(self):
                 self.requests = []
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.requests.append(messages)
                 if len(self.requests) == 1:
                     yield {
@@ -3168,7 +3327,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_read_only_tool_error_string_is_retried_before_replanning(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 self.call_count = 0
 
@@ -3199,6 +3358,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                     return "Error executing read_file: transient backend failure"
                 return {"status": "ok", "content": "recovered"}
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -3208,7 +3373,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def __init__(self):
                 self.requests = []
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.requests.append(messages)
                 if len(self.requests) == 1:
                     yield {
@@ -3254,7 +3419,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_repeated_failed_tool_repair_keeps_visible_call_history(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 self.call_count = 0
 
@@ -3283,6 +3448,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 self.call_count += 1
                 return {"status": "error", "error": "still unavailable"}
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -3292,7 +3463,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def __init__(self):
                 self.call_count = 0
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.call_count += 1
                 yield {
                     "type": "tool_call",
@@ -3336,7 +3507,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_unknown_side_effect_tool_is_quarantined_and_replanned_without_reexecution(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 self.call_count = 0
 
@@ -3365,6 +3536,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 self.call_count += 1
                 raise RuntimeError("connection lost after dispatch")
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -3374,7 +3551,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def __init__(self):
                 self.requests = []
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.requests.append(messages)
                 if len(self.requests) == 1:
                     yield {
@@ -3446,7 +3623,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_same_execution_sidecar_result_is_reused_after_crash_window(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 self.call_count = 0
 
@@ -3475,6 +3652,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 self.call_count += 1
                 return {"status": "ok", "content": "must not execute"}
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -3484,7 +3667,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def __init__(self):
                 self.request_count = 0
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.request_count += 1
                 if self.request_count == 1:
                     yield {
@@ -3541,7 +3724,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
     def test_chat_repeated_finish_with_usage_completes_tool_round_once(self):
         from core.llm.providers import OpenAIProvider
 
-        class Skills:
+        class Skills(_PromptSkillManagerStub):
             def __init__(self):
                 self.calls = []
 
@@ -3572,6 +3755,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def call_tool(self, name, args, context=None):
                 self.calls.append((name, args))
                 return "file contents"
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
 
         def frame(delta, reason=None, usage=None):
             return {"choices": [{"delta": delta, "finish_reason": reason}], "usage": usage}
@@ -3613,7 +3802,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             self.assertTrue(any(message.get("role") == "tool" and message.get("tool_call_id") == "call-1" for message in replay))
 
     def test_provider_stream_error_does_not_commit_partial_tool_call_block(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -3635,13 +3824,19 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def get_skill_of_tool(self, name):
                 return ""
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
             base_url = ""
             thinking_enabled = False
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 yield {
                     "type": "tool_call",
                     "index": 0,
@@ -3681,7 +3876,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_worker_stop_closes_active_provider_stream(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -3693,6 +3888,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
 
             def get_system_prompts(self, *args, **kwargs):
                 return ""
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
 
         class _BlockingStream:
             def __init__(self):
@@ -3761,7 +3962,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_parallel_workers_enter_provider_without_cross_session_lock(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -3774,6 +3975,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def get_system_prompts(self, *args, **kwargs):
                 return ""
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         barrier = threading.Barrier(2)
         entered_sessions = []
         entered_lock = threading.Lock()
@@ -3784,7 +3991,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             base_url = ""
             thinking_enabled = False
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 with entered_lock:
                     entered_sessions.append(True)
                 barrier.wait(timeout=2)
@@ -3827,7 +4034,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_deepseek_responses_worker_persists_and_replays_items_across_tool_turn(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 self.call_count = 0
 
@@ -3853,6 +4060,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 self.call_count += 1
                 return {"status": "ok", "content": "tool result"}
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "DeepSeek Responses"
             model_name = "deepseek-v4-flash"
@@ -3863,7 +4076,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def __init__(self):
                 self.requests = []
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.requests.append(messages)
                 if len(self.requests) == 1:
                     yield {"type": "reasoning", "content": "先调用工具"}
@@ -3971,7 +4184,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_standard_responses_worker_persists_and_replays_items_with_strict_prefix(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -3987,6 +4200,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def call_tool(self, name, args, context=None):
                 return {"status": "ok", "content": "tool result"}
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "GPT Responses"
             model_name = "gpt-5.6"
@@ -3999,7 +4218,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def __init__(self):
                 self.requests = []
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.requests.append(messages)
                 if len(self.requests) == 1:
                     yield {
@@ -4086,7 +4305,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_responses_image_only_worker_persists_content_part_and_sanitized_replay(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -4095,6 +4314,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
 
             def get_system_prompts(self, *args, **kwargs):
                 return ""
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
 
         class _ProviderStub:
             provider_name = "GPT Responses"
@@ -4106,7 +4331,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             requires_responses_replay = True
             requires_deepseek_responses_replay = False
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 from io import BytesIO
                 from PIL import Image
 
@@ -4160,7 +4385,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_responses_stop_keeps_partial_text_out_of_provider_ledger(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -4169,6 +4394,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
 
             def get_system_prompts(self, *args, **kwargs):
                 return ""
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
 
         class _ProviderStub:
             provider_name = "GPT Responses"
@@ -4182,7 +4413,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def __init__(self):
                 self.worker = None
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 yield {"type": "content", "content": "partial"}
                 self.worker.is_stopped = True
 
@@ -4218,7 +4449,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_chat_completions_prefix_survives_worker_restart(self):
-        class _SkillManagerStub:
+        class _SkillManagerStub(_PromptSkillManagerStub):
             def __init__(self, *_args, **_kwargs):
                 pass
 
@@ -4227,6 +4458,12 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
 
             def get_system_prompts(self, *args, **kwargs):
                 return ""
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
 
         class _ProviderStub:
             provider_name = "Chat Completions"
@@ -4240,7 +4477,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             def __init__(self):
                 self.requests = []
 
-            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.requests.append(messages)
                 yield {"type": "content", "content": f"answer-{len(self.requests)}"}
 
@@ -4284,6 +4521,7 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
 class TestLLMWorkerGuidance(unittest.TestCase):
     def _worker(self, turn_id="turn-1"):
         worker = LLMWorker.__new__(LLMWorker)
+        worker.data_security_run = None
         TaskWorker.__init__(worker)
         worker.step_signal = EventSource()
         worker.observability_signal = EventSource()

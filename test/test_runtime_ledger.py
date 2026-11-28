@@ -196,6 +196,8 @@ class RuntimeLedgerTests(unittest.TestCase):
     def test_cancel_signals_worker_even_when_persistence_is_broken(self):
         from core.runtime_coordinator import RuntimeCoordinator
         state = RuntimeCoordinator.__new__(RuntimeCoordinator)
+        state.command_locks = {}
+        state.desktop_store = None
         state.lock = threading.RLock()
         worker = Mock()
         worker.request_id = "run"
@@ -212,6 +214,8 @@ class RuntimeLedgerTests(unittest.TestCase):
     def coordinator(self):
         from core.runtime_coordinator import RuntimeCoordinator
         state = RuntimeCoordinator.__new__(RuntimeCoordinator)
+        state.command_locks = {}
+        state.config_manager = Mock(get_chat_history_dir=lambda: str(self.root))
         state.chat_storage, state.desktop_store, state.runtime_journal = self.storage, self.store, self.journal
         state.lock = threading.RLock()
         state.sessions, state.active_workers, state.accepted_runs, state.detached_workers = {}, {}, {}, {}
@@ -232,6 +236,26 @@ class RuntimeLedgerTests(unittest.TestCase):
         state.recover_runs()
         self.assertEqual(self.journal.get_run("chat", "run")["status"], "interrupted")
         self.assertIsNone(state.prepare_stream("chat", "run", "run", "daemon:test", "渠道输入", "user", None))
+
+    def test_startup_continues_after_legacy_save_quarantine_but_blocks_unresolved_failure(self):
+        from core.chat_recovery_journal import ChatRecoveryJournal
+        self.open()
+        state = self.coordinator()
+        state.prepare_stream("chat", "run", "run", "daemon:test", "保留输入", "user", None)
+        pending = Path(ChatRecoveryJournal(self.root).directory) / "broken.json"
+        pending.write_text("{broken", encoding="utf-8")
+        with self.assertLogs("runtime.coordinator", level="WARNING") as logs:
+            state.recover_runs()
+        self.assertTrue(any("startup_chat_recovery_quarantined" in line for line in logs.output))
+        self.assertFalse(pending.exists())
+        self.assertTrue(list((pending.parent / "quarantine").glob("*.quarantined")))
+        self.assertEqual(self.journal.get_run("chat", "run")["status"], "interrupted")
+        self.assertEqual(self.storage.get_messages("chat")[0]["content"], "保留输入")
+        pending.write_text("{broken", encoding="utf-8")
+        with patch.object(ChatRecoveryJournal, "_recover_pending_chat_save", side_effect=OSError("disk unavailable")):
+            with self.assertRaisesRegex(RuntimeJournalError, "历史恢复未完成"):
+                state.recover_runs()
+        self.assertTrue(pending.exists())
 
     def test_final_keeps_new_result_after_session_normalization_and_replays_it(self):
         self.open()
@@ -291,7 +315,7 @@ class RuntimeLedgerTests(unittest.TestCase):
                                            "meta": {"kind": "user_guidance", "turn_id": "run"}})
         queued = worker.steer.call_args.args[0]
         saved = next(m for m in self.storage.get_messages("chat") if m["id"] == "guidance")
-        appended = LLMWorker._append_ledger_message(SimpleNamespace(turn_id="run", request_id="run"),
+        appended = LLMWorker._append_ledger_message(SimpleNamespace(turn_id="run", request_id="run", data_security_run=None),
                                                       messages, [], queued)
         self.assertEqual(canonical_ledger_message(saved), canonical_ledger_message(appended))
         self.assertEqual(saved["created_at"], appended["created_at"])

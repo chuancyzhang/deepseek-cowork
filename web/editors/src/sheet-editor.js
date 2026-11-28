@@ -3,11 +3,8 @@ import { UniverSheetsCorePreset } from "@univerjs/preset-sheets-core";
 import zhCN from "@univerjs/preset-sheets-core/locales/zh-CN";
 import "@univerjs/preset-sheets-core/lib/index.css";
 
-const CHUNK_SIZE = 192 * 1024;
 let bridge = null;
 let sessionId = "";
-let loadingChunks = [];
-let loadingExpected = 0;
 let univer = null;
 let univerAPI = null;
 let workbook = null;
@@ -34,19 +31,6 @@ function sheetEditorStylesReady() {
   }
 }
 
-function sendTextPayload(kind, value) {
-  const total = Math.max(1, Math.ceil(value.length / CHUNK_SIZE));
-  bridge.beginPayload(sessionId, kind, total);
-  for (let index = 0; index < total; index += 1) {
-    bridge.appendPayload(
-      sessionId,
-      index,
-      value.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE)
-    );
-  }
-  bridge.finishPayload(sessionId);
-}
-
 function dispose() {
   suppressDirty = true;
   cleanSnapshot = "";
@@ -58,7 +42,6 @@ function dispose() {
   if (univer && univer.dispose) univer.dispose();
   univer = null;
   univerAPI = null;
-  loadingChunks = [];
   document.getElementById("sheet-root").replaceChildren();
 }
 
@@ -73,7 +56,7 @@ function scheduleDirtyCheck() {
   queueMicrotask(() => {
     dirtyCheckScheduled = false;
     if (!suppressDirty && bridge && workbook) {
-      bridge.setDirty(serializedWorkbook() !== cleanSnapshot);
+      bridge.setDirty(sessionId, serializedWorkbook() !== cleanSnapshot);
     }
   });
 }
@@ -86,14 +69,11 @@ function trackWorkbookMutation(command) {
 
 function markClean() {
   cleanSnapshot = serializedWorkbook();
-  if (bridge) bridge.setDirty(false);
+  if (bridge) bridge.setDirty(sessionId, false);
 }
 
-function loadWorkbook() {
+function loadWorkbook(snapshot) {
   try {
-    const snapshot = JSON.parse(loadingChunks.join(""));
-    loadingChunks = [];
-    dispose();
     const created = createUniver({
       locale: LocaleType.ZH_CN,
       locales: { [LocaleType.ZH_CN]: mergeLocales(zhCN) },
@@ -123,7 +103,7 @@ function loadWorkbook() {
     window.setTimeout(() => {
       cleanSnapshot = serializedWorkbook();
       suppressDirty = false;
-      bridge.setDirty(false);
+      bridge.setDirty(sessionId, false);
       bridge.editorLoaded(sessionId);
     }, 0);
   } catch (error) {
@@ -134,7 +114,8 @@ function loadWorkbook() {
 function requestSave() {
   if (readOnly) return;
   try {
-    sendTextPayload("sheet", serializedWorkbook());
+    if (!workbook) throw new Error("表格模型尚未加载完成。");
+    bridge.payload(sessionId, "sheet", workbook.save());
   } catch (error) {
     reportError(error);
   }
@@ -155,21 +136,10 @@ window.coworkEditor = {
     return { activeSheet: sheet?.getSheetId(), sheets: Object.fromEntries(
       Object.entries(data.sheets || {}).map(([id, value]) => [id, {scrollTop:value.scrollTop, scrollLeft:value.scrollLeft, zoomRatio:value.zoomRatio}])) };
   },
-  beginLoad(id, total) {
+  load(id, value) {
     dispose();
-    sessionId = String(id || "");
-    loadingExpected = Number(total) || 0;
-    loadingChunks = new Array(loadingExpected);
-  },
-  appendLoadChunk(index, chunk) {
-    loadingChunks[Number(index)] = String(chunk || "");
-  },
-  finishLoad() {
-    if (!loadingExpected || loadingChunks.some((item) => typeof item !== "string")) {
-      reportError("表格分块传输不完整，无法进入编辑。");
-      return;
-    }
-    loadWorkbook();
+    sessionId = id;
+    return loadWorkbook(value);
   },
   requestSave,
   markClean,

@@ -447,7 +447,7 @@ class DesktopIntegrationTests(unittest.TestCase):
         system = "\n".join(str(m.get("content")) for m in request["messages"] if m["role"] == "system")
         self.assertIn("本轮可用的内置技能", system)
         self.assertIn("task-automation", system)
-        self.assertIn("两个图共用同一计算函数不算独立核验", system)
+        self.assertIn("质量、指标变化与独立复核", system)
         self.client.call("favorites.delete", id=task["id"], revision=task["revision"])
         self.assertTrue(any(row["favorite_id"] == task["id"] for row in self.client.call("favorites.history")))
         self.assertEqual(self.client.call("conversation.get", conversation_id=result["conversation_id"])["run"]["status"], "completed")
@@ -458,7 +458,7 @@ class DesktopIntegrationTests(unittest.TestCase):
         self.assertEqual(self.client.wait_run(cid)["run"]["status"], "completed")
         request = next(value for value in reversed(Provider.requests) if any("TEMPLATE-CATALOG-CHECK" in str(m.get("content")) for m in value["messages"] if m["role"] == "user"))
         system = "\n".join(str(m.get("content")) for m in request["messages"] if m["role"] == "system")
-        self.assertIn("用一组与原件不同的新内容试做", system)
+        self.assertIn("用一组代表性的新内容试做", system)
 
     def test_automation_tool_launches_a_distinct_real_worker(self):
         task = self.client.call("favorites.save", value={"name": "工具启动", "prompt": "CHILD-AUTOMATION-RESULT"})
@@ -762,7 +762,7 @@ class DesktopIntegrationTests(unittest.TestCase):
         selected = self.client.call("settings.get")
         model = next(item for item in selected["models"] if item["id"] == self.model_id)
         self.client.call("settings.save_model", channel_id=model["channel_id"], model_id=model["id"],
-                         model_name=model["model_name"], base_url=model["base_url"], context_window_tokens=37000)
+                         model_name=model["model_name"], base_url=model["base_url"], context_window_tokens=70000)
         self.client.call("settings.context", target_tokens=0)
         cid = self.client.call("conversation.create")["id"]
         self.submit(cid, "CONTEXT-LONG-HISTORY")
@@ -904,7 +904,7 @@ class DesktopHistoryProjectionTests(unittest.TestCase):
             read_events=lambda cid, run: [e for e in self.events if e['payload']['run_id'] == run]))
         service.files = SimpleNamespace(message_files=lambda cid, messages: messages)
         service.reviews = SimpleNamespace(entries=lambda cid: {}, summary=lambda entry: entry)
-        service.media = SimpleNamespace(records=lambda cid: [], public=lambda record: record)
+        service.media = SimpleNamespace(chat_tasks=lambda cid, messages, include_recent=True: [])
 
     def test_page_marks_saved_sources_outside_window_without_changing_events_or_pagination(self):
         import copy

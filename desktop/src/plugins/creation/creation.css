@@ -7,6 +7,7 @@
 .creation-preview-content,.creation-probe,.preview-frame:has(.creation-sample){container-type:size}
 .creation-sample.app-shell{height:100%;min-height:0;grid-template-columns:minmax(204px,26%) minmax(0,1fr);color:var(--text);font-family:var(--font-family);overflow:hidden}
 .creation-sample-sidebar,.creation-sample-sidebar>.sidebar{height:100%;min-height:0}
+.creation-sample-sidebar{position:relative}
 .creation-sample-sidebar .sidebar{padding:12px 8px}
 .creation-sample-main>.app-header{padding:0 12px;min-height:44px;height:44px;gap:4px}
 .creation-sample-main .header-actions{gap:2px}

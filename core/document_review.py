@@ -126,9 +126,8 @@ def _review_request(context, batch, images, constraints, deadline):
     if not callable(factory):
         raise WorkbenchError('review_unavailable', '当前执行环境不支持独立图片审稿，已保留渲染结果。')
     provider = factory()
-    if not getattr(provider, 'supports_vision', False):
-        close = getattr(getattr(provider, 'client', None), 'close', None)
-        if callable(close): close()
+    if not provider.supports_vision:
+        provider.close()
         raise WorkbenchError('vision_unavailable', '当前模型不支持图片，尚未完成视觉检查。请在模型选择中切换支持图片的模型后继续。')
     cancelled = context.get('abort_check') or (lambda: False)
     stopped = threading.Event(); stream_lock = threading.Lock(); streams = []
@@ -171,7 +170,7 @@ def _review_request(context, batch, images, constraints, deadline):
     watcher = threading.Thread(target=watch, daemon=True); watcher.start()
     try:
         remaining = max(1, deadline-time.time())
-        if getattr(provider, 'client', None) is not None:
+        if provider.client is not None:
             import httpx
             provider.client = provider.client.with_options(max_retries=0, timeout=httpx.Timeout(min(60, remaining), connect=min(15, remaining)))
         audit = context.get('document_review_audit')
@@ -197,39 +196,36 @@ def _review_request(context, batch, images, constraints, deadline):
                     usage = dict(chunk.get('usage') or {})
                     emit({'type': 'llm_usage', 'timestamp': time.time(), 'usage': {**usage, 'purpose': 'document_review',
                         'request_id': request_id, 'run_id': context.get('run_id'), 'turn_id': context.get('turn_id'),
-                        'model': getattr(provider, 'model_name', ''), 'provider': getattr(provider, 'provider_name', ''),
-                        'base_url': getattr(provider, 'base_url', ''), 'protocol': getattr(provider, 'api_protocol', '')}})
+                        'model': provider.model_name, 'provider': provider.provider_name,
+                        'base_url': provider.base_url, 'protocol': provider.api_protocol}})
                 elif kind == 'provider_terminal': terminal = chunk
                 elif kind in {'tool_call', 'server_tool_status', 'output_image'}: raise ValueError('审稿返回了工具操作，未接受检查结论。')
                 elif kind == 'error': raise ValueError(str(chunk.get('content') or '审稿请求失败。')[:1000])
                 if content_size>60000: raise ValueError('审稿回执超过大小上限。')
         finally:
-            close = getattr(stream, 'close', None)
-            if callable(close): close()
+            stream.close()
         if aborted(): raise WorkbenchError('cancelled', '审稿已停止，已有文件和检查记录保留。')
         if not verified or terminal.get('status') != 'completed':
             raise ValueError('审稿请求没有完整的图片提交与完成回执。')
         complete = True
         text = ''.join(content)
-        security = getattr(provider, 'data_security_run', None)
+        security = provider.data_security_run
         if security is not None: text = security.restore_text(text)
         return {'conclusions': _validate_conclusions(text, batch), 'delivered': True, 'usage': usage,
                 'provider_response_id': terminal.get('response_id') or wire_request.get('provider_request_id') or '',
-                'model': getattr(provider, 'model_name', ''), 'protocol': verified[-1]}
+                'model': provider.model_name, 'protocol': verified[-1]}
     except Exception as exc:
         # Even an invalid conclusion can have a successful image-bearing request.
         exc.review_evidence = {'delivered': complete, 'usage': usage,
-            'model': getattr(provider, 'model_name', ''), 'protocol': verified[-1] if verified else '',
+            'model': provider.model_name, 'protocol': verified[-1] if verified else '',
             'provider_response_id': terminal.get('response_id') or wire_request.get('provider_request_id') or ''}
         raise
     finally:
         stopped.set()
         if callable(record): record(request_id, {'status': 'completed' if complete else 'failed', 'purpose': 'document_review',
             'finished_at': time.time(), 'images_submitted': len(images) if complete else 0})
-        close = getattr(getattr(provider, 'client', None), 'close', None)
-        if callable(close):
-            try: close()
-            except Exception: log.warning('document_review.client_close_failed request=%s',request_id)
+        try: provider.close()
+        except Exception: log.warning('document_review.client_close_failed request=%s',request_id)
 
 
 def review_rendered_batch(source, rendered, output, context, *, constraints='', kind='details'):

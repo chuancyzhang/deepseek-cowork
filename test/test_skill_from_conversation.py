@@ -7,7 +7,7 @@ import unittest
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.skill_from_conversation import ConversationSkillCaptureRepository, build_evidence_source, build_skill_json, build_target_skill_snapshot, compile_conversation_skill_draft, compute_skill_revision, extract_conversation_skill_evidence, extract_python_script_assets, normalize_conversation_skill_evidence, normalize_skill_draft, render_session_transcript, save_new_skill, update_existing_skill_from_draft, validate_conversation_skill_draft, validate_impl_py
+from core.skill_from_conversation import ConversationSkillCaptureRepository, build_evidence_source, build_skill_json, build_target_skill_snapshot, compile_conversation_skill_draft, compute_skill_revision, extract_conversation_skill_evidence, extract_python_script_assets, normalize_conversation_skill_evidence, normalize_skill_draft, save_new_skill, update_existing_skill_from_draft, validate_conversation_skill_draft, validate_impl_py
 from core.skill_manager import SkillManager
 
 
@@ -16,7 +16,7 @@ class FakeProvider:
         self.responses = list(responses)
         self.calls = []
 
-    def chat_stream(self, messages, tools=None):
+    def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
         self.calls.append(messages)
         if not self.responses:
             raise AssertionError("Unexpected third model call")
@@ -70,26 +70,6 @@ class TestSkillFromConversation(unittest.TestCase):
             )
         return skill_dir
 
-    def test_render_session_transcript_includes_messages_and_tool_calls(self):
-        transcript = render_session_transcript(
-            "session-1",
-            "整理图片",
-            [
-                {"role": "user", "content": "按日期整理图片"},
-                {
-                    "role": "assistant",
-                    "content": "我会写脚本处理。",
-                    "tool_calls": [{"function": {"name": "bash", "arguments": "{}"}}],
-                },
-            ],
-            meta={"workspace_dir": "D:/workspace"},
-        )
-
-        self.assertIn("# 会话: 整理图片", transcript)
-        self.assertIn("- 工作区: D:/workspace", transcript)
-        self.assertIn("按日期整理图片", transcript)
-        self.assertIn("[tool_calls]", transcript)
-        self.assertIn("bash", transcript)
 
     def test_normalize_draft_fills_defaults_and_derives_tool_refs(self):
         draft = normalize_skill_draft(

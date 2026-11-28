@@ -26,15 +26,19 @@ class ChatRecoveryJournal:
         os.makedirs(self.directory, exist_ok=True)
         self.runtime_journal = runtime_journal or RuntimeJournal(history_dir)
 
-    @staticmethod
-    def _safe_session_name(session_id):
-        session_id = str(session_id or "").strip()
-        if not session_id:
-            raise ValueError("session_id is required")
-        return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    _safe_session_name = staticmethod(RuntimeJournal._session_key)
 
     def _path_for_session(self, session_id):
         return os.path.join(self.directory, f"{self._safe_session_name(session_id)}.json")
+
+    @staticmethod
+    def pending_paths(history_dir):
+        directory = os.path.join(os.path.abspath(history_dir), "pending_chat_saves")
+        try:
+            with os.scandir(directory) as entries:
+                return sorted(entry.path for entry in entries if entry.name.endswith(".json"))
+        except FileNotFoundError:
+            return []
 
     @staticmethod
     def _payload_for_request(request):
@@ -43,15 +47,7 @@ class ChatRecoveryJournal:
         payload["ready_at"] = 0.0
         return payload
 
-    @staticmethod
-    def _checksum(payload):
-        encoded = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+    _checksum = staticmethod(RuntimeJournal.checksum)
 
     def record(self, request):
         payload = self._payload_for_request(request)
@@ -134,36 +130,6 @@ class ChatRecoveryJournal:
         if session_id in skip_session_ids:
             return ""
         messages = list(payload.get("messages") or [])
-        owners = storage.get_message_owners(
-            [
-                message.get("id")
-                for message in messages
-                if isinstance(message, dict)
-            ]
-        )
-        remapped_messages = []
-        for message in messages:
-            if not isinstance(message, dict):
-                remapped_messages.append(message)
-                continue
-            normalized_message = dict(message)
-            message_id = str(normalized_message.get("id") or "").strip()
-            owner = owners.get(message_id)
-            if message_id and owner and owner != session_id:
-                replacement = uuid.uuid5(
-                    uuid.NAMESPACE_URL,
-                    f"deepseek-cowork-recovery:{session_id}:{message_id}",
-                ).hex
-                meta = (
-                    dict(normalized_message.get("meta") or {})
-                    if isinstance(normalized_message.get("meta"), dict)
-                    else {}
-                )
-                meta["recovered_original_message_id"] = message_id
-                normalized_message["meta"] = meta
-                normalized_message["id"] = replacement
-            remapped_messages.append(normalized_message)
-        messages = remapped_messages
         if messages and isinstance(messages[-1], dict):
             last_message = dict(messages[-1])
             last_meta = (
@@ -220,11 +186,7 @@ class ChatRecoveryJournal:
         anything here. The consumer must recheck session activity and candidates
         before applying the result.
         """
-        pending_paths = [
-            os.path.join(self.directory, name)
-            for name in sorted(os.listdir(self.directory))
-            if name.endswith(".json")
-        ]
+        pending_paths = self.pending_paths(os.path.dirname(self.directory))
         manifests, errors = self.runtime_journal.scan_manifests()
         return {
             "pending_chat_save_paths": pending_paths,
@@ -247,10 +209,7 @@ class ChatRecoveryJournal:
         # UI save snapshots own presentation metadata. Recover them before
         # daemon/runtime ledger appends so a later canonical append cannot make
         # the richer UI snapshot look stale and discard its timeline.
-        pending_paths = (scan.get("pending_chat_save_paths") or []) if scan is not None else [
-            os.path.join(self.directory, name)
-            for name in sorted(os.listdir(self.directory)) if name.endswith(".json")
-        ]
+        pending_paths = (scan.get("pending_chat_save_paths") or []) if scan is not None else self.pending_paths(os.path.dirname(self.directory))
         for path in pending_paths:
             try:
                 session_id = self._recover_pending_chat_save(

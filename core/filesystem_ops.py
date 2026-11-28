@@ -3,6 +3,7 @@ from .file_write_locks import locked_path, file_write_lock
 from .turn_files import capture_mutation
 import fnmatch
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -303,7 +304,7 @@ def resolve_path(
     if not god_mode:
         try:
             common = os.path.commonpath([workspace_abs, abs_path])
-        except Exception:
+        except ValueError:
             return None, None, _build_error(action, "path_outside_workspace", "Path is outside the workspace.", path=raw_path)
         if os.path.normcase(common) != os.path.normcase(workspace_abs):
             return None, None, _build_error(action, "path_outside_workspace", "Path is outside the workspace.", path=raw_path)
@@ -312,7 +313,7 @@ def resolve_path(
         path_real = os.path.realpath(abs_path)
         try:
             real_common = os.path.commonpath([workspace_real, path_real])
-        except Exception:
+        except ValueError:
             return None, None, _build_error(action, "path_outside_workspace", "Path resolves outside the workspace.", path=raw_path)
         if os.path.normcase(real_common) != os.path.normcase(workspace_real):
             return None, None, _build_error(
@@ -385,7 +386,7 @@ def list_files(workspace_dir, path=".", recursive=False, include_hidden=False, l
                     child_abs = os.path.join(root, name)
                     child_rel = _result_path(child_abs, workspace_dir)
                     items.append(child_rel)
-                    if len(items) >= parsed_limit:
+                    if len(items) > parsed_limit:
                         truncated = True
                         return _build_ok(
                             action,
@@ -400,8 +401,8 @@ def list_files(workspace_dir, path=".", recursive=False, include_hidden=False, l
                 child_abs = os.path.join(abs_path, name)
                 child_rel = _result_path(child_abs, workspace_dir)
                 items.append(child_rel)
-                if len(items) >= parsed_limit:
-                    truncated = len(sorted(os.listdir(abs_path))) > parsed_limit
+                if len(items) > parsed_limit:
+                    truncated = True
                     break
         return _build_ok(action, {"path": rel_path, "items": items[:parsed_limit], "count": len(items[:parsed_limit]), "truncated": truncated})
     except Exception as exc:
@@ -809,8 +810,9 @@ def delete_path(workspace_dir, path, recursive=False, confirm_callback=None, con
     if confirm_callback is not None:
         try:
             confirmed = confirm_callback(rel_path, bool(recursive))
-        except Exception:
-            confirmed = False
+        except Exception as exc:
+            logging.getLogger(__name__).exception("file_confirmation_failed action=%s path=%s", action, rel_path)
+            return _build_error(action, "confirmation_failed", f"无法完成删除确认，文件未删除：{exc}", path=rel_path)
         if confirmed is not True:
             return _build_error(
                 action,

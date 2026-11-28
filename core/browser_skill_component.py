@@ -1393,12 +1393,7 @@ def install_browser_skill(progress_callback=None, *, require_idle=False):
         archive_path = artifact["path"]
         if progress_callback:
             progress_callback("正在校验随 Cowork 提供的 BrowserSkill CLI…", 10)
-        actual_sha256 = _file_sha256(archive_path)
-        if actual_sha256 != BROWSER_SKILL_SHA256:
-            raise RuntimeError(
-                "BrowserSkill SHA-256 校验失败："
-                f"期望 {BROWSER_SKILL_SHA256}，实际 {actual_sha256}"
-            )
+        actual_sha256 = artifact["actual_sha256"]
         extract_root = os.path.join(staged_root, "extract")
         os.makedirs(extract_root)
         if progress_callback:
@@ -1490,12 +1485,7 @@ def prepare_browser_skill_extension(progress_callback=None):
             raise RuntimeError(artifact.get("error") or "随包 BrowserSkill 扩展不可用。")
         if progress_callback:
             progress_callback("正在校验随 Cowork 提供的浏览器扩展…", 12)
-        actual_sha256 = _file_sha256(artifact["path"])
-        if actual_sha256 != BROWSER_SKILL_EXTENSION_SHA256:
-            raise RuntimeError(
-                "BrowserSkill 扩展 SHA-256 校验失败："
-                f"期望 {BROWSER_SKILL_EXTENSION_SHA256}，实际 {actual_sha256}"
-            )
+        actual_sha256 = artifact["actual_sha256"]
         install_root = os.path.join(staged_root, "install")
         extension_root = os.path.join(install_root, "extension")
         os.makedirs(extension_root)
@@ -1716,14 +1706,6 @@ def _run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
             },
             "component": status,
         }
-    if starting_session:
-        service = _ensure_browser_skill_service(abort_check)
-        if not service.get("ready"):
-            return {"status": "incomplete", "executed": False, "error": {
-                "code": service.get("code"),
-                "message": "本机浏览器服务尚未就绪，请在BrowserSkill 技能详情中启动服务并检查连接。",
-                "detail": service.get("detail"),
-            }}
     timeout_seconds = max(1, min(int(timeout_seconds or 120), 1800))
     if starting_session and "--request-id" in command_args:
         request_index = command_args.index("--request-id") + 1

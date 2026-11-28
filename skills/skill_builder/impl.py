@@ -3,7 +3,6 @@ import os
 import re
 import shutil
 import tempfile
-import ast
 import threading
 import logging
 import inspect
@@ -11,15 +10,11 @@ import inspect
 from core.env_utils import get_app_data_dir
 from core.skill_adapter import adapt_staged_skill_directory, parse_skill_md_content
 from core.skill_install import prepare_source, check_cancel
-from core.skill_package import index_resources, package_path, stage_skill_package, validate_package, write_resources
+from core.skill_package import index_resources, is_valid_skill_name, package_path, stage_skill_package, validate_package, write_resources
 
 
 _SKILL_MUTATION_LOCK = threading.RLock()
 log = logging.getLogger("skills.builder")
-
-
-def _is_valid_skill_name(skill_name):
-    return bool(skill_name) and all(c.isalnum() or c == "-" for c in skill_name)
 
 
 def _normalize_tools_list(tools_list):
@@ -44,8 +39,8 @@ def _normalize_json_value(value):
 
 
 def _resolve_skill_dir(skill_name, target_scope="auto"):
-    if not _is_valid_skill_name(skill_name):
-        return None, "Error: Skill name must be alphanumeric (hyphens allowed)."
+    if not is_valid_skill_name(skill_name):
+        return None, "Error: Skill name must start with a letter or digit, contain only letters, digits, underscores or hyphens, and not be a Windows reserved name (128 characters maximum)."
     app_data_dir = get_app_data_dir()
     ai_skills_dir = os.path.join(app_data_dir, "ai_skills")
     os.makedirs(ai_skills_dir, exist_ok=True)
@@ -274,20 +269,15 @@ def create_new_skill(
             return error
         if os.path.exists(target_dir):
             raise ValueError("Skill already exists; use update_skill to preserve its existing content.")
-        action = "Created"
         staging_dir = tempfile.mkdtemp(
             prefix=f".{skill_name}-staging-",
             dir=os.path.dirname(target_dir),
         )
-        if action == "Updated":
-            shutil.copytree(target_dir, staging_dir, dirs_exist_ok=True)
         write_dir = staging_dir
 
         parsed_tools = _normalize_tools_list(tools_list)
         if tool_code and not parsed_tools:
             raise ValueError("tools_list with declarative schemas and bindings is required when tool_code is provided.")
-        if tool_code:
-            ast.parse(str(tool_code), filename=f"{skill_name}/impl.py")
         kind = (skill_kind or "knowledge").lower()
         if kind not in {"knowledge", "system"}:
             kind = "knowledge"
@@ -343,12 +333,12 @@ def create_new_skill(
         backup_dir = _swap_staged_skill(staging_dir, target_dir)
         staging_dir = ""
         published = True
-        _publish_skill_change(_context, "created" if action == "Created" else "updated", skill_name)
+        _publish_skill_change(_context, "created", skill_name)
         if backup_dir:
             shutil.rmtree(backup_dir)
             backup_dir = ""
         log.info("skill_create_completed skill=%s", skill_name)
-        return f"Success: {action} skill '{skill_name}' at '{target_dir}' as kind '{kind}'."
+        return f"Success: Created skill '{skill_name}' at '{target_dir}' as kind '{kind}'."
     except Exception as e:
         log.warning("skill_create_failed skill=%s error=%s", skill_name, type(e).__name__)
         if published:
@@ -497,11 +487,11 @@ def update_skill(
             if value is not None:
                 skill_json[key] = _normalize_json_value(value)
                 changed.append(key)
-        if tools_list is not None and skill_json.get("tool_refs") in (None, []):
-            parsed_tools = _normalize_tools_list(tools_list)
-            skill_json["tool_refs"] = [t.get("name") for t in parsed_tools if isinstance(t, dict) and t.get("name")]
         if tools_list is not None:
-            skill_json["tools"] = _normalize_tools_list(tools_list)
+            parsed_tools = _normalize_tools_list(tools_list)
+            skill_json["tools"] = parsed_tools
+            if not skill_json.get("tool_refs"):
+                skill_json["tool_refs"] = [t.get("name") for t in parsed_tools if isinstance(t, dict) and t.get("name")]
         original_resources = {}
         index_resources(skill_json, write_resources(
             staging_dir, _normalize_json_value(resources), workspace_dir=workspace_dir,
@@ -514,7 +504,6 @@ def update_skill(
                 json.dump(skill_json, f, ensure_ascii=False, indent=2)
 
         if tool_code is not None:
-            ast.parse(str(tool_code), filename=f"{skill_name}/impl.py")
             with open(impl_path, "w", encoding="utf-8") as f:
                 f.write(tool_code)
             changed.append("impl.py")
@@ -574,59 +563,58 @@ def install_agent_skill(source_path, skill_name=None, skill_paths=None, ref="", 
                 raise ValueError("skill_name can only be used for a single skill.")
             _SKILL_MUTATION_LOCK.acquire()
             locked = True
-            with _SKILL_MUTATION_LOCK:
-                phase = "validation"
-                targets, names = [], set()
-                install_root = os.path.join(get_app_data_dir(), "ai_skills")
-                os.makedirs(install_root, exist_ok=True)
-                for source_dir, provenance in entries:
-                    staging = tempfile.mkdtemp(prefix=".skill-install-", dir=install_root)
-                    os.rmdir(staging)
-                    staging_dirs.append(staging)
-                    inspected_digest = expected_sha256 if provenance.get("commit") or os.path.isdir(source) else ""
-                    stage_skill_package(source_dir, staging, expected_sha256=inspected_digest)
-                    if inspected_digest:
-                        provenance["content_sha256"] = inspected_digest
-                    name = skill_name or _read_agent_skill_name(staging)
-                    target, error = _resolve_skill_dir(name, target_scope="ai_only")
-                    if error:
-                        raise ValueError(error)
-                    if name.casefold() in names or os.path.exists(target):
-                        raise ValueError(f"Skill already exists or is duplicated: {name}; use the update workflow.")
-                    names.add(name.casefold())
-                    adapt_staged_skill_directory(staging, skill_name=name, source_path=source_dir)
-                    metadata_path = os.path.join(staging, "skill.json")
-                    with open(metadata_path, encoding="utf-8") as handle:
-                        metadata = json.load(handle)
-                    metadata["install_source"] = provenance
-                    with open(metadata_path, "w", encoding="utf-8") as handle:
-                        json.dump(metadata, handle, ensure_ascii=False, indent=2)
-                    _validate_staged_skill(staging, name)
-                    targets.append((name, staging, target, metadata))
-                check_cancel(context)
-                publisher = context.get("skill_change_publisher")
-                if not callable(publisher):
-                    raise RuntimeError("Skill runtime change publisher is unavailable.")
-                phase = "save"
-                for name, staging, target, _metadata in targets:
-                    # Destination cannot be overwritten by a concurrent creation.
-                    os.rename(staging, target)
-                    staging_dirs.remove(staging)
-                    published_targets.append(target)
-                    if config and hasattr(config, "set_skill_enabled"):
-                        prior_enabled[name] = config.is_skill_enabled(name, True)
-                        config.set_skill_enabled(name, True)
-                phase = "publish"
-                publisher({"action": "created", "skill_names": [item[0] for item in targets],
-                           "source": "install_agent_skill", "session_id": context.get("session_id", "")})
-                required = [f"{name}: {field.get('name')}" for name, _staging, _target, metadata in targets
-                            for field in metadata.get("config_fields", [])
-                            if isinstance(field, dict) and field.get("required") and not field.get("default")]
-                log.info("skill_install_completed session=%s count=%s", context.get("session_id", ""), len(targets))
-                result = "Success: Installed " + ", ".join(item[0] for item in targets) + "."
-                if required:
-                    result += " Required configuration (verify in capability settings): " + "; ".join(required)
-                return result
+            phase = "validation"
+            targets, names = [], set()
+            install_root = os.path.join(get_app_data_dir(), "ai_skills")
+            os.makedirs(install_root, exist_ok=True)
+            for source_dir, provenance in entries:
+                staging = tempfile.mkdtemp(prefix=".skill-install-", dir=install_root)
+                os.rmdir(staging)
+                staging_dirs.append(staging)
+                inspected_digest = expected_sha256 if provenance.get("commit") or os.path.isdir(source) else ""
+                stage_skill_package(source_dir, staging, expected_sha256=inspected_digest)
+                if inspected_digest:
+                    provenance["content_sha256"] = inspected_digest
+                name = skill_name or _read_agent_skill_name(staging)
+                target, error = _resolve_skill_dir(name, target_scope="ai_only")
+                if error:
+                    raise ValueError(error)
+                if name.casefold() in names or os.path.exists(target):
+                    raise ValueError(f"Skill already exists or is duplicated: {name}; use the update workflow.")
+                names.add(name.casefold())
+                adapt_staged_skill_directory(staging, skill_name=name, source_path=source_dir)
+                metadata_path = os.path.join(staging, "skill.json")
+                with open(metadata_path, encoding="utf-8") as handle:
+                    metadata = json.load(handle)
+                metadata["install_source"] = provenance
+                with open(metadata_path, "w", encoding="utf-8") as handle:
+                    json.dump(metadata, handle, ensure_ascii=False, indent=2)
+                _validate_staged_skill(staging, name)
+                targets.append((name, staging, target, metadata))
+            check_cancel(context)
+            publisher = context.get("skill_change_publisher")
+            if not callable(publisher):
+                raise RuntimeError("Skill runtime change publisher is unavailable.")
+            phase = "save"
+            for name, staging, target, _metadata in targets:
+                # Destination cannot be overwritten by a concurrent creation.
+                os.rename(staging, target)
+                staging_dirs.remove(staging)
+                published_targets.append(target)
+                if config and hasattr(config, "set_skill_enabled"):
+                    prior_enabled[name] = config.is_skill_enabled(name, True)
+                    config.set_skill_enabled(name, True)
+            phase = "publish"
+            publisher({"action": "created", "skill_names": [item[0] for item in targets],
+                       "source": "install_agent_skill", "session_id": context.get("session_id", "")})
+            required = [f"{name}: {field.get('name')}" for name, _staging, _target, metadata in targets
+                        for field in metadata.get("config_fields", [])
+                        if isinstance(field, dict) and field.get("required") and not field.get("default")]
+            log.info("skill_install_completed session=%s count=%s", context.get("session_id", ""), len(targets))
+            result = "Success: Installed " + ", ".join(item[0] for item in targets) + "."
+            if required:
+                result += " Required configuration (verify in capability settings): " + "; ".join(required)
+            return result
     except Exception as exc:
         with _SKILL_MUTATION_LOCK:
             for target in reversed(published_targets):

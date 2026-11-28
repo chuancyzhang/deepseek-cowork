@@ -85,6 +85,13 @@ def canonical_ledger_message(message, *, include_id=True):
     return normalized
 
 
+def canonical_ledger_message_signature(message, *, include_id=True):
+    if not isinstance(message, dict):
+        raise LedgerStructureError("消息必须是对象")
+    return json.dumps(canonical_ledger_message(message, include_id=include_id),
+                      ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 def canonical_ledger_messages_hash(messages):
     normalized = [
         canonical_ledger_message(message, include_id=True)
@@ -354,24 +361,27 @@ def ensure_tool_call_sequence(messages, context="") -> ToolSequenceValidation:
     return validation
 
 
-class ToolSequenceValidator:
-    """Named façade used by provider boundaries and regression tests."""
-
-    @staticmethod
-    def validate(messages):
-        return validate_tool_call_sequence(messages)
-
-    @staticmethod
-    def ensure(messages, context=""):
-        return ensure_tool_call_sequence(messages, context=context)
-
-
 def _stable_message_id(conversation_id, original_id, index, occurrence):
     owner = str(conversation_id or "")
     return uuid.uuid5(
         uuid.NAMESPACE_URL,
         f"{MESSAGE_ID_NAMESPACE}:{owner}:{original_id}:{index}:{occurrence}",
     ).hex
+
+
+def next_message_sequence(messages):
+    sequences = []
+    for message in messages:
+        meta = message.get("meta") if isinstance(message, dict) else None
+        if not isinstance(meta, dict):
+            continue
+        try:
+            sequence = int(meta.get("sequence"))
+        except (TypeError, ValueError):
+            continue
+        if sequence >= 0:
+            sequences.append(sequence)
+    return max(sequences, default=len(messages) - 1) + 1
 
 
 def normalize_message_ids(messages, conversation_id=""):
@@ -384,6 +394,24 @@ def normalize_message_ids(messages, conversation_id=""):
 
     if not isinstance(messages, list):
         raise LedgerStructureError("messages 必须是数组")
+
+    # The common persisted-history path only needs an isolated copy. Do not
+    # rebuild metadata or reconvert sequences that are already canonical.
+    seen_ids, seen_sequences = set(), set()
+    for message in messages:
+        if not isinstance(message, dict):
+            break
+        identifier = message.get("id")
+        meta = message.get("meta")
+        sequence = meta.get("sequence") if isinstance(meta, dict) else None
+        if (not isinstance(identifier, str) or not identifier or identifier != identifier.strip()
+                or identifier in seen_ids or type(sequence) is not int or sequence < 0
+                or sequence in seen_sequences):
+            break
+        seen_ids.add(identifier)
+        seen_sequences.add(sequence)
+    else:
+        return copy.deepcopy(messages), []
 
     normalized = []
     repairs = []
@@ -464,20 +492,13 @@ def merge_messages_by_id(existing_messages, incoming_messages):
         if str(item.get("id") or "").strip()
     }
 
-    def signature(message):
-        comparable = canonical_ledger_message(message, include_id=True)
-        try:
-            return json.dumps(comparable, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        except Exception:
-            return repr(comparable)
-
     for index, message in enumerate(incoming):
         message_id = str(message.get("id") or "").strip()
         if not message_id:
             raise LedgerMessageIdentityError(index)
         existing_message = existing_by_id.get(message_id)
         if existing_message is not None:
-            if signature(existing_message) != signature(message):
+            if canonical_ledger_message_signature(existing_message) != canonical_ledger_message_signature(message):
                 raise LedgerMessageConflictError(
                     message_id,
                     existing_message=existing_message,

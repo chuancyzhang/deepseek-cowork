@@ -30,20 +30,6 @@ def _short_debug_value(value, limit=240):
     return text[:limit] + "..." if len(text) > limit else text
 
 
-def _debug_worker_summary(worker):
-    if worker is None:
-        return {"worker": None}
-    summary = {
-        "worker_class": worker.__class__.__name__,
-        "worker_id": hex(id(worker)),
-        "has_lifecycle_finished": bool(getattr(worker, "finished", None) is not None),
-        "has_finished_signal": bool(getattr(worker, "finished_signal", None) is not None),
-    }
-    try:
-        summary["is_running"] = bool(worker.is_running())
-    except Exception as exc:
-        summary["is_running_error"] = _short_debug_value(exc)
-    return summary
 
 
 def _log_agent_runtime(event, **fields):

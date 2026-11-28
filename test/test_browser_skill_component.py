@@ -172,7 +172,7 @@ class BrowserSkillComponentTests(unittest.TestCase):
             ), patch.object(
                 browser_skill_component,
                 "_bundled_artifact_status",
-                return_value={"available": True, "path": archive_path},
+                return_value={"available": False, "path": archive_path, "error": "SHA-256 校验失败"},
             ), patch.object(
                 browser_skill_component,
                 "BROWSER_SKILL_SHA256",
@@ -204,7 +204,7 @@ class BrowserSkillComponentTests(unittest.TestCase):
             ), patch.object(
                 browser_skill_component,
                 "_bundled_artifact_status",
-                return_value={"available": True, "path": archive_path},
+                return_value={"available": True, "path": archive_path, "actual_sha256": hashlib.sha256(archive).hexdigest().upper()},
             ), patch.object(
                 browser_skill_component,
                 "BROWSER_SKILL_SHA256",
@@ -253,7 +253,7 @@ class BrowserSkillComponentTests(unittest.TestCase):
             ), patch.object(
                 browser_skill_component,
                 "_bundled_artifact_status",
-                return_value={"available": True, "path": archive_path},
+                return_value={"available": True, "path": archive_path, "actual_sha256": hashlib.sha256(archive).hexdigest().upper()},
             ), patch.object(
                 browser_skill_component,
                 "BROWSER_SKILL_SHA256",
@@ -746,7 +746,7 @@ class BrowserSkillComponentTests(unittest.TestCase):
             ), patch.object(
                 browser_skill_component,
                 "_bundled_artifact_status",
-                return_value={"available": True, "path": archive_path},
+                return_value={"available": True, "path": archive_path, "actual_sha256": hashlib.sha256(archive).hexdigest().upper()},
             ), patch.object(
                 browser_skill_component,
                 "BROWSER_SKILL_EXTENSION_SHA256",
@@ -785,7 +785,7 @@ class BrowserSkillComponentTests(unittest.TestCase):
             ), patch.object(
                 browser_skill_component,
                 "_bundled_artifact_status",
-                return_value={"available": True, "path": archive_path},
+                return_value={"available": True, "path": archive_path, "actual_sha256": hashlib.sha256(archive).hexdigest().upper()},
             ), patch.object(
                 browser_skill_component,
                 "BROWSER_SKILL_EXTENSION_SHA256",

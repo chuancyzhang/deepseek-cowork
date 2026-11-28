@@ -58,7 +58,9 @@ def test_host_cancellation_stops_kernel_and_retains_checkpoint(tmp_path, monkeyp
     from core.sandbox_runtime import run_skill_script_in_sandbox
     from core.process_utils import subprocess_kwargs_no_window
     import core.sandbox_runtime as runtime
-    source = notebook(tmp_path / "input.ipynb", ["print('saved')", "import time; time.sleep(60)"])
+    marker = tmp_path / "second-cell-started"
+    source = notebook(tmp_path / "input.ipynb", ["print('saved')",
+        "from pathlib import Path\nPath('second-cell-started').touch()\nimport time; time.sleep(60)"])
     output = tmp_path / "cancelled.ipynb"
     # Use the real host polling/cancellation path with the test interpreter.
     monkeypatch.setattr(runtime, "build_skill_script_command", lambda *a, **k: ([sys.executable, str(SCRIPT), str(source), str(output)], "exec"))
@@ -69,12 +71,11 @@ def test_host_cancellation_stops_kernel_and_retains_checkpoint(tmp_path, monkeyp
                                 **subprocess_kwargs_no_window())
     monkeypatch.setattr(runtime, "run_in_sandbox", start)
     def cancel():
-        if not output.exists():
-            return False
-        nb = nbformat.read(output, 4)
-        return nb.metadata.cowork_execution.cell == 2
+        # Poll a marker created after the second checkpoint. Opening the notebook
+        # while its writer replaces it can block os.replace on Windows.
+        return marker.exists()
     result = run_skill_script_in_sandbox("data-analysis", str(SCRIPT), "python", timeout_seconds=30, abort_check=cancel)
-    assert result["status"] == "cancelled" and result["aborted"]
+    assert result.get("status") == "cancelled" and result["aborted"], result
     nb = nbformat.read(output, 4)
     assert nb.cells[0].outputs[0].text == "saved\n"
     assert nb.cells[1].execution_count is None

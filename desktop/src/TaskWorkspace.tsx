@@ -37,7 +37,7 @@ export default function TaskWorkspace({ openReview, openFile = () => {}, cid, co
     const current = () => contextScope.current === scope && requestSequence.current === sequence;
     setRequestBusy(true); setRequestError('');
     try {const result = await call('task.context', {conversation_id: cid, run_id: runId}); if (current()) setRequest(result);}
-    catch (failure) {if (current()) setRequestError((failure as Error).message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''));}
+    catch (failure) {if (current()) setRequestError((failure as Error).message);}
     finally {if (current()) setRequestBusy(false);}
   }
   useEffect(() => {

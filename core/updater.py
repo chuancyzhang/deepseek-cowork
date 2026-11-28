@@ -546,10 +546,7 @@ def cleanup_update_artifacts(target_dir=None, keep_paths=None, progress_callback
         if not any(pattern.match(name) for pattern in patterns) or not os.path.isfile(platform_runtime.filesystem_path(path)):
             continue
         try:
-            if os.path.isdir(path):
-                shutil.rmtree(path)
-            else:
-                os.remove(platform_runtime.filesystem_path(path))
+            os.remove(platform_runtime.filesystem_path(path))
             removed += 1
         except FileNotFoundError:
             continue
@@ -711,6 +708,8 @@ def extract_update_zip(zip_path, target_dir=None, progress_callback=None, *, lay
         raise
     except zipfile.BadZipFile as exc:
         raise UpdaterError("更新包不是有效的 zip 文件。") from exc
+    except UpdaterError:
+        raise
     except Exception as exc:
         raise UpdaterError(f"解压更新包失败：{exc}") from exc
     app_dir = find_staged_app_dir(extract_dir, layout=layout)
@@ -840,7 +839,7 @@ def prepare_update(current_version=APP_VERSION, download=False, progress_callbac
         return result
     target_dir = updates_dir()
     expected_zip_path = expected_asset_path(asset, target_dir=target_dir)
-    keep_paths = [expected_zip_path] if is_cached_asset_valid(asset, expected_zip_path) else []
+    keep_paths = [expected_zip_path]  # download_asset validates this file once before reuse.
     cleanup_update_artifacts(target_dir=target_dir, keep_paths=keep_paths, progress_callback=progress_callback)
     zip_path = download_asset(asset, target_dir=target_dir, progress_callback=progress_callback)
     staged_app_dir = extract_update_zip(zip_path, target_dir=target_dir, progress_callback=progress_callback)

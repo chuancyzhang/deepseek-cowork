@@ -12,12 +12,11 @@ import uuid
 from dataclasses import asdict, dataclass, field
 
 from core.env_utils import get_app_data_dir
+from core.skill_package import is_valid_skill_name
 from core.memory_update import collect_llm_content, estimate_tokens
 
 
-DEFAULT_TRANSCRIPT_CHAR_LIMIT = 120_000
 DEFAULT_EVIDENCE_CHAR_LIMIT = 120_000
-SKILL_NAME_RE = re.compile(r"[^\W_][\w-]{0,127}")
 WINDOWS_USER_PATH_RE = re.compile(r"(?i)\b[A-Z]:\\Users\\[^\\\s\"']+")
 WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"(?i)\b[A-Z]:\\(?:[^\\\r\n\"']+\\)*[^\\\r\n\"']*")
 WINDOWS_FORWARD_PATH_RE = re.compile(r"(?i)\b[A-Z]:/(?:[^/\s\"']+/)*[^/\s\"']*")
@@ -120,11 +119,6 @@ class DraftValidationResult:
         }
 
 
-def is_valid_skill_name(skill_name):
-    name = str(skill_name or "").strip()
-    return bool(SKILL_NAME_RE.fullmatch(name)) and name.upper() not in {
-        "CON", "PRN", "AUX", "NUL", *[f"COM{i}" for i in range(1, 10)], *[f"LPT{i}" for i in range(1, 10)]
-    }
 
 
 def _string(value, default=""):
@@ -438,6 +432,10 @@ def validate_impl_py(impl_py):
     except SyntaxError as exc:
         location = f"line {exc.lineno}, column {exc.offset}" if exc.lineno else "unknown location"
         return False, f"impl.py syntax error at {location}: {exc.msg}"
+    return _validate_impl_tree(tree)
+
+
+def _validate_impl_tree(tree):
     def _literal_only(node):
         if isinstance(node, ast.Constant):
             return True
@@ -491,14 +489,12 @@ def extract_python_script_assets(messages, limit=12):
                 continue
             seen.add(key)
             index = len(assets) + 1
-            ok, error = validate_impl_py(code)
-            if not ok:
-                try:
-                    ast.parse(code)
-                    ok, error = True, ""
-                except SyntaxError as exc:
-                    location = f"line {exc.lineno}, column {exc.offset}" if exc.lineno else "unknown location"
-                    error = f"Python syntax error at {location}: {exc.msg}"
+            try:
+                ast.parse(code)
+                ok, error = True, ""
+            except SyntaxError as exc:
+                location = f"line {exc.lineno}, column {exc.offset}" if exc.lineno else "unknown location"
+                ok, error = False, f"Python syntax error at {location}: {exc.msg}"
             tool_call_id = str(call.get("id") or "")
             assets.append(
                 {
@@ -520,46 +516,6 @@ def extract_python_script_assets(messages, limit=12):
     return assets
 
 
-def render_session_transcript(session_id, title, messages, meta=None, char_limit=DEFAULT_TRANSCRIPT_CHAR_LIMIT):
-    meta = meta if isinstance(meta, dict) else {}
-    lines = [
-        f"# 会话: {_string(title, '未命名会话')}",
-        f"- ID: {_string(session_id)}",
-    ]
-    workspace = _string(meta.get("workspace_dir"))
-    if workspace:
-        lines.append(f"- 工作区: {workspace}")
-    status = _string(meta.get("session_status") or meta.get("run_phase"))
-    if status:
-        lines.append(f"- 状态: {status}")
-    lines.append("")
-
-    for index, message in enumerate(messages or [], start=1):
-        if not isinstance(message, dict):
-            continue
-        role = _string(message.get("role"), "unknown")
-        lines.append(f"## {index}. {role}")
-        content = _string(message.get("content"))
-        if content:
-            lines.append(content)
-        if message.get("tool_calls"):
-            try:
-                calls = json.dumps(message.get("tool_calls"), ensure_ascii=False, indent=2)
-            except Exception:
-                calls = str(message.get("tool_calls"))
-            lines.append("[tool_calls]")
-            lines.append(calls)
-        tool_call_id = _string(message.get("tool_call_id"))
-        if tool_call_id:
-            lines.append(f"[tool_call_id] {tool_call_id}")
-        lines.append("")
-
-    transcript = "\n".join(lines).strip()
-    if len(transcript) <= char_limit:
-        return transcript
-    head = transcript[: int(char_limit * 0.65)]
-    tail = transcript[-int(char_limit * 0.35) :]
-    return f"{head}\n\n[...中间内容因过长已省略...]\n\n{tail}"
 
 
 def _extract_json_object(text):
@@ -1030,58 +986,8 @@ def compile_conversation_skill_draft(
     return draft
 
 
-def build_generation_messages(transcript, mode="create", target_skill=None, update_strategy="append"):
-    mode_text = "生成新 Skill" if mode == "create" else f"更新已有 Skill: {target_skill or ''}"
-    update_text = "追加经验" if update_strategy == "append" else "重写说明"
-    system_prompt = (
-        "你是 Cowork 的 Skill 工程助手。Skill 是结构化经验包，可以包含可选 impl.py 工具代码。"
-        "你必须只输出一个 JSON 对象，不要输出 Markdown 包裹。"
-    )
-    user_prompt = f"""
-请基于下面的会话记录{mode_text}，更新策略为：{update_text}。
-
-要求：
-- 提炼长期可复用的经验、触发场景、推荐流程，不要保存一次性闲聊或敏感信息。
-- 生成新 Skill 时，如果会话里有明确可复用的自动化、文件处理、API 调用或脚本封装逻辑，可以生成 impl_py；否则 impl_py 置为空字符串。
-- impl_py 必须是完整 Python 源码，只定义轻量函数和必要 import，不要执行顶层副作用。
-- 更新已有 Skill 时默认不要生成 impl_py，除非会话非常明确要求新增工具代码。
-- skill_name 使用 kebab-case，只能包含英文字母、数字和连字符。
-
-输出 JSON 字段必须包含：
-{{
-  "skill_name": "kebab-case-name",
-  "description": "English summary",
-  "description_cn": "中文说明",
-  "usage_guidelines": "SKILL.md body guidance",
-  "tags": ["tag"],
-  "triggers": ["trigger phrase"],
-  "workflow": ["step"],
-  "experience_items": ["lesson"],
-  "tool_refs": ["function_name_if_impl_py_defines_it"],
-  "impl_py": ""
-}}
-
-# 会话记录
-{transcript}
-""".strip()
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
 
 
-def generate_skill_draft(provider, transcript, mode="create", target_skill=None, update_strategy="append", fallback_title=""):
-    messages = build_generation_messages(
-        transcript,
-        mode=mode,
-        target_skill=target_skill,
-        update_strategy=update_strategy,
-    )
-    content = collect_llm_content(provider, messages)
-    payload = _extract_json_object(content)
-    draft = normalize_skill_draft(payload, fallback_title=fallback_title, mode=mode)
-    draft["estimated_input_tokens"] = estimate_tokens(transcript)
-    return draft
 
 
 def build_skill_body(draft):
@@ -1137,7 +1043,7 @@ def build_skill_md(draft):
 
 
 def build_skill_json(draft):
-    script_assets = normalize_script_assets(draft.get("script_assets"))
+    script_assets = _dict_list(draft.get("script_assets"))
     resources = normalize_draft_resources(draft.get("resources"))
     for resource in resources:
         if resource["kind"] == "script" and resource["path"].endswith(".py"):
@@ -1314,10 +1220,8 @@ def write_draft_resources(skill_dir, draft):
     return resources
 
 
-def _python_import_roots(code):
-    try:
-        tree = ast.parse(str(code or ""))
-    except SyntaxError:
+def _python_import_roots(tree):
+    if tree is None:
         return set()
     roots = set()
     for node in ast.walk(tree):
@@ -1353,6 +1257,10 @@ def validate_conversation_skill_draft(draft, allowed_source_ids=None):
         fallback_title=_string((draft or {}).get("description")),
         mode=_string((draft or {}).get("mode"), "create"),
     )
+    return _validate_normalized_draft(normalized, allowed_source_ids)
+
+
+def _validate_normalized_draft(normalized, allowed_source_ids=None):
     allowed_ids = set(_string_list(allowed_source_ids or normalized.get("source_message_ids")))
     issues = []
 
@@ -1385,10 +1293,20 @@ def validate_conversation_skill_draft(draft, allowed_source_ids=None):
     if len(normalized.get("instructions_md") or "") > 25_000:
         add("warning", "instructions_too_long", "Skill 正文过长，建议将详细资料移到 references/。")
 
-    ok, error = validate_impl_py(normalized.get("impl_py"))
+    def inspect_python(code):
+        try:
+            tree = ast.parse(str(code or ""))
+        except SyntaxError as exc:
+            location = f"line {exc.lineno}, column {exc.offset}" if exc.lineno else "unknown location"
+            return None, False, f"impl.py syntax error at {location}: {exc.msg}"
+        ok, error = _validate_impl_tree(tree)
+        return tree, ok, error
+
+    impl_tree, ok, error = inspect_python(normalized.get("impl_py"))
     if not ok:
         add("error", "invalid_impl", error, "impl.py")
-    impl_refs = set(extract_impl_tool_refs(normalized.get("impl_py")))
+    impl_refs = {node.name for node in impl_tree.body if isinstance(node, ast.FunctionDef)
+                 and not node.name.startswith("_")} if impl_tree is not None else set()
     declared_refs = set(_string_list(normalized.get("tool_refs")))
     missing_refs = sorted(declared_refs - impl_refs) if normalized.get("impl_py") else []
     if missing_refs:
@@ -1398,7 +1316,7 @@ def validate_conversation_skill_draft(draft, allowed_source_ids=None):
             "impl.py 未定义已声明工具：" + ", ".join(missing_refs),
             "impl.py",
         )
-    import_roots = _python_import_roots(normalized.get("impl_py"))
+    import_roots = _python_import_roots(impl_tree)
     import_sources = {
         name: {"impl.py"} for name in import_roots
     }
@@ -1434,10 +1352,10 @@ def validate_conversation_skill_draft(draft, allowed_source_ids=None):
         if WINDOWS_USER_PATH_RE.search(content) or UNIX_USER_PATH_RE.search(content):
             add("error", "resource_user_path", "资源包含真实 Windows 用户目录。", path)
         if item.get("kind") == "script" and path.endswith(".py"):
-            resource_ok, resource_error = validate_impl_py(content)
+            resource_tree, resource_ok, resource_error = inspect_python(content)
             if not resource_ok:
                 add("error", "invalid_script", resource_error, path)
-            resource_imports = _python_import_roots(content)
+            resource_imports = _python_import_roots(resource_tree)
             import_roots.update(resource_imports)
             for name in resource_imports:
                 import_sources.setdefault(name, set()).add(path)
@@ -1627,7 +1545,7 @@ def save_new_skill(draft, target_root=None):
     if not is_valid_skill_name(skill_name):
         return SaveResult(False, "技能名称支持中文、字母、数字、下划线和连字符，最长 128 字，不能使用系统保留名称。")
 
-    validation = validate_conversation_skill_draft(
+    validation = _validate_normalized_draft(
         draft,
         allowed_source_ids=draft.get("source_message_ids"),
     )
@@ -1639,10 +1557,6 @@ def save_new_skill(draft, target_root=None):
         return SaveResult(False, "Skill validation failed: " + "; ".join(messages))
 
     impl_py = _string(draft.get("impl_py"))
-    ok, error = validate_impl_py(impl_py)
-    if not ok:
-        return SaveResult(False, error)
-
     root = target_root or os.path.join(get_app_data_dir(), "ai_skills")
     target_dir = os.path.join(root, skill_name)
     if os.path.exists(target_dir):
@@ -1771,7 +1685,6 @@ def _update_existing_skill_from_draft_in_place(skill_manager, skill_name, draft,
     if not record:
         return SaveResult(False, f"Skill '{skill_name}' not found.")
 
-    draft = normalize_skill_draft(draft, fallback_title=skill_name, mode="update")
     strategy = (strategy or "append_experience").strip().lower()
     if strategy == "rewrite":
         strategy = "merge_guidance"
@@ -1840,8 +1753,9 @@ def update_existing_skill_from_draft(skill_manager, skill_name, draft, strategy=
             "Target Skill changed after compilation. Recompile the draft before saving.",
             target_path,
         )
-    validation = validate_conversation_skill_draft(
-        {**(draft or {}), "mode": "update"},
+    draft = normalize_skill_draft(draft, fallback_title=skill_name, mode="update")
+    validation = _validate_normalized_draft(
+        draft,
         allowed_source_ids=(draft or {}).get("source_message_ids"),
     )
     if not validation.get("ok"):

@@ -165,7 +165,7 @@ class TestChatRecoveryJournal(unittest.TestCase):
             recovered_message = storage.get_messages("session-recovery")[0]
             self.assertNotEqual(recovered_message.get("id"), "shared-id")
             self.assertEqual(
-                (recovered_message.get("meta") or {}).get("recovered_original_message_id"),
+                (recovered_message.get("meta") or {}).get("original_message_id"),
                 "shared-id",
             )
 

@@ -857,8 +857,10 @@ class PlatformTests(unittest.TestCase):
             item, selected = await self.app.state.releases.github_candidate(actor)
             await self.app.state.releases.import_github(item["id"], selected, actor, item["generation"])
             return item
-        with patch.object(module.httpx, "AsyncClient", side_effect=lambda **kw: original(transport=httpx.MockTransport(download), **kw)):
+        with patch.object(module.httpx, "AsyncClient", side_effect=lambda **kw: original(transport=httpx.MockTransport(download), **kw)), \
+             patch.object(module, "normalize_report", wraps=module.normalize_report) as normalize:
             item = asyncio.run(run())
+        self.assertEqual(normalize.call_count, 1)
         path = "/api/v1/admin/client-releases/" + item["id"]
         ready = self.client.get(path).json()
         self.assertEqual(ready["state"], "ready", ready)

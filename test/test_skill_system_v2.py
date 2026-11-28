@@ -100,9 +100,7 @@ class TestSkillSystemV2(unittest.TestCase):
         return sm
 
     def _build_light_manager(self):
-        sm = SkillManager.__new__(SkillManager)
-        sm.workspace_dir = self.temp_dir
-        sm.config_manager = None
+        sm = SkillManager(workspace_dir=self.temp_dir, auto_load=False, load_mcp_tools=False)
         sm.skills_dirs = [self.skills_dir, self.ai_skills_dir]
         sm.load_skills = lambda: None
         return sm

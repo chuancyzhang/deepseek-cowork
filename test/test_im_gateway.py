@@ -5,7 +5,7 @@ import threading
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -96,6 +96,58 @@ class _StreamDaemonClientStub:
 
 
 class TestImGatewayPendingInteraction(unittest.TestCase):
+    def test_feishu_send_reports_auth_http_and_business_failures(self):
+        provider = im_gateway.FeishuProvider(_ConfigStub({"providers": {"feishu": {
+            "app_id": "test-app", "app_secret": "test-secret"}}}))
+        with patch.object(provider, "_get_tenant_token", return_value=""), \
+             patch.object(im_gateway_runtime.requests, "post") as post:
+            self.assertFalse(provider.send_message("reply", {"message_id": "m"})["ok"])
+            post.assert_not_called()
+        for status, body, expected in ((200, {"code": 0}, True), (500, {"code": 0}, False),
+                                       (200, {"code": 123}, False), (200, ValueError("not json"), False)):
+            with self.subTest(status=status, body=body):
+                response = MagicMock(status_code=status, ok=status == 200)
+                if isinstance(body, Exception):
+                    response.json.side_effect = body
+                else:
+                    response.json.return_value = body
+                with patch.object(provider, "_get_tenant_token", return_value="token"), \
+                     patch.object(im_gateway_runtime.requests, "post", return_value=response) as post:
+                    self.assertEqual(provider.send_message("reply", {"message_id": "m"})["ok"], expected)
+                    post.assert_called_once()
+
+    def test_stop_card_discloses_failure_pending_and_completed_states(self):
+        cases = [(RuntimeError("offline"), "停止未完成"),
+                 (None, "停止请求未收到有效响应"),
+                 ({"status": "error", "error": "unavailable"}, "停止未完成"),
+                 ({"status": "ok", "stopped": True, "released": False}, "停止请求已接收"),
+                 ({"status": "ok", "stopped": True, "released": True}, "已停止当前任务")]
+        for outcome, expected in cases:
+            with self.subTest(outcome=outcome):
+                provider = _ProviderStub({"event_type": "card.action.trigger", "event": {
+                    "event_id": "stop-event", "open_message_id": "card", "action": {"value": {"action": "stop"}}}})
+                provider.update_card_message = MagicMock()
+                daemon = MagicMock()
+                if isinstance(outcome, Exception):
+                    daemon.stop_session.side_effect = outcome
+                else:
+                    daemon.stop_session.return_value = outcome
+                with patch.dict(im_gateway_runtime._CARD_CONTEXT, {"card": {
+                        "conversation_id": "chat", "content_parts": [{"type": "text", "text": "kept output"}]}}), \
+                     patch.object(im_gateway_runtime, "_seen_action", return_value=False):
+                    im_gateway_runtime._handle_im_event({}, provider, _SessionMapperStub(), _ConfigStub(), daemon)
+                self.assertIn(expected, provider.update_card_message.call_args.args[1])
+                self.assertEqual(provider.update_card_message.call_args.kwargs["content_parts"][0]["text"], "kept output")
+
+    def test_final_card_is_not_sent_twice_when_send_result_is_unknown(self):
+        provider = _ProviderStub({"event_type": "im.message.receive_v1", "sender_type": "user",
+            "message_type": "text", "text": "hello", "user_id": "u", "chat_id": "c", "message_id": "single-send"})
+        provider.send_card_reply = MagicMock(return_value=None)
+        with patch.object(im_gateway_runtime, "_stream_im_response",
+                          return_value=({"content": "done"}, "", "", "", False, None, False, False)):
+            im_gateway_runtime._handle_im_event({}, provider, _SessionMapperStub(), _ConfigStub(), _DaemonClientStub(None))
+        provider.send_card_reply.assert_called_once()
+
     def test_gateway_status_redacts_urls_and_secrets(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch(
             "core.im_gateway_status.get_app_data_dir",

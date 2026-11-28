@@ -396,20 +396,16 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
             self._cleanup_legacy_plan_meta(conn)
 
     def _parse_json_dict(self, text):
-        if not text:
-            return {}
-        try:
-            parsed = json.loads(text)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
+        parsed = self._parse_json_value(text, default={})
+        return parsed if isinstance(parsed, dict) else {}
 
     def _parse_json_value(self, text, default=None):
         if text is None or text == "":
             return default
         try:
             return json.loads(text)
-        except Exception:
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning("chat_json_decode_failed error_type=%s", type(exc).__name__)
             return default
 
     def _json_dumps(self, value):
@@ -636,13 +632,8 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
         return persistable_messages, len(removed_ids)
 
     def _message_signature(self, message):
-        if not isinstance(message, dict):
-            return None
-        signature = canonical_ledger_message(message, include_id=False)
-        try:
-            return json.dumps(signature, ensure_ascii=False, sort_keys=True)
-        except Exception:
-            return None
+        from .conversation_integrity import canonical_ledger_message_signature
+        return canonical_ledger_message_signature(message, include_id=False)
 
     def normalize_messages(self, messages, conversation_id=""):
         """Normalize message identities without dropping legacy history."""
@@ -732,14 +723,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
             ).fetchone()
         if not row:
             return {}
-        raw_meta = row["meta"]
-        if not raw_meta:
-            return {}
-        try:
-            parsed = json.loads(raw_meta)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
+        return self._parse_json_dict(row["meta"])
 
     def get_conversation_record(self, conversation_id):
         with self._connect() as conn:
@@ -749,14 +733,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
             ).fetchone()
         if not row:
             return None
-        meta = {}
-        if row["meta"]:
-            try:
-                meta = json.loads(row["meta"])
-                if not isinstance(meta, dict):
-                    meta = {}
-            except Exception:
-                meta = {}
+        meta = self._parse_json_dict(row["meta"])
         return {
             "id": row["id"],
             "title": row["title"],
@@ -992,23 +969,30 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
         for row in rows:
             messages.append(self._message_row_to_dict(row))
         normalized_messages = self.normalize_messages(messages, conversation_id=f"agent:{agent_id}")
-        try:
-            changed = json.dumps(messages, ensure_ascii=False, sort_keys=True) != json.dumps(
-                normalized_messages,
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-        except Exception:
-            changed = messages != normalized_messages
+        changed = messages != normalized_messages
         if changed:
             self.replace_agent_messages(agent_id, normalized_messages)
         return normalized_messages
 
     def append_agent_messages(self, agent_id, new_messages):
-        existing = self.get_agent_messages(agent_id)
-        payload = existing + (new_messages if isinstance(new_messages, list) else [])
-        self.replace_agent_messages(agent_id, payload)
-        return self.get_agent_messages(agent_id)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute("SELECT * FROM agent_messages WHERE agent_id = ? ORDER BY position ASC",
+                                (agent_id,)).fetchall()
+            existing = [self._message_row_to_dict(row) for row in rows]
+            messages = self.normalize_messages(existing + (new_messages if isinstance(new_messages, list) else []),
+                                               conversation_id=f"agent:{agent_id}")
+            start = len(existing)
+            if messages[:start] != existing:
+                self._preserve_persisted_message_created_at(rows, messages)
+                conn.execute("DELETE FROM agent_messages WHERE agent_id = ?", (agent_id,))
+                start = 0
+            now = int(time.time())
+            for index in range(start, len(messages)):
+                self._insert_message_row(conn, "agent_messages", "agent_id", agent_id, messages[index], index, now)
+            inserted = conn.execute("SELECT * FROM agent_messages WHERE agent_id = ? AND position >= ? ORDER BY position ASC",
+                                    (agent_id, start)).fetchall()
+            return messages[:start] + [self._message_row_to_dict(row) for row in inserted]
 
     def set_agent_status(self, agent_id, status, last_error=None, last_result=None, meta_patch=None):
         now = int(time.time())
@@ -1439,14 +1423,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
     def _conversation_rows_to_dicts(self, rows):
         conversations = []
         for row in rows:
-            meta = {}
-            if row["meta"]:
-                try:
-                    parsed = json.loads(row["meta"])
-                    if isinstance(parsed, dict):
-                        meta = parsed
-                except Exception:
-                    meta = {}
+            meta = self._parse_json_dict(row["meta"])
             conversations.append(
                 {
                     "id": row["id"],
@@ -1639,10 +1616,7 @@ class ChatStorage(AgentInboxStorage, ContextStorage, TeamSpaceConversationStorag
                         "created_at_iso": self._timestamp_to_iso(msg_row["created_at"]),
                     }
                     if msg_row["tool_calls"]:
-                        try:
-                            message["tool_calls"] = json.loads(msg_row["tool_calls"])
-                        except Exception:
-                            message["tool_calls"] = msg_row["tool_calls"]
+                        message["tool_calls"] = self._parse_json_value(msg_row["tool_calls"], default=msg_row["tool_calls"])
                     if msg_row["reasoning_content"] is not None:
                         message["reasoning_content"] = msg_row["reasoning_content"]
                     content_parts = self._parse_json_value(msg_row["content_parts"])

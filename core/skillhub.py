@@ -170,7 +170,7 @@ class SkillHubClient:
                     url = urljoin(url, response.headers["Location"])
                     continue
                 if response.status_code == 404:
-                    raise RuntimeError(f"SkillHub 未提供此版本的下载包（{version}，HTTP 404）。请刷新 SkillHub 后查看可用版本；若仍失败，可到官网查看发布状态。已安装技能未改变。")
+                    raise RuntimeError("SkillHub 图标不存在（HTTP 404）。请刷新后重试，已安装技能未改变。")
                 if response.status_code != 200:
                     raise ValueError("图标下载失败")
                 content = bytearray()
@@ -189,8 +189,6 @@ class SkillHubClient:
                     BASE_URL + path, params=params, timeout=(5, 20),
                     headers={"User-Agent": f"Cowork/{APP_VERSION}", "Accept": "application/json"},
                 )
-                if response.status_code == 429 or response.status_code >= 500:
-                    response.raise_for_status()
                 response.raise_for_status()
                 body = response.json()
                 if not isinstance(body, dict):

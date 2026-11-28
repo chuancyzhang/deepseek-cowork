@@ -56,6 +56,12 @@ class Skills:
         self.calls.append((name, copy.deepcopy(args)))
         return self.execute(name, args, context)
 
+    def is_tool_allowed(self, name, run_mode):
+        return True
+
+    def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+        return True
+
 
 class Provider:
     provider_name = "stub"

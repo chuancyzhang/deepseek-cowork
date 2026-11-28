@@ -9,6 +9,7 @@ from core.browser_backend import bind_run, finish_run, browser_operation, EXTERN
 
 def browser_config(directory):
     config = ConfigManager.__new__(ConfigManager)
+    config._config_load_error = None
     config.data_dir = str(directory)
     config.config_path = str(Path(directory) / "config.json")
     config.config = {"enabled_skills": ["browser-automation"]}

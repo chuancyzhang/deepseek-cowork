@@ -14,7 +14,6 @@ from core.theme_service import (
     theme_manifest_schema,
     theme_token_group,
     validate_theme_manifest,
-    validate_theme_overrides,
 )
 
 
@@ -133,7 +132,22 @@ def inspect_ui_theme(theme_id="", include_schema=True, _context=None):
 def _validate_ui_theme(
     name, overrides, workspace_scene=None, surfaces=None, components=None, content=None, assets=None
 ):
-    normalized = validate_theme_overrides(overrides, default_design_tokens())
+    normalized_manifest = validate_theme_manifest(
+        {
+            "format": "cowork-theme",
+            "schema_version": 2,
+            "id": "validation",
+            "name": str(name or "主题校验"),
+            "overrides": overrides,
+            "assets": assets or {},
+            "workspace_scene": workspace_scene or DEFAULT_WORKSPACE_SCENE,
+            "surfaces": surfaces or {},
+            "components": components or {},
+            "content": content or {},
+        },
+        default_design_tokens(),
+    )
+    normalized = normalized_manifest["overrides"]
     requested_fonts = {
         str(normalized.get(field) or "").strip()
         for field in ("font_family", "mono_font_family")
@@ -152,21 +166,6 @@ def _validate_ui_theme(
             "name": str(name or "主题校验"),
             "base": DEFAULT_THEME_ID,
             "overrides": normalized,
-        },
-        default_design_tokens(),
-    )
-    normalized_manifest = validate_theme_manifest(
-        {
-            "format": "cowork-theme",
-            "schema_version": 2,
-            "id": "validation",
-            "name": str(name or "主题校验"),
-            "overrides": normalized,
-            "assets": assets or {},
-            "workspace_scene": workspace_scene or DEFAULT_WORKSPACE_SCENE,
-            "surfaces": surfaces or {},
-            "components": components or {},
-            "content": content or {},
         },
         default_design_tokens(),
     )

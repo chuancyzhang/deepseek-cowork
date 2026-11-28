@@ -1,12 +1,9 @@
 (function () {
   "use strict";
 
-  const CHUNK_SIZE = 192 * 1024;
   const frame = document.getElementById("html-frame");
   let bridge = null;
   let sessionId = "";
-  let loadingChunks = [];
-  let loadingExpected = 0;
   let suppressDirty = true;
 
   function reportError(error) {
@@ -22,7 +19,7 @@
   }
 
   function markDirty() {
-    if (!suppressDirty && bridge) bridge.setDirty(true);
+    if (!suppressDirty && bridge) bridge.setDirty(sessionId, true);
   }
 
   function attachEditor() {
@@ -34,14 +31,12 @@
     doc.addEventListener("input", markDirty);
     doc.addEventListener("change", markDirty);
     suppressDirty = false;
-    bridge.setDirty(false);
+    bridge.setDirty(sessionId, false);
     bridge.editorLoaded(sessionId);
   }
 
-  function loadDocument() {
+  function loadDocument(content) {
     try {
-      const content = loadingChunks.join("");
-      loadingChunks = [];
       suppressDirty = true;
       frame.onload = attachEditor;
       frame.srcdoc = content;
@@ -73,16 +68,7 @@
       doc.body.contentEditable = "true";
       doc.body.spellcheck = true;
       doc.body.dataset.coworkEditing = "true";
-      const total = Math.max(1, Math.ceil(value.length / CHUNK_SIZE));
-      bridge.beginPayload(sessionId, "html", total);
-      for (let index = 0; index < total; index += 1) {
-        bridge.appendPayload(
-          sessionId,
-          index,
-          value.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE)
-        );
-      }
-      bridge.finishPayload(sessionId);
+      bridge.payload(sessionId, "html", value);
     } catch (error) {
       reportError(error);
     }
@@ -90,7 +76,6 @@
 
   function dispose() {
     suppressDirty = true;
-    loadingChunks = [];
     frame.onload = null;
     frame.removeAttribute("srcdoc");
     frame.src = "about:blank";
@@ -103,21 +88,10 @@
   }
 
   window.coworkEditor = {
-    beginLoad(id, total) {
+    load(id, value) {
       dispose();
-      sessionId = String(id || "");
-      loadingExpected = Number(total) || 0;
-      loadingChunks = new Array(loadingExpected);
-    },
-    appendLoadChunk(index, chunk) {
-      loadingChunks[Number(index)] = String(chunk || "");
-    },
-    finishLoad() {
-      if (!loadingExpected || loadingChunks.some((item) => typeof item !== "string")) {
-        reportError("HTML 分块传输不完整，无法进入编辑。");
-        return;
-      }
-      loadDocument();
+      sessionId = id;
+      return loadDocument(value);
     },
     requestSave,
     command,

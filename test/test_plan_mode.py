@@ -49,12 +49,15 @@ def test_bundled_grilling_plugin_preserves_existing_prompt_bytes():
 
 
 class _ConfigStub:
-    def __init__(self, history_dir):
+    def __init__(self, history_dir, enabled_skills=()):
         self._history_dir = history_dir
+        self.enabled_skills = list(enabled_skills)
 
     def get(self, _key, default=None):
         if _key == "api_key":
             return "test-key"
+        if _key == "enabled_skills":
+            return self.enabled_skills
         return default
 
     def get_chat_history_dir(self):
@@ -172,6 +175,12 @@ class TestAppendOnlySkillStateLedger(unittest.TestCase):
             def get_full_skill_prompt(self, _name): return "# Builtin instructions"
             def builtin_skill_catalog(self, *_args): return [{"name": "demo"}] if self.available else []
             def select_builtin_skill_prompts(self, query, *_args): return ["demo"] if self.available and query == "Use builtin" else []
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
         from core.agent import LLMWorker
         with tempfile.TemporaryDirectory() as directory, patch("core.agent.SkillManager", Manager):
             worker = LLMWorker([], _ConfigStub(directory), workspace_dir=directory, run_context={"mode": RUN_MODE_EXECUTION})
@@ -204,6 +213,12 @@ class TestAppendOnlySkillStateLedger(unittest.TestCase):
 
             def get_full_skill_prompt(self, skill_name):
                 return self.prompts.get(skill_name, "")
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
 
         from core.agent import LLMWorker
 
@@ -301,6 +316,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def get_brief_skill_prompt(self, skill_name):
                 return "Fixture Design brief" if skill_name == "fixture-design" else ""
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -310,7 +331,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def __init__(self, events):
                 self.events = events
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 system_messages = [msg.get("content", "") for msg in messages if msg.get("role") == "system"]
                 self.events.append(("request", system_messages))
                 yield {"type": "content", "content": "done"}
@@ -384,6 +405,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def get_system_prompts(self, query_text="", limit=6, preferred_skill_names=None, exclude_skill_names=None):
                 return "General skill prompt"
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -393,7 +420,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def __init__(self, events):
                 self.events = events
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 system_messages = [msg.get("content", "") for msg in messages if msg.get("role") == "system"]
                 self.events.append(("request", system_messages))
                 yield {"type": "content", "content": "done"}
@@ -410,7 +437,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             ):
                 worker = LLMWorker(
                     [{"role": "user", "content": "open the site"}],
-                    _ConfigStub(temp_dir),
+                    _ConfigStub(temp_dir, enabled_skills=["browser-automation"]),
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION, "selected_skill_names": ["browser-automation"]},
                 )
@@ -440,6 +467,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def get_system_prompts(self, query_text=""):
                 return ""
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -449,7 +482,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def __init__(self, events):
                 self.events = events
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 system_messages = [msg.get("content", "") for msg in messages if msg.get("role") == "system"]
                 self.events.append(("request", system_messages))
                 yield {"type": "content", "content": "done"}
@@ -503,6 +536,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def get_brief_skill_prompt(self, skill_name):
                 return "Fixture Design brief" if skill_name == "fixture-design" else ""
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -512,7 +551,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def __init__(self, events):
                 self.events = events
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 system_messages = [msg.get("content", "") for msg in messages if msg.get("role") == "system"]
                 self.events.append(("request", system_messages))
                 yield {"type": "content", "content": "done"}
@@ -586,6 +625,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def get_full_skill_prompt(self, skill_name):
                 return "# Fixture Design Full Skill\nUse HTML as design medium." if skill_name == "fixture-design" else ""
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -595,7 +640,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def __init__(self, events):
                 self.events = events
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.events.append(("request", [msg.get("content", "") for msg in messages if msg.get("role") == "system"]))
                 yield {"type": "content", "content": "done"}
 
@@ -664,7 +709,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.calls += 1
                 if self.calls == 1:
                     yield {
@@ -725,6 +770,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def check_for_updates(self):
                 return False
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         from core.agent import LLMWorker
 
         temp_dir = tempfile.mkdtemp()
@@ -732,7 +783,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             with patch("core.agent.SkillManager", _SkillManagerStub):
                 worker = LLMWorker(
                     [{"role": "user", "content": "browse"}],
-                    _ConfigStub(temp_dir),
+                    _ConfigStub(temp_dir, enabled_skills=["browser-automation"]),
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION, "selected_skill_names": ["browser-automation"]},
                 )
@@ -798,7 +849,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 self.base_url = ""
                 self.thinking_enabled = False
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 tool_names = [(item.get("function") or {}).get("name") for item in (tools or [])]
                 system_messages = [
                     item.get("content", "")
@@ -873,6 +924,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     "Use `command-tools.run_skill_script` to execute these scripts inside the sandbox runtime."
                 )
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         class _ProviderStub:
             def __init__(self, calls):
                 self.calls = calls
@@ -881,7 +938,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 self.base_url = ""
                 self.thinking_enabled = False
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.calls.append(
                     {
                         "messages": messages,
@@ -988,7 +1045,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 self.base_url = ""
                 self.thinking_enabled = False
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.calls.append(
                     {
                         "messages": messages,
@@ -1051,6 +1108,10 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
         from core.agent import LLMWorker
 
         worker = LLMWorker.__new__(LLMWorker)
+
+        worker.data_security_run = None
+
+        worker._enterprise_capability_scope = ""
         worker.skill_manager = _SkillManagerStub()
         worker.observability_signal = _Signal()
         current_messages = [{"role": "user", "content": "hello"}]
@@ -1088,7 +1149,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def __init__(self, *_args, **_kwargs):
                 pass
 
-            def get_tool_definitions(self):
+            def get_tool_definitions(self, run_mode=None, discovered_tool_names=None, run_context=None):
                 names = [
                     "bash",
                     "apply_patch",
@@ -1106,6 +1167,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
 
             def check_for_updates(self):
                 return False
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
 
         from core.agent import LLMWorker
 
@@ -1143,6 +1210,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def check_for_updates(self):
                 return False
 
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
         from core.agent import LLMWorker
 
         temp_dir = tempfile.mkdtemp()
@@ -1164,7 +1237,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def __init__(self, *_args, **_kwargs):
                 pass
 
-            def get_tool_definitions(self, run_mode=None, discovered_tool_names=None, include_deferred=False):
+            def get_tool_definitions(self, run_mode=None, discovered_tool_names=None, include_deferred=False, run_context=None):
                 names = ["request_user_input"]
                 return [
                     {"type": "function", "function": {"name": name, "description": "", "parameters": {}}}
@@ -1174,7 +1247,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def is_tool_allowed(self, name, run_mode):
                 return True
 
-            def is_tool_visible(self, name, run_mode, discovered_tool_names=None):
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
                 return True
 
             def get_skill_of_tool(self, _tool_name):
@@ -1201,7 +1274,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.calls += 1
                 if self.calls == 1:
                     yield {
@@ -1296,7 +1369,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.calls += 1
                 if self.calls == 1:
                     yield {
@@ -1361,6 +1434,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
 
             def check_for_updates(self):
                 return False
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
 
         from core.agent import LLMWorker
 
@@ -1441,6 +1520,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
 
             def get_tool_definitions(self, *args, **kwargs):
                 return []
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+                return True
 
         from core.agent import LLMWorker
 
@@ -1554,7 +1639,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.calls += 1
                 if self.calls == 1:
                     yield {"type": "content", "content": "目标、风险和未决项总结。"}
@@ -1655,7 +1740,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
                 self.calls += 1
                 yield {
                     "type": "tool_call",

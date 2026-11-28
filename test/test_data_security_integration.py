@@ -161,14 +161,16 @@ class DataSecurityIntegrationTests(unittest.TestCase):
         self.assertEqual(len(assistants), 1)
         self.assertEqual(assistants[0]["content"], "alice@example.org")
 
-    def test_disabled_worker_keeps_invalid_tool_arguments_existing_fallback(self):
+    def test_disabled_security_still_rejects_invalid_tool_arguments_without_execution(self):
         import test_agent_bootstrap as bootstrap
         requests, result, _, calls, _, _ = bootstrap.TestAgentBootstrap().run_worker(
             [[bootstrap.tool_call("read_file", "invalid", '{invalid')], [{"type": "content", "content": "done"}]],
             history=[{"role": "user", "content": "read"}], profile={**bootstrap.PROFILE, "bootstrap_plugin": ""})
         self.assertNotIn("error", result)
-        self.assertEqual(calls, [("read_file", {})])
+        self.assertEqual(calls, [])
         self.assertEqual(len(requests), 2)
+        tool_result = next(message for message in result["generated_messages"] if message.get("role") == "tool")
+        self.assertEqual(tool_result["result_obj"]["status"], "invalid_tool_call")
 
     def test_subagent_inherits_frozen_policy_and_conversation_scope(self):
         import test_agent_bootstrap as bootstrap

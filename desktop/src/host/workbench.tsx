@@ -70,7 +70,7 @@ export function useWorkbenchController() {
       if (latest && workspaceDirectory(latest) === directory && host.get(key, null) === pending) host.set(key, result);
     };
     try { finish({directory, data: await call<WorkspaceChangeList>('workspace.changes', {conversation_id: id})}); }
-    catch (failure) { finish({directory, data: pending.data, error: (failure as Error).message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')}); }
+    catch (failure) { finish({directory, data: pending.data, error: (failure as Error).message}); }
   }, [host]);
   const [editors, setEditors] = useSessionField<Editor[]>('editors', []);
   const [activeFile, setActiveFile] = useSessionField('activeFile', '');
@@ -588,7 +588,7 @@ export function useWorkbenchController() {
       if (selectedId.current === id) applyDraft(drafts.get(id).value, false);
       await saveDraft(id);
       nearBottom.current = true; await loadConversation(id, true); await refreshList();
-    } catch (failure) { error((failure as Error).message); throw failure; } finally { host.set(sendingKey, false);host.set(targetSendingKey, false); if(selectedId.current===requestedId)composer.current?.focus(); }
+    } catch (failure) { error((failure as Error).message); } finally { host.set(sendingKey, false);host.set(targetSendingKey, false); if(selectedId.current===requestedId)composer.current?.focus(); }
   }
   async function stop() {
     if (!current?.run) return;

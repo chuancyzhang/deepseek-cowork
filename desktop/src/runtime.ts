@@ -22,10 +22,11 @@ export function unwrapEvents(events: any[]): RuntimeEvent[] {
   return events.map(event => event.payload ? { ...event.payload, sequence: event.sequence, created_at: event.payload.created_at ?? event.created_at,
     persisted_position: event.persisted_position } : event).filter(event => typeof event.type === 'string');
 }
+function validMessageTime(createdAt?: number): createdAt is number {
+  return typeof createdAt === 'number' && Number.isFinite(createdAt) && createdAt > 0 && createdAt <= 8.64e12;
+}
 function messageDate(createdAt?: number) {
-  if (typeof createdAt !== 'number' || !Number.isFinite(createdAt) || createdAt <= 0) return null;
-  const date = new Date(createdAt * 1000);
-  return Number.isFinite(date.getTime()) ? date : null;
+  return validMessageTime(createdAt) ? new Date(createdAt * 1000) : null;
 }
 export function messageTime(createdAt?: number) {
   const date = messageDate(createdAt);
@@ -53,7 +54,7 @@ export type TurnTiming = {id: string; start?: number; end?: number; thinking: Re
 export function turnTimings(events: RuntimeEvent[]) {
   const turns = new Map<string, TurnTiming>(), thinking = new Map<string, {source: string; interval: TimeInterval}>();
   for (const event of events) {
-    if (!event.run_id || !messageDate(event.created_at)) continue;
+    if (!event.run_id || !validMessageTime(event.created_at)) continue;
     const time = event.created_at!;
     const turn = turns.get(event.run_id) || {id:event.run_id, thinking:{}};
     turns.set(event.run_id, turn);
@@ -130,7 +131,7 @@ export class MessageProjection {
     const id = event.source_message_id || `live-${event.run_id || ''}`;
     const prior = live.get(id);
     const message: Message = {...(prior?.message||{ id, role: 'assistant', content: '', reasoning_content: '', tool_calls: [], live:false, meta: { turn_id: event.run_id } })};
-    if (!messageDate(message.created_at) && messageDate(event.created_at)) message.created_at = event.created_at;
+    if (!validMessageTime(message.created_at) && validMessageTime(event.created_at)) message.created_at = event.created_at;
     if (event.type === 'content') message.content += event.delta || '';
     if (event.type === 'content_snapshot') message.content = event.content || '';
     if (event.type === 'thinking') message.reasoning_content += event.delta || '';
@@ -195,14 +196,14 @@ export function interleaveGuidance(messages: Message[], events: RuntimeEvent[]):
   const result = [...messages];
   for (const run of runs) {
     const entries = result.filter(message => messageRun(message) === run);
-    const guidance = entries.filter(message => isGuidance(message) && messageDate(guidanceTime(message)))
+    const guidance = entries.filter(message => isGuidance(message) && validMessageTime(guidanceTime(message)))
       .sort((a, b) => guidanceTime(a) - guidanceTime(b));
     // Qt histories already contain explicit display anchors around guidance.
     if (!guidance.length || entries.some(message => message.meta?.ui_visible_fragment)) continue;
     const bucket = (time: number) => guidance.filter(message => guidanceTime(message) <= time).length;
     const sourceEvents = new Map<string, RuntimeEvent[]>(), toolTimes = new Map<string, number>();
     for (const event of events) {
-      if (event.run_id !== run || !messageDate(event.created_at)) continue;
+      if (event.run_id !== run || !validMessageTime(event.created_at)) continue;
       if (event.type === 'tool_result' && event.data?.id) toolTimes.set(event.data.id, event.created_at!);
       if (event.source_message_id && ['content', 'content_snapshot', 'thinking', 'tool_call'].includes(event.type)) {
         const list = sourceEvents.get(event.source_message_id) || [];

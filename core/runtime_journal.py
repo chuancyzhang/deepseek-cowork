@@ -197,7 +197,7 @@ class RuntimeJournal:
     def _decode_jsonl_payload(self, raw_line, path, record_type):
         try:
             envelope = json.loads(raw_line)
-        except Exception as exc:
+        except (json.JSONDecodeError, UnicodeError) as exc:
             raise RuntimeJournalError(
                 f"invalid runtime {record_type} JSON: {path} | {exc}"
             ) from exc

@@ -24,7 +24,7 @@ from core.llm.providers import GPT_5_6_CONTEXT_WINDOW_TOKENS, is_gpt_5_6_model
 from core.message_persistence import filter_persistable_messages
 from core.runtime_journal import RUN_TERMINAL_STATUSES, RuntimeJournal, RuntimeJournalError
 from core.runtime_stream import RuntimeStream
-from core.conversation_integrity import merge_messages_by_id
+from core.conversation_integrity import next_message_sequence, merge_messages_by_id
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 
 
@@ -104,8 +104,6 @@ def _session_command(method):
     @wraps(method)
     def serialized(self, session_id, *args, **kwargs):
         with self.lock:
-            if not hasattr(self, "command_locks"):
-                self.command_locks = {}
             lock = self.command_locks.setdefault(session_id, threading.RLock())
         with lock:
             return method(self, session_id, *args, **kwargs)
@@ -124,6 +122,8 @@ class RuntimeCoordinator:
         self.chat_storage.runtime_journal = self.runtime_journal
         self.shutdown_requested = False
         self.sessions = {}
+        self.command_locks = {}
+        self.desktop_store = None
         self.streams = {}
         self.active_workers = {}
         self.cancelled_runs = set()
@@ -186,7 +186,7 @@ class RuntimeCoordinator:
             if self.accepted_runs.get(run_id) != session_id:
                 return False
             self.cancelled_runs.add((session_id, run_id))
-            active = self.active_workers.get(session_id)
+            active = self.active_workers.get(session_id) or {}
             worker = active.get("worker") if active and active.get("run_id") == run_id else None
         if worker:
             worker.execution_authorization.cancel()
@@ -198,7 +198,7 @@ class RuntimeCoordinator:
     def run_status(self, session_id, run_id, status, error=""):
         with self.runtime_journal.session_lock(session_id):
             run = self.runtime_journal.update_run(session_id, run_id, {"status": status, "terminal_error": str(error)})
-            if hasattr(self, "desktop_store"):
+            if self.desktop_store is not None:
                 self.desktop_store.set_run(run_id, run["status"], run.get("terminal_error", ""))
             if run["status"] in RUN_TERMINAL_STATUSES:
                 from core.turn_files import TurnFileStore
@@ -213,6 +213,25 @@ class RuntimeCoordinator:
         manifests, errors = self.runtime_journal.scan_manifests()
         if errors:
             raise RuntimeJournalError("运行索引恢复失败：" + str(errors))
+        from core.chat_recovery_journal import ChatRecoveryJournal
+        history_dir = self.config_manager.get_chat_history_dir()
+        pending_paths = ChatRecoveryJournal.pending_paths(history_dir)
+        pending_manifests = [manifest for manifest in manifests if isinstance(manifest.get("pending_commit"), dict)]
+        if pending_paths or pending_manifests:
+            recovered, errors = ChatRecoveryJournal(history_dir, self.runtime_journal).recover_into(
+                self.chat_storage, scan={"pending_chat_save_paths": pending_paths,
+                    "runtime_manifests": pending_manifests, "errors": []})
+            failures = []
+            for error in errors:
+                if error.get("source") == "pending_chat_save_quarantined" and error.get("quarantine_path"):
+                    runtime_log.warning("startup_chat_recovery_quarantined path=%s reason=%s",
+                                        error["quarantine_path"], error.get("error"))
+                else:
+                    failures.append(error)
+            runtime_log.info("startup_chat_recovery completed=%s quarantined=%s failed=%s",
+                             len(recovered), len(errors) - len(failures), len(failures))
+            if failures:
+                raise RuntimeJournalError("历史恢复未完成，原历史与恢复文件已保留：" + str(failures))
         pending.update((item["session_id"], item["active_run_id"]) for item in manifests if item.get("active_run_id"))
         for cid, rid in pending:
             with self.runtime_journal.session_lock(cid):
@@ -475,18 +494,7 @@ class RuntimeCoordinator:
             meta["turn_id"] = str(turn_id)
         if request_id:
             meta["request_id"] = str(request_id)
-        sequences = []
-        for existing in messages:
-            existing_meta = existing.get("meta") if isinstance(existing, dict) else None
-            if not isinstance(existing_meta, dict):
-                continue
-            try:
-                existing_sequence = int(existing_meta.get("sequence"))
-            except (TypeError, ValueError):
-                continue
-            if existing_sequence >= 0:
-                sequences.append(existing_sequence)
-        meta["sequence"] = max(sequences, default=len(messages) - 1) + 1
+        meta["sequence"] = next_message_sequence(messages)
         message = {
             "id": stable_id,
             "role": "user",
@@ -687,7 +695,7 @@ class RuntimeCoordinator:
                 return False
             if run_record and (run_record.get("stop_requested") or run_record["status"] in RUN_TERMINAL_STATUSES):
                 return False
-            active = self.active_workers.get(session_id)
+            active = self.active_workers.get(session_id) or {}
             if active and active.get("worker") is not worker:
                 raise RuntimeError("当前对话已有活动运行。")
             self.active_workers[session_id] = {
@@ -700,12 +708,12 @@ class RuntimeCoordinator:
     
     def clear_active_worker(self, session_id, *, expected_worker=None, expected_run_id=""):
         with self.lock:
-            active = self.active_workers.get(session_id)
+            active = self.active_workers.get(session_id) or {}
             if not active:
                 return False
-            active_worker = active.get("worker") if isinstance(active, dict) else active
+            active_worker = active.get("worker")
             active_run_id = str(
-                (active.get("run_id") if isinstance(active, dict) else "")
+                active.get("run_id")
                 or getattr(active_worker, "request_id", "")
                 or ""
             )
@@ -737,14 +745,8 @@ class RuntimeCoordinator:
                 "reason": reason,
                 "created_at": time.time(),
             }
-        try:
-            worker.finished.subscribe(cleanup)
-        except Exception as e:
-            _log_daemon(f"detach worker connect finished failed session_id={session_id} error={e}")
-        try:
-            is_running = bool(worker.is_running())
-        except Exception:
-            is_running = True
+        worker.finished.subscribe(cleanup)
+        is_running = worker.is_running()
         if not is_running:
             cleanup()
             return False
@@ -765,10 +767,10 @@ class RuntimeCoordinator:
         expected_run_id = str(expected_run_id or "").strip()
         interrupted_run_ids = set()
         with self.lock:
-            active = self.active_workers.get(session_id)
-            worker = active.get("worker") if isinstance(active, dict) else active
+            active = self.active_workers.get(session_id) or {}
+            worker = active.get("worker")
             active_run_id = str(
-                (active.get("run_id") if isinstance(active, dict) else "")
+                active.get("run_id")
                 or getattr(worker, "request_id", "")
                 or ""
             )
@@ -834,7 +836,7 @@ class RuntimeCoordinator:
                     if record and record["status"] not in RUN_TERMINAL_STATUSES:
                         record = self.runtime_journal.update_run(session_id, run_id,
                             {"status": "stopping", "stop_requested": True, "terminal_error": "interrupted by user"})
-                        if hasattr(self, "desktop_store"):
+                        if self.desktop_store is not None:
                             self.desktop_store.set_run(run_id, "stopping", "")
                 if record and record.get("stop_requested"):
                     interrupted_run_ids.add(run_id)
@@ -900,15 +902,10 @@ class RuntimeCoordinator:
                 raise ValueError("补充消息标识已用于其他内容。")
             return previous["result"]
         with self.lock:
-            active = self.active_workers.get(session_id)
-            if isinstance(active, dict):
-                worker = active.get("worker")
-                active_turn_id = str(active.get("turn_id") or "")
-                writer_owner = str(active.get("writer_owner") or "")
-            else:
-                worker = active
-                active_turn_id = str(getattr(worker, "turn_id", "") or "") if worker else ""
-                writer_owner = ""
+            active = self.active_workers.get(session_id) or {}
+            worker = active.get("worker")
+            active_turn_id = str(active.get("turn_id") or "")
+            writer_owner = str(active.get("writer_owner") or "")
         if not worker:
             return {"accepted": False, "error": "turn_not_active", "turn_id": active_turn_id}
         if not expected or expected != active_turn_id:
@@ -962,13 +959,9 @@ class RuntimeCoordinator:
 
     def update_guidance_session(self, session_id, expected_turn_id, message_id, message):
         with self.lock:
-            active = self.active_workers.get(session_id)
-            if isinstance(active, dict):
-                worker = active.get("worker")
-                active_turn_id = str(active.get("turn_id") or "")
-            else:
-                worker = active
-                active_turn_id = str(getattr(worker, "turn_id", "") or "") if worker else ""
+            active = self.active_workers.get(session_id) or {}
+            worker = active.get("worker")
+            active_turn_id = str(active.get("turn_id") or "")
         expected = str(expected_turn_id or "")
         if not worker:
             return {"updated": False, "error": "turn_not_active", "turn_id": active_turn_id}
@@ -983,13 +976,9 @@ class RuntimeCoordinator:
 
     def delete_guidance_session(self, session_id, expected_turn_id, message_id):
         with self.lock:
-            active = self.active_workers.get(session_id)
-            if isinstance(active, dict):
-                worker = active.get("worker")
-                active_turn_id = str(active.get("turn_id") or "")
-            else:
-                worker = active
-                active_turn_id = str(getattr(worker, "turn_id", "") or "") if worker else ""
+            active = self.active_workers.get(session_id) or {}
+            worker = active.get("worker")
+            active_turn_id = str(active.get("turn_id") or "")
         expected = str(expected_turn_id or "")
         if not worker:
             return {"deleted": False, "error": "turn_not_active", "turn_id": active_turn_id}
@@ -1503,13 +1492,19 @@ class RuntimeRequest:
 
     def __init__(self, state, send, disconnect):
         self.state, self.send, self.disconnect = state, send, disconnect
+        self._claimed_run = None
+        self._stream_pipeline = None
+        self._stream_worker = None
+        self._stream_finalized = False
+        self._update_request_token = None
+        self._update_save_error = ""
 
     def execute(self, data):
         try:
             return self.dispatch(data)
         except Exception as exc:
-            claimed = getattr(self, "_claimed_run", None)
-            if claimed and not getattr(self, "_stream_finalized", False):
+            claimed = self._claimed_run
+            if claimed and not self._stream_finalized:
                 session_id, run_id = claimed
                 try:
                     status = "interrupted" if (session_id, run_id) in self.state.cancelled_runs else "failed"
@@ -1525,11 +1520,9 @@ class RuntimeRequest:
         if action in {"send_message", "send_message_stream", "subagent_control"}:
             state = self.state
             with state.lock:
-                if getattr(state, "update_preparing", False):
+                if state.update_preparing:
                     self.send({"status": "error", "type": "error", "error": "应用正在准备更新，请更新完成后再试。"})
                     return
-                if not hasattr(state, "update_requests"):
-                    state.update_requests = {}
                 self._update_request_token = uuid.uuid4().hex
                 state.update_requests[self._update_request_token] = (str(data.get("session_id") or ""), str(data.get("request_id") or ""))
         if action == "prepare_update":
@@ -1579,10 +1572,10 @@ class RuntimeRequest:
                 self.send({"status": "error", "error": "Run not found"})
                 return
             with self.state.lock:
-                active = self.state.active_workers.get(session_id)
-                active_worker = active.get("worker") if isinstance(active, dict) else active
+                active = self.state.active_workers.get(session_id) or {}
+                active_worker = active.get("worker")
                 active_run_id = str(
-                    (active.get("run_id") if isinstance(active, dict) else "")
+                    active.get("run_id")
                     or getattr(active_worker, "request_id", "")
                     or ""
                 )
@@ -1808,7 +1801,7 @@ class RuntimeRequest:
                 if worker_holder.get("stream_failed"):
                     return
                 worker_holder["stream_failed"] = str(exc)
-                current_pipeline = getattr(self, "_stream_pipeline", None)
+                current_pipeline = self._stream_pipeline
                 if current_pipeline is not None:
                     current_pipeline.stop_accepting()
                 _log_daemon(
@@ -2014,7 +2007,7 @@ class RuntimeRequest:
                 write_stream(failure, sequence)
             finally:
                 state.clear_active_worker(session_id, expected_worker=worker, expected_run_id=request_id)
-                if getattr(self, "_stream_finalized", False):
+                if self._stream_finalized:
                     with state.lock:
                         state.accepted_runs.pop(request_id, None)
                         state.cancelled_runs.discard((session_id, request_id))
@@ -2121,12 +2114,12 @@ class RuntimeRequest:
 
 
     def close(self):
-        pipeline = getattr(self, "_stream_pipeline", None)
+        pipeline = self._stream_pipeline
         try:
             if pipeline is not None:
                 pipeline.stop_accepting()
-                if not getattr(self, "_stream_finalized", False):
-                    worker = getattr(self, "_stream_worker", None)
+                if not self._stream_finalized:
+                    worker = self._stream_worker
                     if worker is not None:
                         try:
                             worker.stop()
@@ -2136,7 +2129,7 @@ class RuntimeRequest:
                             pipeline.session_id, worker, reason="stream_handler_failed",
                         )
                 pipeline.close()
-                if not getattr(self, "_stream_finalized", False):
+                if not self._stream_finalized:
                     _log_daemon(
                         f"runtime_stream handler_aborted session_id={pipeline.session_id} "
                         f"run_id={pipeline.run_id} last_sequence={pipeline.last_sequence}"
@@ -2152,11 +2145,11 @@ class RuntimeRequest:
                             pipeline.session_id, expected_worker=worker, expected_run_id=pipeline.run_id,
                         )
         finally:
-            if getattr(self, "_update_request_token", None):
+            if self._update_request_token:
                 state = self.state
                 with state.lock:
-                    error = getattr(self, "_update_save_error", "")
-                    if pipeline is not None and (pipeline.error or not getattr(self, "_stream_finalized", False)):
+                    error = self._update_save_error
+                    if pipeline is not None and (pipeline.error or not self._stream_finalized):
                         error = str(pipeline.error or "后台回复尚未完成保存")
                     if state.update_preparing and error:
                         state.update_errors[self._update_request_token] = error

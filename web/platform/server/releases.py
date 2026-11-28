@@ -196,6 +196,13 @@ class Releases:
     async def import_github(self, release_id, manifest, actor, generation):
         url = GITHUB_RELEASES + f"/download/v{manifest['version']}/{manifest['filename']}"
         try:
+            # Discovery already normalized and persisted this report. Keep the
+            # upload's state/generation checks without repeating manifest parsing.
+            with self.database.transaction() as db:
+                record = db.get(ClientRelease, release_id)
+                if not record or record.generation != generation:
+                    raise PlatformError("cancelled", "GitHub 导入已取消。", 409)
+                report = record.report
             async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
                 async with client.stream("GET", url, headers={"User-Agent": "cowork-enterprise-importer"}) as response:
                     response.raise_for_status()
@@ -206,7 +213,7 @@ class Releases:
                                 if not record or record.stage != "receive" or record.generation != generation:
                                     raise PlatformError("cancelled", "GitHub 导入已取消。", 409)
                             yield block
-                    await self.upload(release_id, blocks(), manifest, actor, expected_stage="import_pending", expected_generation=generation)
+                    await self._upload(release_id, blocks(), report, actor, expected_stage="import_pending", expected_generation=generation)
             generation = self.prepare(release_id, actor, expected_generation=generation)
             import asyncio
             await asyncio.to_thread(self.process, release_id, generation)
@@ -238,7 +245,10 @@ class Releases:
         return result
 
     async def upload(self, release_id, stream, report, actor, *, expected_stage=None, expected_generation=None):
-        report = normalize_report(report)
+        return await self._upload(release_id, stream, normalize_report(report), actor,
+                                  expected_stage=expected_stage, expected_generation=expected_generation)
+
+    async def _upload(self, release_id, stream, report, actor, *, expected_stage=None, expected_generation=None):
         required = {"app_version", "zip_sha256", "zip_bytes", "supported_connection_schemas", "supported_platform_api_versions"}
         if not isinstance(report, dict) or not required <= set(report):
             raise PlatformError("incompatible_report", "检查报告缺少版本、摘要、大小或兼容性字段。")

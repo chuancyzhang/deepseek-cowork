@@ -11,6 +11,22 @@ const csrf = () => decodeURIComponent(document.cookie.split("; ").find(x => x.st
 const authNames={database:"平台账号密码",oauth2:"OAuth2",oidc:"OIDC",ldap:"LDAP"};
 const statusNames = {draft:"草稿",processing:"处理中",failed:"失败",ready:"可发布",published:"已发布",withdrawn:"已撤下",deleted:"已删除"};
 function message(text, kind="") {notice.textContent=text; notice.className=kind;}
+function parseApiResponse(text, status) {
+  let data;
+  const ok = status >= 200 && status < 300;
+  try { data = JSON.parse(text); }
+  catch {
+    if (ok) throw new Error(`服务响应不是有效 JSON（HTTP ${status}），输入已保留，请核对操作结果后重试。`);
+  }
+  if (!ok) {
+    const detail = data?.error?.message || new DOMParser().parseFromString(text, "text/html").body.textContent.replace(/\s+/g, " ").trim().slice(0, 300);
+    const error = new Error(`请求失败（HTTP ${status}）${detail ? "：" + detail : "，输入已保留，请重试。"}`);
+    error.status = status;
+    error.code = data?.error?.code;
+    throw error;
+  }
+  return data;
+}
 async function api(path, options={}) {
   const generation=routeGeneration;
   const headers = {"X-CSRF-Token":csrf(), ...options.headers};
@@ -18,15 +34,9 @@ async function api(path, options={}) {
   let response;
   try {response=await fetch(base+"/api/v1"+path, {...options,headers,credentials:"same-origin"});}
   catch {throw new Error("无法连接中心服务，输入已保留，请检查网络后重试。");}
-  const data=await response.json().catch(()=>({}));
+  const text=await response.text();
   if(generation!==routeGeneration)throw new DOMException("页面已切换","AbortError");
-  if (!response.ok) {
-    const error = new Error(data.error?.message || `请求失败（${response.status}），输入已保留。`);
-    error.status = response.status;
-    error.code = data.error?.code;
-    throw error;
-  }
-  return data;
+  return parseApiResponse(text, response.status);
 }
 async function action(work) {
   try { message(""); await work(); }
@@ -742,7 +752,7 @@ function renderReleaseDetail(r,catalog) {
   if(["draft","failed"].includes(r.state)&&(r.state==="failed"||!["receive","import_pending"].includes(r.stage))){
     pane.insertAdjacentHTML("beforeend", '<form id="upload-form" class="form admin-detail-section"><label>标准客户端 ZIP<input name="archive" type="file" accept=".zip" required></label><label>更新清单或打包检查报告<input name="report" type="file" accept=".json" required></label><progress id="upload-progress" value="0" max="100" hidden></progress><div class="actions-row"><button class="' +
       (r.source_sha256 ? "" : "primary") + '">上传文件</button><button type="button" id="cancel-upload" hidden>取消上传</button></div></form>');
-    const form=document.getElementById("upload-form");watchForm(form);form.onsubmit=e=>{e.preventDefault();action(async()=>{const zip=form.elements.archive.files[0],report=form.elements.report.files[0];if(!zip||!report)throw new Error("请选择标准 ZIP 和更新清单或检查报告。");if(report.size>1024*1024)throw new Error("检查报告超过 1 MiB。");await api("/admin/client-releases/"+id+"/report",{method:"PUT",body:JSON.parse(await report.text())});const progress=document.getElementById("upload-progress"),cancel=document.getElementById("cancel-upload");progress.hidden=false;cancel.hidden=false;form.querySelector("button").disabled=true;try{await new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();xhr.open("PUT",base+"/api/v1/admin/client-releases/"+id+"/source");xhr.setRequestHeader("X-CSRF-Token",csrf());xhr.upload.onprogress=event=>{if(event.lengthComputable)progress.value=event.loaded/event.total*100;};xhr.onload=()=>{if(xhr.status>=200&&xhr.status<300)resolve();else{let reason="上传失败，请重试。";try{reason=JSON.parse(xhr.responseText).error.message;}catch{}reject(new Error(reason));}};xhr.onerror=()=>reject(new Error("上传连接中断，文件选择已保留，请重试。"));xhr.onabort=()=>reject(new Error("上传已取消，可重新上传。"));cancel.onclick=()=>xhr.abort();xhr.send(zip);});dirty=false;await releaseDetail(id);message("源文件已完整接收，可以开始校验与封装。","success");}finally{cancel.hidden=true;form.querySelector("button").disabled=false;}});};
+    const form=document.getElementById("upload-form");watchForm(form);form.onsubmit=e=>{e.preventDefault();action(async()=>{const zip=form.elements.archive.files[0],report=form.elements.report.files[0];if(!zip||!report)throw new Error("请选择标准 ZIP 和更新清单或检查报告。");if(report.size>1024*1024)throw new Error("检查报告超过 1 MiB。");await api("/admin/client-releases/"+id+"/report",{method:"PUT",body:JSON.parse(await report.text())});const progress=document.getElementById("upload-progress"),cancel=document.getElementById("cancel-upload");progress.hidden=false;cancel.hidden=false;form.querySelector("button").disabled=true;try{await new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();xhr.open("PUT",base+"/api/v1/admin/client-releases/"+id+"/source");xhr.setRequestHeader("X-CSRF-Token",csrf());xhr.upload.onprogress=event=>{if(event.lengthComputable)progress.value=event.loaded/event.total*100;};xhr.onload=()=>{try{resolve(parseApiResponse(xhr.responseText,xhr.status));}catch(error){reject(error);}};xhr.onerror=()=>reject(new Error("上传连接中断，文件选择已保留，请重试。"));xhr.onabort=()=>reject(new Error("上传已取消，可重新上传。"));cancel.onclick=()=>xhr.abort();xhr.send(zip);});dirty=false;await releaseDetail(id);message("源文件已完整接收，可以开始校验与封装。","success");}finally{cancel.hidden=true;form.querySelector("button").disabled=false;}});};
     if(r.source_sha256)actions.append(button("校验并生成企业包",async()=>{await api("/admin/client-releases/"+id+"/prepare",{method:"POST"});await releaseDetail(id);},{primary:true}));
   }
   if(r.state==="processing"||(r.state!=="failed"&&["receive","import_pending"].includes(r.stage))){actions.append(button("取消处理",async()=>{await api("/admin/client-releases/"+id+"/cancel",{method:"POST"});await releaseDetail(id);}));const generation=routeGeneration;releasePoll=setTimeout(()=>{if(generation===routeGeneration)action(()=>releaseDetail(id));},1500);}

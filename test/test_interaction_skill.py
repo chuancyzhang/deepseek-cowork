@@ -3,7 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -12,6 +12,16 @@ from core.interaction import interaction_service
 
 
 class TestInteractionSkill(unittest.TestCase):
+    def test_feishu_send_requires_an_explicit_success_code(self):
+        for body, expected in (({"code": 0}, True), ({"code": "0"}, True), ({}, False), ({"code": None}, False)):
+            with self.subTest(body=body):
+                response = MagicMock(ok=True)
+                response.json.return_value = body
+                with patch.object(interaction_impl.requests, "post", return_value=response) as post:
+                    ok, _detail = interaction_impl._send_feishu_message("token", "chat_id", "chat", "text", {"text": "hello"})
+                self.assertEqual(ok, expected)
+                post.assert_called_once()
+
     def test_finished_event_carries_the_accepted_answer_for_history_replay(self):
         from core.interaction import InteractionService
         service = InteractionService()

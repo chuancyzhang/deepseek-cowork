@@ -32,6 +32,9 @@ class _ConfigStub:
     def __init__(self, store):
         self.store = store
 
+    def get(self, key, default=None):
+        return default
+
     def get_variable_store(self):
         return self.store
 

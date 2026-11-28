@@ -137,18 +137,18 @@ class DeliverableEditingCoreTest(unittest.TestCase):
         self.assertTrue(allowed.allowed)
         self.assertEqual(allowed.encoding, "gb18030")
 
-    def test_structured_text_is_validated_before_serialization(self):
+    def test_structured_text_is_validated_before_final_save(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "data.json")
             Path(path).write_text('{"ready": true}', encoding="utf-8")
             session, _report = create_edit_session(path)
 
             with self.assertRaisesRegex(DeliverableEditError, "JSON 语法验证失败"):
-                serialize_editor_payload(session, '{"ready":')
+                atomic_save_session(session, serialize_editor_payload(session, '{"ready":'), backup_root=os.path.join(directory, "backups"))
             with self.assertRaisesRegex(DeliverableEditError, "重复键"):
-                serialize_editor_payload(session, '{"ready": true, "ready": false}')
+                atomic_save_session(session, serialize_editor_payload(session, '{"ready": true, "ready": false}'), backup_root=os.path.join(directory, "backups"))
             with self.assertRaisesRegex(DeliverableEditError, "不允许常量"):
-                serialize_editor_payload(session, '{"value": NaN}')
+                atomic_save_session(session, serialize_editor_payload(session, '{"value": NaN}'), backup_root=os.path.join(directory, "backups"))
 
             jsonl_path = os.path.join(directory, "events.jsonl")
             Path(jsonl_path).write_bytes(b'{"id": 1}\n')
@@ -161,7 +161,7 @@ class DeliverableEditingCoreTest(unittest.TestCase):
                 b'{"id": 1}\n\n{"id": 2}\n',
             )
             with self.assertRaisesRegex(DeliverableEditError, "第 2 行无效"):
-                serialize_editor_payload(jsonl_session, '{"id": 1}\n{"id":')
+                atomic_save_session(jsonl_session, serialize_editor_payload(jsonl_session, '{"id": 1}\n{"id":'), backup_root=os.path.join(directory, "backups"))
 
     def test_html_edit_copy_preserves_scripts_and_embeds(self):
         source = (
@@ -565,6 +565,26 @@ class DeliverableEditingCoreTest(unittest.TestCase):
             self.assertEqual(sha256_file(path), before)
             self.assertEqual(Path(path).read_text(encoding="utf-8"), "external\n")
 
+    def test_non_utf8_restore_keeps_codec_metadata_across_repeated_swaps(self):
+        from core.deliverable_editing import backup_paths
+        for encoding, bom in (("gb18030", b""), ("utf-16-le", b"\xff\xfe")):
+            with self.subTest(encoding=encoding), tempfile.TemporaryDirectory() as directory:
+                path = os.path.join(directory, "note.txt")
+                backup_root = os.path.join(directory, "backups")
+                original = bom + "原版本\r\n".encode(encoding)
+                Path(path).write_bytes(original)
+                session, _report = create_edit_session(path, selected_encoding=encoding)
+                changed = serialize_editor_payload(session, "修改版本\n")
+                atomic_save_session(session, changed, backup_root=backup_root)
+                _previous, metadata_path = backup_paths(path, backup_root)
+                metadata = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
+                for expected in (original, changed, original):
+                    restore_previous_version(path, backup_root=backup_root)
+                    self.assertEqual(Path(path).read_bytes(), expected)
+                    current = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
+                    for key in ("encoding", "newline", "bom_hex"):
+                        self.assertEqual(current[key], metadata[key])
+
     def test_over_limit_and_deleted_files_are_blocked_without_writes(self):
         with tempfile.TemporaryDirectory() as directory:
             oversized = os.path.join(directory, "large.txt")
@@ -615,7 +635,7 @@ class DeliverableEditingCoreTest(unittest.TestCase):
             Path(source).write_text("original", encoding="utf-8")
             session, _report = create_edit_session(source)
             data = serialize_editor_payload(session, "mine")
-            original_copy = shutil.copy2
+            original_copy = shutil.copystat
 
             def copy_then_external_write(src, dst, *args, **kwargs):
                 result = original_copy(src, dst, *args, **kwargs)
@@ -624,7 +644,7 @@ class DeliverableEditingCoreTest(unittest.TestCase):
                 return result
 
             with patch(
-                "core.deliverable_editing.shutil.copy2",
+                "core.deliverable_editing.shutil.copystat",
                 side_effect=copy_then_external_write,
             ):
                 with self.assertRaises(ExternalModificationError):

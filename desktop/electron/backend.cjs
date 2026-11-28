@@ -44,8 +44,10 @@ class Backend {
         ...(this.resources ? { COWORK_DESKTOP_INSTALL_DIR: path.dirname(this.resources) } : {}) } });
     closeSync(log);
     this.child = child;
-    child.on('error', error => { this.launchError = error; });
-    child.on('exit', code => { if (code) this.launchError = new Error(`后台启动失败（${code}），请查看诊断日志。`); });
+    // A failed transport can close before its process exits. A late event from
+    // that attempt must not overwrite the state of a subsequent launch.
+    child.on('error', error => { if (this.child === child) this.launchError = error; });
+    child.on('exit', code => { if (this.child === child && code) this.launchError = new Error(`后台启动失败（${code}），请查看诊断日志。`); });
     child.unref();
   }
   async start() {

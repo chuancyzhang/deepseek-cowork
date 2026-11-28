@@ -25,7 +25,7 @@ class FakeProvider:
     def __init__(self):
         self.calls = []
 
-    def chat_stream(self, messages, tools=None):
+    def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
         self.calls.append(messages)
         user_text = messages[-1]["content"]
         if "# 历史分批摘要" in user_text:
@@ -38,7 +38,7 @@ class IncrementalFakeProvider:
     def __init__(self):
         self.calls = 0
 
-    def chat_stream(self, messages, tools=None):
+    def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
         self.calls += 1
         yield {"type": "content", "content": f"# Memory\n- batch {self.calls}"}
 
@@ -48,7 +48,7 @@ class EmptyThenSuccessProvider:
         self.calls = 0
         self.empty_count = empty_count
 
-    def chat_stream(self, messages, tools=None):
+    def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
         self.calls += 1
         if self.calls <= self.empty_count:
             return

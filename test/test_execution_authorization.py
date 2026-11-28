@@ -35,8 +35,7 @@ class ExecutionAuthorizationTests(unittest.TestCase):
         self.files = load_files()
 
     def manager(self, name, handler):
-        manager = SkillManager.__new__(SkillManager)
-        manager.workspace_dir = self.workspace
+        manager = SkillManager(workspace_dir=self.workspace, auto_load=False, load_mcp_tools=False)
         manager.tools = {name: handler}
         manager.tool_registry = ToolRegistry()
         manager.tool_registry.register(name, handler, "test", {})

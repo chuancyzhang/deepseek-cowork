@@ -36,6 +36,12 @@ class ContextSkills(SkillStub):
             return copy.deepcopy(self.tool_result)
         return {"status": "success", "content": "evidence " * 350}
 
+    def is_tool_allowed(self, name, run_mode):
+        return True
+
+    def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+        return True
+
 
 class ContextProvider:
     provider_name = "OpenAI"
@@ -99,6 +105,7 @@ class TestLongContextAgent(unittest.TestCase):
             journal.begin_run("s", "run", writer_owner="desktop:test", base_messages=initial,
                               extra={"user_message_id": "u1"})
             coordinator = object.__new__(RuntimeCoordinator)
+            coordinator.command_locks = {}
             coordinator.chat_storage, coordinator.runtime_journal = storage, journal
             coordinator.lock, coordinator.cancelled_runs = threading.RLock(), set()
             coordinator.sessions = {"s": copy.deepcopy(initial)}

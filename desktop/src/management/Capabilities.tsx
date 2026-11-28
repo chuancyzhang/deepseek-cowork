@@ -264,7 +264,7 @@ function McpJsonImport({ value, change, apply }: {value: string; change: (text: 
     try {const result = await rpc<any[]>('mcp.parse', {value: text});
       if (current !== sequence.current) return;
       if (result.length === 1) fill(result[0]); else setServers(result);
-    } catch (error) {if (current === sequence.current) setFailure((error as Error).message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''));}
+    } catch (error) {if (current === sequence.current) setFailure((error as Error).message);}
     finally {if (current === sequence.current) setBusy(false);}
   }
   return <details ref={panel} className="mcp-json-import"><summary><Upload size={15}/>导入 JSON<ChevronRight size={15} className="disclosure-arrow"/></summary>

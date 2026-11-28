@@ -9,12 +9,9 @@ import { Buffer } from "buffer";
 
 window.Buffer = Buffer;
 
-const CHUNK_SIZE = 192 * 1024;
 let bridge = null;
 let editor = null;
 let sessionId = "";
-let loadingChunks = [];
-let loadingExpected = 0;
 let suppressDirty = true;
 let dirtyTrackingArmed = false;
 let exportCapture = null;
@@ -36,30 +33,13 @@ function bytesFromBase64(value) {
   return bytes;
 }
 
-function base64FromBytes(bytes) {
-  let result = "";
-  for (let offset = 0; offset < bytes.length; offset += CHUNK_SIZE) {
-    result += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK_SIZE));
-  }
-  return btoa(result);
-}
-
 function sendBinaryPayload(kind, bytes) {
-  const encoded = base64FromBytes(bytes);
-  const total = Math.max(1, Math.ceil(encoded.length / CHUNK_SIZE));
-  bridge.beginPayload(sessionId, kind, total);
-  for (let index = 0; index < total; index += 1) {
-    bridge.appendPayload(
-      sessionId,
-      index,
-      encoded.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE)
-    );
-  }
-  bridge.finishPayload(sessionId);
+  bridge.payload(sessionId, kind, Buffer.from(bytes).toString("base64"));
 }
 
 function installExportCapture() {
   const nativeCreateObjectURL = URL.createObjectURL.bind(URL);
+  const nativeAnchorClick = HTMLAnchorElement.prototype.click;
   URL.createObjectURL = (blob) => {
     if (!exportCapture || !(blob instanceof Blob)) {
       return nativeCreateObjectURL(blob);
@@ -71,23 +51,16 @@ function installExportCapture() {
       .catch(reportError);
     return "about:blank";
   };
-  document.addEventListener(
-    "click",
-    (event) => {
-      const anchor = event.target && event.target.closest
-        ? event.target.closest("a[download]")
-        : null;
-      if (anchor && anchor.href === "about:blank") {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      }
-    },
-    true
-  );
+  // The DOCX plugin clicks a detached anchor, so document event delegation
+  // cannot intercept it. Consume only the export captured above.
+  HTMLAnchorElement.prototype.click = function () {
+    if (this.hasAttribute("download") && this.href === "about:blank") return;
+    return nativeAnchorClick.call(this);
+  };
 }
 
 function setDirty() {
-  if (!suppressDirty && dirtyTrackingArmed && bridge) bridge.setDirty(true);
+  if (!suppressDirty && dirtyTrackingArmed && bridge) bridge.setDirty(sessionId, true);
 }
 
 function armDirtyTracking() {
@@ -125,10 +98,8 @@ function command(name, value) {
   if (mapping[name]) mapping[name]();
 }
 
-async function loadDocument() {
+async function loadDocument(encoded) {
   try {
-    const encoded = loadingChunks.join("");
-    loadingChunks = [];
     const bytes = bytesFromBase64(encoded);
     suppressDirty = true;
     dirtyTrackingArmed = false;
@@ -146,7 +117,7 @@ async function loadDocument() {
     }));
     await new Promise((resolve) => window.requestAnimationFrame(resolve));
     await new Promise((resolve) => window.requestAnimationFrame(resolve));
-    bridge.setDirty(false);
+    bridge.setDirty(sessionId, false);
     bridge.editorLoaded(sessionId);
     suppressDirty = false;
   } catch (error) {
@@ -251,7 +222,6 @@ async function preparePdfExport(layout = {}) {
 function dispose() {
   suppressDirty = true;
   dirtyTrackingArmed = false;
-  loadingChunks = [];
   exportCapture = null;
   if (editor) {
     editor.destroy();
@@ -267,21 +237,10 @@ function setTheme(theme) {
 }
 
 window.coworkEditor = {
-  beginLoad(id, total) {
+  load(id, value) {
     dispose();
-    sessionId = String(id || "");
-    loadingExpected = Number(total) || 0;
-    loadingChunks = new Array(loadingExpected);
-  },
-  appendLoadChunk(index, chunk) {
-    loadingChunks[Number(index)] = String(chunk || "");
-  },
-  finishLoad() {
-    if (!loadingExpected || loadingChunks.some((item) => typeof item !== "string")) {
-      reportError("DOCX 分块传输不完整，无法进入编辑。");
-      return;
-    }
-    loadDocument();
+    sessionId = id;
+    return loadDocument(value);
   },
   requestSave,
   preparePdfExport,

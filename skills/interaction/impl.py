@@ -2,6 +2,7 @@ import json
 import mimetypes
 import os
 import requests
+from core.im_gateway_response import parse_response_json
 import uuid
 
 from core.im_gateway_registry import (
@@ -326,11 +327,7 @@ def _get_tenant_token(app_id, app_secret):
             json={"app_id": app_id, "app_secret": app_secret},
             timeout=8
         )
-        body = None
-        try:
-            body = resp.json()
-        except Exception:
-            body = _truncate_text(getattr(resp, "text", ""))
+        body = parse_response_json(resp)
         if resp.ok and isinstance(body, dict) and body.get("tenant_access_token"):
             return body.get("tenant_access_token"), ""
         return None, _safe_json(body)
@@ -416,11 +413,7 @@ def _upload_image(tenant_token, file_path):
                 files=files,
                 timeout=20
             )
-        body = None
-        try:
-            body = resp.json()
-        except Exception:
-            body = _truncate_text(getattr(resp, "text", ""))
+        body = parse_response_json(resp)
         if resp.ok and isinstance(body, dict) and body.get("code") in (0, "0", None):
             data = body.get("data") or {}
             image_key = data.get("image_key")
@@ -466,11 +459,7 @@ def _upload_file(tenant_token, file_path):
                 files=files,
                 timeout=30
             )
-        body = None
-        try:
-            body = resp.json()
-        except Exception:
-            body = _truncate_text(getattr(resp, "text", ""))
+        body = parse_response_json(resp)
         if resp.ok and isinstance(body, dict) and body.get("code") in (0, "0", None):
             data = body.get("data") or {}
             file_key = data.get("file_key")
@@ -527,12 +516,8 @@ def _send_feishu_message(tenant_token, receive_id_type, receive_id, msg_type, co
             json=payload,
             timeout=12
         )
-        body = None
-        try:
-            body = resp.json()
-        except Exception:
-            body = _truncate_text(getattr(resp, "text", ""))
-        ok = bool(resp.ok and isinstance(body, dict) and body.get("code") in (0, "0", None))
+        body = parse_response_json(resp)
+        ok = bool(resp.ok and isinstance(body, dict) and body.get("code") in (0, "0"))
         if ok:
             return True, ""
         return False, _safe_json(body)
@@ -550,13 +535,9 @@ def _send_webhook_markdown(webhook_url, provider_name, title, text):
         payload = {"msgtype": "markdown", "markdown": {"title": title or "AI 助手交付物", "text": text or ""}}
     try:
         resp = requests.post(webhook_url, json=payload, timeout=12)
-        if resp.ok:
+        body = parse_response_json(resp)
+        if resp.ok and isinstance(body, dict) and body.get("errcode") in (0, "0"):
             return True, ""
-        body = None
-        try:
-            body = resp.json()
-        except Exception:
-            body = _truncate_text(getattr(resp, "text", ""))
         return False, _safe_json(body)
     except Exception as e:
         return False, str(e)
@@ -626,8 +607,14 @@ def publish_artifacts(
         caption = (raw_item.get("caption") or "").strip()
         size = raw_item.get("size")
 
-        if path_input and not os.path.exists(path):
-            return {"error": f"file not found: {path_input}. Please ensure the file exists before publish_artifacts."}
+        file_stat = None
+        if path_input:
+            try:
+                file_stat = os.stat(path)
+            except FileNotFoundError:
+                return {"error": f"File not found: {path_input}"}
+            except OSError as exc:
+                return {"error": f"无法读取附件 {path_input}：{exc}"}
         if not path and not url:
             return {"error": f"items[{idx}] requires path or url."}
         if not name:
@@ -639,11 +626,8 @@ def publish_artifacts(
             mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
         if not subtype and mime.startswith("image/"):
             subtype = "image"
-        if size is None and path and os.path.exists(path):
-            try:
-                size = os.path.getsize(path)
-            except Exception:
-                size = None
+        if size is None and file_stat is not None:
+            size = file_stat.st_size
 
         normalized = {
             "type": "file",
@@ -662,7 +646,7 @@ def publish_artifacts(
         is_image = _is_image_item(subtype, mime, name)
         delivered = False
         reason = ""
-        if target_delivery_mode == ARTIFACT_DELIVERY_NATIVE and target_enabled and path and os.path.exists(path):
+        if target_delivery_mode == ARTIFACT_DELIVERY_NATIVE and target_enabled and file_stat is not None:
             if is_image:
                 image_key, upload_reason = _upload_image(tenant_token, path)
                 if image_key:

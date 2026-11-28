@@ -2,7 +2,6 @@ from core.tool_cancellation import init_abort_state as _init_abort_state
 from core.tool_output import capture_process, process_text
 import tempfile
 import os
-import ast
 from core.env_utils import ensure_package_installed
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 
@@ -22,46 +21,6 @@ def install_package(package_name, import_name=None, _context=None):
             return {"ok": False, "status": e.result['status'], "error": str(e), "content": "代码尚未执行，已有安装日志已保留。"}
         return {"ok": False, "status": "failed", "error": f"安装 {package_name} 失败：{e}", "content": "代码尚未执行。可修正原因后重试安装。"}
 
-class SecurityError(Exception):
-    pass
-
-def _validate_code_safety(code, allowed_dir, god_mode=False):
-    """AST static analysis for code safety"""
-    if god_mode:
-        return True
-
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as e:
-        raise SecurityError(f"Syntax Error: {e}")
-
-    allowed_dir = os.path.abspath(allowed_dir).lower()
-    
-    # Dangerous modules that require God Mode
-    dangerous_modules = {'subprocess', 'winreg', 'ctypes'}
-
-    for node in ast.walk(tree):
-        # 1. Check for dangerous imports
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name.split('.')[0] in dangerous_modules:
-                     raise SecurityError(f"Security Alert: Import of restricted module '{alias.name}' is not allowed in Standard Mode. Please enable God Mode to use it.")
-        
-        elif isinstance(node, ast.ImportFrom):
-            if node.module and node.module.split('.')[0] in dangerous_modules:
-                 raise SecurityError(f"Security Alert: Import from restricted module '{node.module}' is not allowed in Standard Mode. Please enable God Mode to use it.")
-
-        # 2. Check Path Traversal in strings
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            val = node.value
-            if ".." in val:
-                 raise SecurityError(f"Security Alert: Path traversal '..' detected in string: '{val}'")
-            if os.path.isabs(val):
-                abs_val = os.path.abspath(val).lower()
-                if not abs_val.startswith(allowed_dir):
-                     raise SecurityError(f"Security Alert: Unauthorized absolute path access: '{val}'")
-    return True
- 
 def run_python_code(workspace_dir, code, _context=None):
     """
     Execute Python code in the workspace.
@@ -73,12 +32,6 @@ def run_python_code(workspace_dir, code, _context=None):
     if not workspace_dir:
         return "Error: Workspace not selected."
         
-    from core.execution_authorization import current_authorization, invocation_authorized
-    authorization = current_authorization(_context)
-    god_mode = bool(authorization and (authorization.god_mode or invocation_authorized(_context)))
-    if authorization is None and _context and 'config_manager' in _context:
-        god_mode = _context['config_manager'].get_god_mode()
-
     visualization_dir = ""
     manager = (_context or {}).get("skill_manager") if isinstance(_context, dict) else None
     visualize_enabled = "visualize" in (getattr(manager, "skill_records", {}) or {})
@@ -88,11 +41,6 @@ def run_python_code(workspace_dir, code, _context=None):
         conversation_id = str((_context or {}).get("conversation_id") or (_context or {}).get("session_id") or "").strip()
         if conversation_id:
             visualization_dir = visualization_staging_dir(conversation_id, create=True)
-
-    try:
-        _validate_code_safety(code, workspace_dir, god_mode=god_mode)
-    except SecurityError as e:
-        return f"Error: {str(e)}"
 
     # Create temp file
     temp_path = ""

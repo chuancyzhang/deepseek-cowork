@@ -53,6 +53,7 @@ class RequestSnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             events = MagicMock()
             worker = SimpleNamespace(is_subagent=False, session_id="A", request_id="run",
+                _enterprise_chat_audit=None,
                 observability_signal=events, config_manager=SimpleNamespace(get_chat_history_dir=lambda: root))
             LLMWorker._capture_request_snapshot(worker, "responses", {"model": "m", "input": "private"}, "req")
             event = events.emit.call_args.args[0]

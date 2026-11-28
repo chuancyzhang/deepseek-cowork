@@ -739,17 +739,19 @@ async function run(){
   assert.equal(await read('(()=>{const r=document.querySelector(".usage-popover").getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;})()'),true);
   await snap('usage-dark-scaled');
   const usageSnapshot = snapshots.get(docs.id);
+  const usageRun = {id:'usage-layout-run',conversation_id:docs.id,status:'running',created_at:stamp,updated_at:stamp};
   const history = Array.from({length: 8}, (_, index) => messages.map(message => ({
     id: 'usage-history-' + index + '-' + message.id, role: message.role, content: message.content
-  }))).flat().concat(messages);
+  }))).flat().concat(messages,{id:'usage-live-user',role:'user',content:'继续整理项目文档。',meta:{turn_id:usageRun.id}});
   snapshots.set(docs.id,{...usageSnapshot,messages:history,render_messages:history});
   window.webContents.send('cowork:events',[{event:'conversation_changed',conversation_id:docs.id}]);
   await until('!!document.querySelector("#message-usage-history-0-user")');
-  const usageRun = {id:'usage-layout-run',conversation_id:docs.id,status:'running',created_at:stamp,updated_at:stamp};
   runs.set(docs.id,usageRun);
   window.webContents.send('cowork:events',[
     {event:'run_started',conversation_id:docs.id,run:usageRun},
-    {event:'runtime',conversation_id:docs.id,data:{type:'content',delta:'正在整理项目文档。',source_message_id:'usage-live-reply',run_id:usageRun.id,sequence:1}},
+    {event:'runtime',conversation_id:docs.id,data:{type:'turn_started',run_id:usageRun.id,created_at:stamp,sequence:1}},
+    {event:'runtime',conversation_id:docs.id,data:{type:'thinking',delta:'核对项目说明。',source_message_id:'usage-live-reply',run_id:usageRun.id,sequence:2}},
+    {event:'runtime',conversation_id:docs.id,data:{type:'content',delta:'正在整理项目文档。',source_message_id:'usage-live-reply',run_id:usageRun.id,sequence:3}},
   ]);
   await until('!!document.querySelector(".message-scroll .process-summary .sr-only")');
   assert.equal(await read('document.scrollingElement.scrollHeight<=innerHeight+1'),true);

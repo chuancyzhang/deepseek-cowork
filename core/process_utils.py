@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 import platform
 import signal
@@ -19,6 +20,7 @@ except ImportError:  # pragma: no cover - non-Windows
 
 
 _EXTERNAL_PROCESS_LAUNCH_LOCK = threading.RLock()
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -75,10 +77,7 @@ def subprocess_kwargs_no_window(**kwargs):
     if kwargs.get("startupinfo") is None:
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        try:
-            startupinfo.wShowWindow = 0
-        except Exception:
-            pass
+        startupinfo.wShowWindow = 0
         kwargs["startupinfo"] = startupinfo
     return kwargs
 
@@ -91,7 +90,8 @@ def terminate_process_tree(process, timeout=2.0):
     try:
         if process.poll() is not None:
             return True
-    except Exception:
+    except OSError as exc:
+        log.warning("process_stop_poll_failed pid=%s error=%s", process.pid, exc)
         return False
 
     wait_timeout = max(0.1, float(timeout or 0.0))
@@ -104,37 +104,38 @@ def terminate_process_tree(process, timeout=2.0):
                 timeout=wait_timeout,
                 **subprocess_kwargs_no_window(),
             )
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("process_stop_tree_failed pid=%s error=%s", process.pid, exc)
     else:
         try:
             os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-        except Exception:
+        except OSError:
             try:
                 process.terminate()
-            except Exception:
-                pass
+            except OSError as exc:
+                log.warning("process_stop_term_failed pid=%s error=%s", process.pid, exc)
 
     try:
         process.wait(timeout=wait_timeout)
         return True
-    except Exception:
+    except (OSError, subprocess.TimeoutExpired):
         pass
 
     if os.name != "nt":
         try:
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except Exception:
-            pass
+        except OSError as exc:
+            log.warning("process_stop_group_failed pid=%s error=%s", process.pid, exc)
     try:
         if process.poll() is None:
             process.kill()
         process.wait(timeout=wait_timeout)
-    except Exception:
-        pass
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.warning("process_stop_kill_failed pid=%s error=%s", process.pid, exc)
     try:
         return process.poll() is not None
-    except Exception:
+    except OSError as exc:
+        log.warning("process_stop_verify_failed pid=%s error=%s", process.pid, exc)
         return False
 
 

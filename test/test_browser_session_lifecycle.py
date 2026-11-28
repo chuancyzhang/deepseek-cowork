@@ -34,7 +34,7 @@ class BrowserSessionLifecycleTests(unittest.TestCase):
         self.enterContext(patch.object(self.browser, "_init_abort_state", return_value=self.abort))
         self.enterContext(patch.object(self.browser, "log_browser_skill_event"))
         self.enterContext(patch.object(component, "log_browser_skill_event"))
-        self.enterContext(patch.object(component, "browser_skill_status", return_value={"ready": True}))
+        self.status = self.enterContext(patch.object(component, "browser_skill_status", return_value={"ready": True}))
         self.service = self.enterContext(patch.object(component, "_ensure_browser_skill_service", return_value={"ready": True}))
         self.enterContext(patch.object(component, "_browser_process_options", return_value={}))
         self.enterContext(patch.object(component, "popen_external_program", side_effect=self.launch))
@@ -76,7 +76,8 @@ class BrowserSessionLifecycleTests(unittest.TestCase):
         self.assertEqual([args[:2] for args in self.calls],
                          [["session", "request"], ["session", "start"], ["session", "request"]])
         self.assertEqual(self.calls[-1][-1], "--claim")
-        self.service.assert_called_once()
+        self.assertEqual(self.status.call_count, len(self.calls))
+        self.service.assert_not_called()
         self.assertFalse(self.coordinator.owns_session("chat", "run", "request:" + self.token))
         self.assertTrue(self.coordinator.owns_session("chat", "run", "abcd"))
         result = self.browser.browser_skill_cli(["session", "stop", "abcd"], _context=self.context)
@@ -100,7 +101,8 @@ class BrowserSessionLifecycleTests(unittest.TestCase):
         self.start_error = True
         self.assertEqual(self.start()["status"], "incomplete")
         self.assertEqual(len(self.calls), 2)
-        self.service.assert_called_once()
+        self.assertEqual(self.status.call_count, len(self.calls))
+        self.service.assert_not_called()
         self.assertTrue(self.coordinator.owns_session("chat", "run", "request:" + self.token))
 
     def test_claim_failure_retains_session_and_request(self):

@@ -76,7 +76,7 @@ export function OfficePreview({file, cid}: {file: FileSession; cid: string}) {
       update({url:result.payload.url,fingerprint:result.fingerprint,renderer:result.payload.renderer,
         rendererName:result.payload.renderer_name,configuration:result.payload.render_configuration,warnings:result.payload.warnings||[]});
     } catch (error) {
-      const reason = (error as Error).message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
+      const reason = (error as Error).message;
       setPreview(value => value.token===token?{...value, failure:(value.url ? '刷新未完成，已有预览保留。' : '') + reason}:value);
     } finally {update({busy:false,job:null});}
   }

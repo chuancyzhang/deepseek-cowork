@@ -82,6 +82,12 @@ class SkillStub:
         self.calls.append((name, args))
         return {"status": "success", "content": "normal tool result"}
 
+    def is_tool_allowed(self, name, run_mode):
+        return True
+
+    def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+        return True
+
 
 class ProviderStub:
     provider_name = "OpenAI"

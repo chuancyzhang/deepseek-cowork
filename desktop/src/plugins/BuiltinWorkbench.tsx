@@ -213,7 +213,7 @@ export default function BuiltinWorkbench() {
     const entry = drafts.get(current.id);
     if (!entry.value.text.trim() && !entry.value.attachments.length && !entry.pending) {
       setDraft('请继续上一轮未完成的任务。先核对已经生成的文件与完成的操作，保留有效结果，避免重复已完成的操作。');
-      if (contextRecovery) void send(current.id).catch(() => {});
+      if (contextRecovery) void send(current.id);
     }
     composer.current?.focus();
   }

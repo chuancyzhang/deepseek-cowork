@@ -247,8 +247,8 @@ class McpKnowledgeProvider:
         self.store.invalidate_login(self.source)
         log.info("knowledge_auth cancelled source=%s", self.source)
 
-    def identity(self, scope):
-        connection = self.store.connection(source=self.source, secret=True)
+    def identity(self, scope, *, secret=False):
+        connection = self.store.connection(source=self.source, secret=secret)
         if not connection or not scope or scope.get("unavailable"):
             log.warning("knowledge_scope rejected source=%s reason=not_connected", self.source)
             raise KnowledgeError("not_connected", f"请先连接{self.display_name}。")
@@ -348,26 +348,26 @@ class McpKnowledgeProvider:
     def call(self, scope, tool, arguments, cancelled=None):
         if cancelled and cancelled():
             raise KnowledgeError("cancelled", "资料操作已停止。")
-        connection = self.identity(scope)
+        connection = self.identity(scope, secret=True)
         ttl = self._cache_ttls.get(tool, 0)
         key = (self.source, *(connection.get(k, "") for k in
                ("connection_id", "tenant_id", "user_id", "generation")), tool,
                json.dumps(arguments, sort_keys=True))
         result, epoch = self._cache_get(key) if ttl else (None, None)
+        cache_miss = result is None
         writing = tool in self._write_tools
         if writing:
             self.clear_cache()
         try:
             if result is None:
                 result = self._call(connection, tool, arguments)
-                self.identity(scope)
-                if not (cancelled and cancelled()) and ttl:
-                    self._cache_put(key, result, ttl, epoch)
             else:
                 log.info("knowledge_cache hit source=%s tool=%s session=%s", self.source, tool, scope.get("session_id", ""))
             self.identity(scope)
             if cancelled and cancelled():
                 raise KnowledgeError("cancelled", "资料操作已停止。")
+            if cache_miss and ttl:
+                self._cache_put(key, result, ttl, epoch)
             return result
         except KnowledgeError as error:
             if error.code in {"unauthenticated", "forbidden", "identity_changed", "not_connected"}:
@@ -471,7 +471,7 @@ class McpKnowledgeProvider:
             raise KnowledgeError("invalid_response", "当前资料未返回可阅读正文，请在原平台核对。")
         page = max(1, int(arguments.get("page", 1)))
         offset = (page - 1) * 12000
-        ref = next((r for r in refs if str(r.get("item_id") or r.get("knowledge_id")) == item_id), {})
+        ref = selected_ref or {}
         return {"source": self.source, "item_id": item_id, "collection_id": collection,
                 "title": result.get("title") or ref.get("title", ""),
                 "content": content[offset:offset + 12000], "page": page,
@@ -641,7 +641,7 @@ class TencentDocsProvider(McpKnowledgeProvider):
         return needed <= tools.keys()
 
     def catalog(self, scope):
-        tools = self.schemas(self.identity(scope))
+        tools = self.schemas(self.identity(scope, secret=True))
         spaces, page = [], 0
         while True:
             data = self.call(scope, "query_space_list", {"num": page})
@@ -689,7 +689,7 @@ class TencentDocsProvider(McpKnowledgeProvider):
         return result
 
     def upload(self, scope, path, kb_id, folder=""):
-        tools = self.schemas(self.identity(scope))
+        tools = self.schemas(self.identity(scope, secret=True))
         if not self._can_upload(tools, kb_id, bool(folder)):
             raise KnowledgeError("unsupported", "当前账号无法上传到所选目录，请在腾讯文档中处理。")
         return super().upload(scope, path, kb_id, folder)
@@ -893,7 +893,7 @@ class LexiangProvider(McpKnowledgeProvider):
         return url
 
     def _paged(self, scope, tool, args, key, page=1):
-        connection = self.identity(scope)
+        connection = self.identity(scope, secret=True)
         props = self.schemas(connection)[tool].get("properties", {})
         if "page_token" in props:
             for number, (values, more) in enumerate(self._cursor_pages(scope, tool, args, key), 1):
@@ -949,7 +949,7 @@ class LexiangProvider(McpKnowledgeProvider):
         raise KnowledgeError("pagination_limit", "知识库列表过多，请在原平台核对。")
 
     def _all_rows(self, scope, tool, args, key):
-        props = self.schemas(self.identity(scope))[tool].get("properties", {})
+        props = self.schemas(self.identity(scope, secret=True))[tool].get("properties", {})
         if "page_token" in props:
             return [item for values, _ in self._cursor_pages(scope, tool, args, key) for item in values]
         rows, page = [], 1
@@ -964,7 +964,7 @@ class LexiangProvider(McpKnowledgeProvider):
         return rows
 
     def catalog(self, scope):
-        schemas = self.schemas(self.identity(scope))
+        schemas = self.schemas(self.identity(scope, secret=True))
         spaces = []
         if "team_id" in schemas["space_list_spaces"].get("properties", {}):
             if "team_list_teams" not in schemas:

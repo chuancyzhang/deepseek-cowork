@@ -175,7 +175,7 @@ export function WorkspaceDiff({cid, file, snapshot, refresh}: {
     let alive = true;
     setFailure('');
     void rpc<Patch>('workspace.diff', {conversation_id: cid, path: file.absolute_path}).then(
-      result => {if (alive) setPatch(result);}, error => {if (alive) setFailure(error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''));},
+      result => {if (alive) setPatch(result);}, error => {if (alive) setFailure(error.message);},
     );
     return () => {alive = false;};
   }, [cid, file.absolute_path, snapshot]);

@@ -8,7 +8,6 @@ run in background workers and be tested without constructing the desktop UI.
 from __future__ import annotations
 from .file_write_locks import locked_path
 
-import codecs
 import csv
 import hashlib
 import io
@@ -48,7 +47,6 @@ MAX_WORKSHEET_COLUMNS = 16_384
 MAX_MERGED_RANGES = 10_000
 MAX_DOCX_IMAGES = 200
 MAX_OFFICE_UNCOMPRESSED_BYTES = 200 * MIB
-PAYLOAD_CHUNK_CHARS = 256 * 1024
 
 TEXT_EXTENSIONS = editor_extensions("text")
 HTML_EXTENSIONS = editor_extensions("html")
@@ -192,76 +190,24 @@ def sha256_file(path: str, chunk_size: int = MIB) -> str:
     return digest.hexdigest()
 
 
-def _newline_for_text(value: str) -> str:
-    crlf = value.count("\r\n")
-    without_crlf = value.replace("\r\n", "")
-    lf = without_crlf.count("\n")
-    cr = without_crlf.count("\r")
-    if crlf >= lf and crlf >= cr and crlf:
-        return "\r\n"
-    if cr > lf and cr:
-        return "\r"
-    return "\n"
-
-
 def decode_text_bytes(data: bytes, selected_encoding: str = "") -> tuple[str, str, bytes, str]:
-    """Decode without guessing an ambiguous legacy encoding.
-
-    Returns text, codec name, BOM bytes, and dominant newline.  When no Unicode
-    encoding can be established, the caller must ask the user to choose one.
-    """
-
-    candidates: list[tuple[bytes, str]] = [
-        (codecs.BOM_UTF8, "utf-8"),
-        (codecs.BOM_UTF32_LE, "utf-32-le"),
-        (codecs.BOM_UTF32_BE, "utf-32-be"),
-        (codecs.BOM_UTF16_LE, "utf-16-le"),
-        (codecs.BOM_UTF16_BE, "utf-16-be"),
-    ]
-    selected = str(selected_encoding or "").strip().lower()
-    if selected:
-        try:
-            text = data.decode(selected, errors="strict")
-        except (LookupError, UnicodeDecodeError) as exc:
-            raise DeliverableEditError(
-                "text_decode_failed",
-                f"无法使用编码 {selected_encoding} 读取文件：{exc}",
-            ) from exc
-        return text, selected, b"", _newline_for_text(text)
-
-    for bom, encoding in candidates:
-        if bom and data.startswith(bom):
-            try:
-                text = data[len(bom) :].decode(encoding, errors="strict")
-            except UnicodeDecodeError as exc:
-                raise DeliverableEditError(
-                    "text_decode_failed",
-                    f"文件声明为 {encoding}，但内容无法严格解码：{exc}",
-                ) from exc
-            return text, encoding, bom, _newline_for_text(text)
+    from .filesystem_ops import decode_text_bytes as decode, TextFileCodecError
     try:
-        text = data.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise DeliverableEditError(
-            "encoding_required",
-            "无法确认文本编码。请选择编码后再进入编辑。",
-        ) from exc
-    return text, "utf-8", b"", _newline_for_text(text)
+        return decode(data, selected_encoding)
+    except TextFileCodecError as exc:
+        code = "encoding_required" if exc.code == "encoding_required" else "text_decode_failed"
+        message = ("无法确认文本编码。请选择编码后再进入编辑。" if code == "encoding_required"
+                   else f"无法使用编码 {selected_encoding or '文件声明的编码'} 读取文件：{exc}")
+        raise DeliverableEditError(code, message) from exc
 
 
 def encode_text_content(content: str, session: EditSession) -> bytes:
-    normalized = str(content or "").replace("\r\n", "\n").replace("\r", "\n")
-    newline = session.newline if session.newline in {"\n", "\r\n", "\r"} else "\n"
-    normalized = normalized.replace("\n", newline)
-    try:
-        encoded = normalized.encode(session.encoding or "utf-8", errors="strict")
-    except (LookupError, UnicodeEncodeError) as exc:
-        raise DeliverableEditError(
-            "text_encode_failed",
-            f"内容无法使用原编码 {session.encoding or 'utf-8'} 保存：{exc}",
-        ) from exc
+    from .filesystem_ops import encode_text_bytes, TextFileCodecError
     bom = bytes.fromhex(session.bom_hex) if session.bom_hex else b""
-    return bom + encoded
+    try:
+        return encode_text_bytes(content, session.encoding, bom, session.newline)
+    except TextFileCodecError as exc:
+        raise DeliverableEditError("text_encode_failed", f"内容无法使用原编码 {session.encoding or 'utf-8'} 保存：{exc}") from exc
 
 
 def _issue(code: str, message: str, detail: str = "", blocking: bool = True) -> CompatibilityIssue:
@@ -944,15 +890,6 @@ def prepare_html_edit_source(source: str, base_url: str = "") -> tuple[str, list
         node.replace_with(placeholder)
     if base_url:
         head = soup.head
-        if head is None:
-            html_node = soup.html
-            if html_node is None:
-                html_node = soup.new_tag("html")
-                for child in list(soup.contents):
-                    html_node.append(child.extract())
-                soup.append(html_node)
-            head = soup.new_tag("head")
-            html_node.insert(0, head)
         original_base = head.find("base", href=True)
         effective_base = urljoin(base_url, str(original_base["href"])) if original_base else base_url
         base = soup.new_tag("base", href=str(effective_base))
@@ -1562,12 +1499,8 @@ def univer_snapshot_to_xlsx(snapshot: dict[str, Any]) -> bytes:
             )
         cell_data = sheet.get("cellData") or {}
         for row_key, row in cell_data.items():
-            if not isinstance(row, dict):
-                continue
             row_index = int(row_key) + 1
             for column_key, payload in row.items():
-                if not isinstance(payload, dict):
-                    continue
                 column_index = int(column_key) + 1
                 cell = worksheet.cell(row=row_index, column=column_index)
                 formula = payload.get("f")
@@ -1600,8 +1533,6 @@ def univer_snapshot_to_xlsx(snapshot: dict[str, Any]) -> bytes:
                 dimension.width = max(0, (float(column_data["w"]) - 5) / 7)
             dimension.hidden = bool(int(column_data.get("hd") or 0))
         for merged in sheet.get("mergeData") or []:
-            if not isinstance(merged, dict):
-                continue
             worksheet.merge_cells(
                 start_row=int(merged.get("startRow") or 0) + 1,
                 start_column=int(merged.get("startColumn") or 0) + 1,
@@ -1618,13 +1549,7 @@ def univer_snapshot_to_xlsx(snapshot: dict[str, Any]) -> bytes:
     output = io.BytesIO()
     workbook.save(output)
     workbook.close()
-    data = output.getvalue()
-    try:
-        check = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=False)
-        check.close()
-    except Exception as exc:
-        raise DeliverableEditError("xlsx_export_invalid", f"导出的 XLSX 无法重新打开：{exc}") from exc
-    return data
+    return output.getvalue()
 
 
 def univer_snapshot_to_rows(snapshot: dict[str, Any]) -> list[list[str]]:
@@ -1639,8 +1564,6 @@ def univer_snapshot_to_rows(snapshot: dict[str, Any]) -> list[list[str]]:
     max_row = -1
     max_column = -1
     for row_key, row in cell_data.items():
-        if not isinstance(row, dict):
-            continue
         max_row = max(max_row, int(row_key))
         if row:
             max_column = max(max_column, max(int(column) for column in row))
@@ -1648,11 +1571,7 @@ def univer_snapshot_to_rows(snapshot: dict[str, Any]) -> list[list[str]]:
         return []
     rows = [["" for _column in range(max_column + 1)] for _row in range(max_row + 1)]
     for row_key, row in cell_data.items():
-        if not isinstance(row, dict):
-            continue
         for column_key, payload in row.items():
-            if not isinstance(payload, dict):
-                continue
             value = payload.get("f") if payload.get("f") not in {None, ""} else payload.get("v")
             if value is None:
                 value = ""
@@ -1749,19 +1668,6 @@ def validate_text_content(extension: str, content: str) -> None:
             "structured_text_invalid",
             f"{label} 语法验证失败：{exc}",
         ) from exc
-
-
-def validate_docx_bytes(data: bytes) -> None:
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            names = set(archive.namelist())
-            if "[Content_Types].xml" not in names or "word/document.xml" not in names:
-                raise ValueError("缺少 DOCX 必需部件")
-        from docx import Document
-
-        Document(io.BytesIO(data))
-    except Exception as exc:
-        raise DeliverableEditError("docx_export_invalid", f"导出的 DOCX 无法重新打开：{exc}") from exc
 
 
 def _next_docx_relationship_id(used_ids: set[str]) -> str:
@@ -2016,7 +1922,6 @@ def serialize_editor_payload(session: EditSession, payload: Any) -> bytes:
                 raise DeliverableEditError("docx_review_invalid", str(exc)) from exc
             if len(data) > OFFICE_MAX_BYTES:
                 raise DeliverableEditError("file_too_large", "编辑后的 DOCX 超过 25 MiB。")
-            validate_docx_bytes(data)
             return data
         if not isinstance(payload, (bytes, bytearray)):
             raise DeliverableEditError("docx_payload_invalid", "DOCX 编辑器没有返回有效文档。")
@@ -2026,7 +1931,6 @@ def serialize_editor_payload(session: EditSession, payload: Any) -> bytes:
             data = restore_docx_header_footer(data, header_footer_plan)
         if len(data) > OFFICE_MAX_BYTES:
             raise DeliverableEditError("file_too_large", "编辑后的 DOCX 超过 25 MiB。")
-        validate_docx_bytes(data)
         return data
     if extension == ".xlsx":
         if not isinstance(payload, dict):
@@ -2057,7 +1961,6 @@ def serialize_editor_payload(session: EditSession, payload: Any) -> bytes:
             payload,
             list(session.metadata.get("html_preserved_nodes") or []),
         )
-    validate_text_content(extension, payload)
     data = encode_text_content(payload, session)
     if len(data) > TEXT_MAX_BYTES:
         raise DeliverableEditError("file_too_large", "编辑后的文本超过 10 MiB。")
@@ -2103,8 +2006,7 @@ def _write_json_atomic(path: str, payload: dict[str, Any]) -> None:
             os.unlink(temp_path)
 
 
-def _validate_serialized_path(path: str, extension: str, selected_encoding: str = "") -> None:
-    data = Path(path).read_bytes()
+def validate_serialized_path(path: str, extension: str, selected_encoding: str = "") -> None:
     if extension == ".docx":
         report = _preflight_docx(path, EDITOR_BY_EXTENSION[".docx"])
         if not report.allowed:
@@ -2120,6 +2022,7 @@ def _validate_serialized_path(path: str, extension: str, selected_encoding: str 
                 "临时 XLSX 未通过兼容性验证：\n" + report.message,
             )
     elif extension in EDITABLE_EXTENSIONS:
+        data = Path(path).read_bytes()
         if not data:
             return
         text, _encoding, _bom, _newline = decode_text_bytes(data, selected_encoding)
@@ -2168,17 +2071,20 @@ def atomic_save_session(
     try:
         logger("deliverable_edit_save_start", path=path, bytes=len(data))
         temp_path = _write_bytes_to_temp(parent, f".{os.path.basename(path)}.cowork-edit-", data)
-        _validate_serialized_path(temp_path, extension, session.encoding)
+        validate_serialized_path(temp_path, extension, session.encoding)
         backup_dir = os.path.dirname(backup_path)
         os.makedirs(backup_dir, exist_ok=True)
         backup_temp = os.path.join(backup_dir, f".previous-{uuid.uuid4().hex}.tmp")
-        shutil.copy2(path, backup_temp)
-        with open(backup_temp, "r+b") as handle:
-            os.fsync(handle.fileno())
-        if sha256_file(backup_temp) != current_fingerprint:
+        backup_digest = hashlib.sha256()
+        with open(path, "rb") as source, open(backup_temp, "wb") as target:
+            while chunk := source.read(1024 * 1024):
+                target.write(chunk)
+                backup_digest.update(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        shutil.copystat(path, backup_temp)
+        if backup_digest.hexdigest() != current_fingerprint:
             raise ExternalModificationError("文件在创建备份时发生变化，不能覆盖。")
-        if sha256_file(path) != current_fingerprint:
-            raise ExternalModificationError("文件在保存过程中被其他程序修改，不能覆盖。")
         os.replace(backup_temp, backup_path)
         backup_temp = ""
         _write_json_atomic(
@@ -2254,13 +2160,12 @@ def save_copy(
         data,
     )
     try:
-        _validate_serialized_path(temp_path, extension, session.encoding)
-        os.replace(temp_path, target)
-        temp_path = ""
+        validate_serialized_path(temp_path, extension, session.encoding)
+        os.link(temp_path, target)
         return SaveResult(
             path=target,
             backup_path="",
-            fingerprint=sha256_file(target),
+            fingerprint=hashlib.sha256(data).hexdigest(),
             bytes_written=len(data),
         )
     except DeliverableEditError:
@@ -2303,8 +2208,7 @@ def restore_previous_version(
             f".{os.path.basename(source)}.cowork-restore-{uuid.uuid4().hex}.tmp",
         )
         shutil.copy2(previous_path, restore_temp)
-        if extension in {".docx", ".xlsx"}:
-            _validate_serialized_path(restore_temp, extension)
+        validate_serialized_path(restore_temp, extension, str(metadata.get("encoding") or ""))
         current_temp = os.path.join(backup_dir, f".current-{uuid.uuid4().hex}.tmp")
         shutil.copy2(source, current_temp)
         os.replace(restore_temp, source)
@@ -2333,6 +2237,9 @@ def restore_previous_version(
                 "source_fingerprint": fingerprint,
                 "saved_at": datetime.now().astimezone().isoformat(),
                 "backup_path": previous_path,
+                "encoding": metadata.get("encoding", ""),
+                "newline": metadata.get("newline", "\n"),
+                "bom_hex": metadata.get("bom_hex", ""),
             },
         )
         return SaveResult(

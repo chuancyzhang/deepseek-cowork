@@ -196,10 +196,7 @@ def _retry_cancelled(request_context):
     callback = (request_context or {}).get("abort_check")
     if not callable(callback):
         return False
-    try:
-        return bool(callback())
-    except Exception:
-        return False
+    return bool(callback())
 
 
 def _wait_before_model_retry(delay_seconds, request_context):
@@ -357,6 +354,20 @@ def is_gpt_5_6_model(model_name):
     return name == "gpt-5.6" or name.startswith("gpt-5.6-")
 
 class LLMProvider(ABC):
+    provider_name = ""
+    model_name = ""
+    base_url = ""
+    api_protocol = ""
+    supports_vision = False
+    requires_responses_replay = False
+    requires_deepseek_responses_replay = False
+    enterprise_replay_scope = ""
+    client = None
+    data_security_run = None
+
+    def close(self):
+        """Release provider resources; stateless implementations need no cleanup."""
+
     @abstractmethod
     def chat_stream(self, messages, tools=None, prompt_cache_key=None, request_context=None):
         """
@@ -589,6 +600,9 @@ class OpenAIProvider(LLMProvider):
             if self.api_protocol == API_PROTOCOL_RESPONSES
             else "OpenAI Chat Completions"
         )
+
+    def close(self):
+        self.client.close()
 
     @staticmethod
     def _stream_request_metadata(stream, client_request_id=""):
@@ -1444,30 +1458,18 @@ class OpenAIProvider(LLMProvider):
             try:
                 payload["input_tokens"] = int(cached_tokens) + int(uncached_tokens)
                 input_tokens = payload["input_tokens"]
-            except Exception:
+            except (TypeError, ValueError):
                 pass
-        if input_tokens is not None and cached_tokens is not None and uncached_tokens is None:
+        if input_tokens is not None and cached_tokens is not None:
             try:
                 input_count = int(input_tokens)
                 cached_count = int(cached_tokens)
-                uncached_tokens = max(0, input_count - cached_count)
-                payload["uncached_input_tokens"] = uncached_tokens
+                payload["uncached_input_tokens"] = max(0, input_count - cached_count if uncached_tokens is None else int(uncached_tokens))
                 payload["cache_hit_rate"] = cached_count / input_count if input_count > 0 else 0
-            except Exception:
+            except (TypeError, ValueError):
                 pass
-        elif input_tokens is not None and cached_tokens is not None and uncached_tokens is not None:
-            try:
-                input_count = int(input_tokens)
-                cached_count = int(cached_tokens)
-                payload["uncached_input_tokens"] = max(0, int(uncached_tokens))
-                payload["cache_hit_rate"] = cached_count / input_count if input_count > 0 else 0
-            except Exception:
-                pass
-        if cache_metrics_status == "unavailable":
-            payload["cache_metrics_status"] = "unavailable"
-        else:
-            payload["cache_metrics_status"] = cache_metrics_status
-        return payload or None
+        payload["cache_metrics_status"] = cache_metrics_status
+        return payload
 
     def _prepare_messages(self, messages):
         # Deep copy and clean
@@ -1651,6 +1653,9 @@ class AnthropicProvider(LLMProvider):
         self.base_url = base_url
         self.model_name = model_name
         self.supports_vision = bool(supports_vision)
+
+    def close(self):
+        self.client.close()
 
     @staticmethod
     def _uses_bearer_auth(base_url):
@@ -1851,12 +1856,17 @@ class AnthropicProvider(LLMProvider):
                         if args:
                             try:
                                 args = json.loads(args)
-                            except Exception:
-                                args = {}
+                            except json.JSONDecodeError as exc:
+                                raise ValueError(
+                                    f"历史工具参数损坏（消息 {msg.get('id', '')}，调用 {tc['id']}）。"
+                                    "原历史和输入已保留；请从该轮用户消息编辑后重新生成，或从此前完整回答创建分支。"
+                                ) from exc
                         else:
                             args = {}
-                    elif not isinstance(args, dict):
+                    elif args is None:
                         args = {}
+                    if not isinstance(args, dict):
+                        raise ValueError(f"历史工具参数必须是对象（调用 {tc['id']}）。原历史已保留，请编辑该轮后重新生成。")
                     anthropic_content.append({
                         "type": "tool_use",
                         "id": tc["id"],

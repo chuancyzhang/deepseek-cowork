@@ -99,7 +99,7 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         server = {"id": server_id, "name": server_id, "transport": "streamable_http", "enabled": enabled,
                   "url": "https://docs.example.test/mcp", "source_skill": source,
                   "headers": {"Authorization": "Bearer private-mcp-token"}}
-        manager.config_manager = SimpleNamespace(get_mcp_servers=lambda: [server], data_dir=self.temp.name)
+        manager.config_manager = SimpleNamespace(get_mcp_servers=lambda: [server], get=lambda key, default=None: default, data_dir=self.temp.name)
         with patch("core.skill_manager.mcp_package_available", return_value=True):
             manager._load_mcp_servers(load_tools=False)
         return manager, server
@@ -180,6 +180,8 @@ class KnowledgeIntegrationTests(unittest.TestCase):
                         manager._load_mcp_servers(load_tools=False)
                 scope = {"sources": {source: {"unavailable": True, "refs": []}}, "default_source": source, "refs": []}
                 worker = LLMWorker.__new__(LLMWorker)
+                worker.data_security_run = None
+                worker._enterprise_capability_scope = ""
                 worker.workspace_dir, worker.config_manager = self.temp.name, None
                 worker.conversation_id = "knowledge-test"
                 worker.skill_manager = manager
@@ -293,6 +295,8 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         self.assertEqual(filter_persistable_messages(messages), messages)
         self.assertNotIn(self.scope["connection_id"], messages[-1]["content"])
         worker = LLMWorker.__new__(LLMWorker)
+        worker.data_security_run = None
+        worker._enterprise_capability_scope = ""
         worker.workspace_dir, worker.config_manager = self.temp.name, None
         worker.run_context = {}
         prompt = worker._build_stable_system_prompt()
@@ -303,6 +307,8 @@ class KnowledgeIntegrationTests(unittest.TestCase):
 
     def test_system_prompt_is_identical_with_knowledge_scope(self):
         worker = LLMWorker.__new__(LLMWorker)
+        worker.data_security_run = None
+        worker._enterprise_capability_scope = ""
         worker.workspace_dir = self.temp.name
         worker.config_manager = None
         worker.run_context = {"mode": "execution"}
@@ -324,6 +330,8 @@ class KnowledgeIntegrationTests(unittest.TestCase):
     def test_context_uses_ledger_identity_and_can_merge_on_success_or_error(self):
         from core.conversation_integrity import merge_messages_by_id
         worker = LLMWorker.__new__(LLMWorker)
+        worker.data_security_run = None
+        worker._enterprise_capability_scope = ""
         worker.turn_id, worker.request_id = "turn-a", "request-a"
         original = [{"id": "user-a", "role": "user", "content": "看看这篇资料"}]
         current, generated = copy.deepcopy(original), []
@@ -341,7 +349,7 @@ class KnowledgeIntegrationTests(unittest.TestCase):
         from test_plan_mode import _ConfigStub
         class Provider:
             provider_name, model_name, base_url, thinking_enabled = "stub", "stub", "", False
-            def chat_stream(self, messages, tools=None):
+            def chat_stream(self, messages, tools=None, request_context=None, prompt_cache_key=None):
                 yield {"type": "content", "content": "已阅读"}
         manager = self.manager()
         original = [{"id": "user-a", "role": "user", "content": "看看资料"}]

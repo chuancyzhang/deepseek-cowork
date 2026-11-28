@@ -169,22 +169,14 @@ def package(destination, archive):
             hashes[name] = sha256(bundle / name)
         (bundle / "README.md").write_text(f"""# Cowork 企业中心离线部署包
 
-版本：{APP_VERSION}。包含已核验的 Linux amd64 服务及 PostgreSQL 镜像，仅支持 Electron 企业客户端分发。
+版本：{APP_VERSION}。在 Linux 服务器上完整解压，进入含 `compose.yaml` 的目录。
 
-在已启动 Docker Desktop（Linux 容器）的 Windows 电脑完整解压，然后执行：
+- **x86_64**：可校验并导入 `images.tar` 中的后台与 PostgreSQL 镜像。离线 HTTPS 部署另需准备同架构的 `caddy:2`。
+- **ARM64**：在目标服务器使用随包源码和 Docker Compose 原生构建。构建时需要可访问的镜像源和 Python 包源。
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\\start-local.ps1
-```
+在[部署指南](DEPLOYMENT.md)选择服务器架构和访问方式，配置 `.env`，启动后检查企业地址下的 `/healthz`。升级前备份数据库与业务文件，保留原加密密钥和 Compose 项目名。
 
-打开 http://localhost:8788/app 完成首次管理员设置。仅校验文件和镜像可加 `-VerifyOnly`。
-
-升级已有中心时，把原 `.env.local` 原样复制到新目录；停止原平台并备份数据库及文件卷后再启动。
-已有数据却缺少原配置时脚本会停止，不会生成新密钥。原业务卷保留，旧 Qt 发布停止分发。
-
-详细部署、升级及备份步骤见[部署指南](DEPLOYMENT.md)。其中仓库构建命令仅在源码仓库中执行。
-账号、模型、企业能力、审计和客户端分发操作见[管理员使用手册](ADMIN_GUIDE.md)。
-`deployment.json` 记录本包版本、源码摘要和镜像 ID，`SHA256SUMS` 记录文件摘要。
+管理员从 `/app` 初始化平台，配置部门、认证和资源授权。操作见[管理员使用手册](ADMIN_GUIDE.md)。
 """, encoding="utf-8")
         hashes["README.md"] = sha256(bundle / "README.md")
         hashes["images.tar"] = sha256(bundle / "images.tar")

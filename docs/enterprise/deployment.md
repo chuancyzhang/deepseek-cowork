@@ -1,115 +1,146 @@
-# DeepSeek Cowork 企业服务端部署
+# DeepSeek Cowork 企业管理后台 · Linux 部署
 
 文档适用版本：**5.4.2**
 
-`web/platform/` 是可独立复制的部署单元，由 FastAPI、PostgreSQL、同源静态页面和业务文件目录组成：
+本指南在一台 Linux 服务器上部署管理后台、PostgreSQL 和业务文件卷。HTTPS 入口由 Caddy 提供。部署完成后，管理员在浏览器打开企业地址的 `/app`。
 
-| 路径 | 职责 |
-| --- | --- |
-| `server/` | 认证、模型网关、能力发布、聊天审计、团队空间、分发及命令入口 |
-| `ui/` | 平台管理页面 |
-| `compose.yaml` | Linux 服务、数据库与 HTTPS 代理 |
-| `compose.http.yaml` | Linux 内网 HTTP 端口映射 |
-| `compose.local.yaml` | Windows 本机 Docker 启动配置 |
+## 选择服务器架构
 
-部署顺序是选择环境、准备服务与数据库、初始化账号和模型、分发客户端，最后安排备份与升级。桌面包与企业中心离线包是两个交付物：更新桌面版本不会自动升级中心。
-
-| 部署场景 | 阅读入口 |
-| --- | --- |
-| Windows 本机或离线交付 | [Windows Docker](#windows-本机-docker-启动) |
-| Linux 服务器与 HTTPS 或内网 HTTP | [Linux 部署](#linux-部署) |
-| 反向代理子路径或原生进程 | [其他部署方式](#子路径与原生进程部署) |
-| 服务已经启动 | [初始化与成员管理](admin-guide.md#初始化与成员管理) |
-| 给员工发布桌面包 | [客户端分发](admin-guide.md#客户端分发) |
-| 备份、升级与诊断 | [日常运维](#日常运维) |
-
-## Windows 本机 Docker 启动
-
-源码部署先进入仓库的 `web/platform/` 目录，执行 `docker compose --env-file .env.local -f compose.local.yaml build platform`（首次尚无 `.env.local` 时使用 `docker build -t cowork-enterprise:local .`）。离线部署使用下节生成的完整交付包。随后执行：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\start-local.ps1
-```
-
-脚本首次生成 `.env.local`，以后复用原配置。打开 `http://localhost:8788/app`，按页面创建超级管理员。
-
-离线包启动前校验 `deployment.json` 中的文件摘要及导入镜像 ID，再固定使用该包的镜像；失败不会改用旧镜像。只有旧 `images.tar` 而没有部署清单的包会被拒绝。`-VerifyOnly` 只校验文件并导入、核验镜像，不启动服务或写入业务数据。
-
-### 构建离线部署包
-
-在仓库根目录执行，要求 Docker Desktop Linux 引擎已启动、Python 环境已准备，且本机已有 `postgres:17` 镜像（首次可执行 `docker pull postgres:17`）：
-
-```powershell
-.\.venv\Scripts\python.exe -X utf8 -B scripts/package_enterprise.py
-powershell -NoProfile -ExecutionPolicy Bypass -File .\dist\enterprise-docker\start-local.ps1 -VerifyOnly
-```
-
-产物为 `dist/enterprise-docker/` 与 `dist/cowork-enterprise-docker.zip`。打包从当前源码快照重新构建服务镜像，逐文件比对镜像中的源码，检查数据库版本及 Electron 分发能力，然后导出镜像、源码、启动脚本和校验清单。镜像标签包含应用版本及源码摘要；不复用可变的旧 `cowork-enterprise:local` 标签，不自动升级已有 PostgreSQL 镜像。
-
-打包只放行部署源码，排除 `.env.local`、密钥、业务数据和缓存；交付目录含本机配置或未知文件时拒绝覆盖。生产环境配置、数据库和文件卷不进入分发包。
-
-## Linux 部署
-
-将 `web/platform/` 整个目录复制到服务器，例如 `/opt/cowork-platform/`。准备 Docker Compose、认证和模型服务。HTTPS 部署使用企业域名和受客户端信任的证书。以下命令均在部署目录执行：
+在目标服务器运行以下命令，确认 Docker 连接到这台机器上的 Linux 引擎，并已安装支持 `up --wait` 的 Compose 插件。
 
 ```bash
-cp .env.example .env
+uname -m
+docker info --format '{{.OSType}}/{{.Architecture}}'
+docker compose version
+```
+
+| Linux 服务器 | Docker 平台 | 准备后台镜像的方式 |
+| --- | --- | --- |
+| x86_64（Intel、AMD） | `linux/amd64` | 可在服务器上原生构建，也可直接导入同版本交付包内的镜像。 |
+| ARM64（`uname -m` 显示 `aarch64`） | `linux/arm64` | 在 ARM64 服务器上用随包源码或仓库的 `web/platform/` 原生构建。当前交付包的 `images.tar` 仅含 amd64 镜像。 |
+
+## 准备目录与访问地址
+
+将同版本仓库的整个 `web/platform/` 目录复制到服务器，例如 `/opt/cowork-platform/`。使用交付 ZIP 时，完整解压后进入包含 `compose.yaml`、`Dockerfile` 和 `.env.example` 的 `enterprise-docker/` 目录。以下命令均在该部署目录执行。
+
+```bash
+umask 077
+test -e .env || cp .env.example .env
 chmod 600 .env
-mkdir -p certs
-# 将证书与私钥放到 certs/tls.crt、certs/tls.key
-docker compose build platform
-docker compose run --rm --no-deps platform python -m server generate-key
 ```
 
-把生成的加密密钥和部署参数填入 `.env`：
+编辑 `.env`，先填写下列配置。升级已有中心时沿用原配置。
 
-| 配置 | 含义 |
+| 配置项 | 填写内容 |
 | --- | --- |
-| `POSTGRES_PASSWORD`、`COWORK_DATABASE_URL` | 数据库密码和连接地址；DSN 中特殊字符使用 URL 编码 |
-| `COWORK_HOST`、`COWORK_PUBLIC_URL` | 访问域名及公共基础地址 |
-| `COWORK_PLATFORM_ID`、`COWORK_PLATFORM_NAME` | 固定平台标识与显示名称 |
-| `COWORK_ENCRYPTION_KEY` | 模型密钥与认证凭据加密密钥 |
-| `COWORK_LOGIN_PROVIDER` | 员工默认登录来源，可由网页配置覆盖 |
-| `COWORK_SESSION_SECONDS` | 会话期限，默认 8 小时 |
-| `COWORK_MAX_MODEL_CONCURRENCY` | 模型并发配置，默认 64 |
-| `COWORK_CLEANUP_SECONDS` | 到期审计记录清理间隔，默认 60 秒 |
-| `COWORK_MAX_SPACE_FILE_BYTES`、`COWORK_MAX_SPACE_BYTES` | 团队空间单文件及空间容量配置 |
+| `POSTGRES_PASSWORD` | 新库使用随机密码，例如用 `openssl rand -hex 32` 生成。 |
+| `COWORK_DATABASE_URL` | 保留模板中的主机 `database`、端口 `5432`、用户及库名 `cowork`，将密码改为上面同一个值。密码如含特殊字符，须在此连接串中进行 URL 编码。 |
+| `COWORK_PLATFORM_ID`、`COWORK_PLATFORM_NAME` | 分别填写固定平台标识和员工看到的企业名称。 |
+| `COWORK_ENCRYPTION_KEY` | 在镜像就绪后生成并填入，用于加密模型和认证凭据。已有中心继续使用原密钥。 |
 
-启动服务：
-
-```bash
-sh start.sh
-```
-
-启动会检查数据库迁移。随后打开 `/app` 初始化管理员，配置认证、模型与成员授权。
-
-### 使用内网 IP 和 HTTP 端口
-
-在可信内网部署时，可以在 `.env` 中填入服务器实际的 IPv4 地址和员工可访问的端口，例如：
+**域名与 HTTPS**　将域名解析到服务器，开放 TCP 443，将证书链与私钥分别放在 `certs/tls.crt`、`certs/tls.key`。管理员和员工的设备都需要信任签发机构。在 `.env` 中设置：
 
 ```dotenv
-COWORK_HOST=192.168.1.50
+COMPOSE_FILE=compose.yaml
+COWORK_HOST=cowork.example.internal
+COWORK_PUBLIC_URL=https://cowork.example.internal
+COWORK_ALLOW_PLATFORM_HTTP=0
+```
+
+**内网 IP 与 HTTP**　仅用于可信内网，账号和请求会通过明文 HTTP 传输。在下面的示例中，将占位符替换为绑定在服务器网卡上、员工可访问的 IPv4。选择并开放访问端口。此模式只启动后台和数据库。
+
+```dotenv
+COMPOSE_FILE=compose.yaml:compose.http.yaml
+COWORK_HOST=<服务器内网IPv4>
 COWORK_HTTP_PORT=8788
 COWORK_ALLOW_PLATFORM_HTTP=1
 ```
 
-沿用上面的数据库、平台标识和加密密钥配置，跳过证书步骤，执行 `sh start.sh --http`。此模式按 IP 和端口生成 `COWORK_PUBLIC_URL`，在此地址发布服务。请用 `http://192.168.1.50:8788/app` 初始化并管理平台。企业客户端封装时也使用这个地址。HTTP 会明文传输账号和请求，仅在可信内网使用。
+HTTP 配置按上述 IP 和端口设置服务实际使用的 `COWORK_PUBLIC_URL`。两种模式下的登录回调和企业下载地址都以公共地址为准。
 
-已部署的平台切换访问方式时，先用原启动配置停止服务，保留原数据库卷、平台标识与加密密钥。切换后重新生成并分发企业客户端包。
+首次部署可沿用 `.env.example` 中的运行参数。需要调整时，`COWORK_SESSION_SECONDS` 控制会话期限，`COWORK_MAX_MODEL_CONCURRENCY` 控制模型并发，`COWORK_CLEANUP_SECONDS` 控制审计清理间隔。团队空间的单文件及总容量上限分别由 `COWORK_MAX_SPACE_FILE_BYTES`、`COWORK_MAX_SPACE_BYTES` 设置。
+
+## 准备后台镜像
+
+### x86_64 和 ARM64 原生构建
+
+在目标服务器执行。同一份 Dockerfile 使用 `python:3.12-slim`，按当前 Docker 引擎的架构安装 `requirements.txt` 中固定版本的依赖。构建机需要能访问容器镜像源与 Python 包源。Compose 使用 `postgres:17`，HTTPS 模式另需 `caddy:2`。
+
+```bash
+unset DOCKER_DEFAULT_PLATFORM
+docker compose config --quiet
+docker compose build platform
+docker compose pull --ignore-buildable
+docker compose run --rm --no-deps --pull never platform uname -m
+```
+
+最后一条在后台容器中执行。x86_64 服务器应显示 `x86_64`，ARM64 应显示 `aarch64`。接着按“启动与验收”操作。
+
+### x86_64 使用交付包离线部署
+
+在 x86_64 服务器安装 `jq`，进入同版本交付包的解压目录。以下命令校验包内文件，核对两个镜像的 ID 和架构，并生成 Compose 使用的镜像配置。包中镜像的标签以 `deployment.json` 为准。
+
+```bash
+(
+  set -eu
+  sha256sum --check --quiet SHA256SUMS
+  test "$(jq -r .target deployment.json)" = linux-amd64
+  docker load -i images.tar
+  for service in platform database; do
+    image=$(jq -er --arg key "${service}_image" '.[$key]' deployment.json)
+    id=$(jq -er --arg key "${service}_image_id" '.[$key]' deployment.json)
+    actual=$(docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}}' "$image")
+    if [ "$actual" != "$id linux/amd64" ]; then
+      echo "$service 镜像 ID 或架构与交付清单不符" >&2
+      exit 1
+    fi
+  done
+  jq '{services:{platform:{image:.platform_image},database:{image:.database_image}}}' deployment.json > compose.images.yaml
+)
+```
+
+校验成功后，在 `.env` 的 `COMPOSE_FILE` 行末追加 `:compose.images.yaml`。例如内网 HTTP 使用 `COMPOSE_FILE=compose.yaml:compose.http.yaml:compose.images.yaml`。
+
+HTTPS 还需单独准备 Caddy。可在有网络的机器执行 `docker pull --platform linux/amd64 caddy:2` 和 `docker save -o caddy-amd64.tar caddy:2`，把归档传到目标服务器，执行 `docker load -i caddy-amd64.tar`。内网 HTTP 可直接进入下一步。
+
+## 启动与验收
+
+首次安装先执行以下命令，将输出完整填入 `.env` 中的 `COWORK_ENCRYPTION_KEY` 并保存。
+
+```bash
+docker compose run --rm --no-deps --pull never platform python -m server generate-key
+```
+
+两种架构在镜像就绪后使用相同命令。应用启动时会连接数据库并执行迁移。
+
+```bash
+docker compose config --quiet
+docker compose up -d --no-build --pull never --wait
+docker compose ps
+```
+
+从管理员的机器访问实际地址。将下例域名替换为企业域名；内网 HTTP 使用 `http://<服务器内网IPv4>:<访问端口>`。使用企业内部 CA 时，先在访问机器上信任该 CA。
+
+```bash
+PUBLIC_URL=https://cowork.example.internal
+curl --fail --show-error --silent "$PUBLIC_URL/healthz"
+```
+
+健康接口应返回 `"status":"ok"` 和数据库结构版本。打开同一地址的 `/app`，创建超级管理员，再配置企业登录方式、部门与模型授权。配置步骤见[管理员指南](admin-guide.md#初始化与成员管理)。
 
 ## 子路径与原生进程部署
 
 子路径可配置为 `COWORK_PUBLIC_URL=https://企业域名/cowork`。代理统一处理此前缀，并检查对应的登录、静态资源和下载地址。
 
-原生部署在独立 Python 3.12 环境执行：
+直接运行 Python 进程时，先准备 PostgreSQL 及可用的加密密钥，将 `COWORK_DATABASE_URL` 指向进程可达的数据库主机，设置可写的绝对路径 `COWORK_DATA_DIR`，并将实际 `COWORK_*` 配置导入进程环境。在独立 Python 3.12 环境执行：
 
 ```bash
 python -m pip install -r requirements.txt
 python -m server migrate
-python -m server serve --host 127.0.0.1 --port 8080
+python -m server serve --host localhost --port 8080
 ```
 
-配置相同的 `COWORK_*` 变量并指定绝对路径 `COWORK_DATA_DIR`。使用 systemd 等管理单进程服务，在前方配置 HTTPS 代理。
+使用 systemd 等管理单进程服务，在前方配置 HTTPS 代理。
 
 ## 命令行导入认证来源
 
@@ -136,10 +167,10 @@ python -m server serve --host 127.0.0.1 --port 8080
 执行导入并启动：
 
 ```bash
-docker compose up -d database
-docker compose run --rm platform python -m server migrate
-docker compose run --rm -T platform python -m server import-auth - < bootstrap-auth.json
-sh start.sh
+docker compose up -d --no-build --pull never --wait database
+docker compose run --rm --no-deps --pull never platform python -m server migrate
+docker compose run --rm --no-deps --pull never -T platform python -m server import-auth - < bootstrap-auth.json
+docker compose up -d --no-build --pull never --wait
 ```
 
 在身份平台注册回调地址 `https://企业域名/auth/callback/company-sso`。完成首次登录后可移除导入文件。如果没有通过网页创建本地超级管理员，保留 `COWORK_BOOTSTRAP_PROVIDER` 与 `COWORK_BOOTSTRAP_SUBJECT`，用它们指向已启用的企业管理员。平台通过该账号授予或收回管理员角色，其他管理员可以继续管理普通资源。
@@ -158,45 +189,20 @@ docker compose run --rm platform python -m server migrate
 
 ## 日常运维
 
-### 状态与日志
-
-Linux 部署更新代码后，使用原启动参数再次运行 `sh start.sh`。HTTPS 部署使用以下命令查看状态和日志。HTTP 部署在 `docker compose` 后加上 `-f compose.yaml -f compose.http.yaml`。
+所有运维命令均在原部署目录执行，Compose 会读取 `.env` 的 `COMPOSE_FILE`。用以下命令查看服务和最近的启动日志。
 
 ```bash
 docker compose ps
-docker compose logs --tail=100 platform
-docker compose stop
+docker compose logs --tail=100 platform database
 ```
 
-健康检查 `/healthz` 返回实际数据库结构版本。`/api/v1/platform-info` 提供客户端分发、企业能力和聊天审计的可用性，以及通过交付脚本构建的镜像版本和源码摘要。管理页面显示客户端处理状态及记录清理状态。
-
-### 业务备份
-
-业务数据库备份排除聊天请求快照和历史提问正文，避免正文随备份延长保存。停止写入后备份业务文件卷，独立保管加密密钥。
+**备份。** 停止后台写入，保留数据库运行，导出业务库。以下备份按审计保留策略排除聊天请求快照与历史提问正文。同步备份挂载到 `/data` 的 `releases` 卷，并单独保管 `.env` 中的原加密密钥及 HTTPS 证书。
 
 ```bash
+docker compose stop platform
 docker compose exec -T database pg_dump -U cowork -d cowork -Fc --exclude-table-data=questions --exclude-table-data=chat_audit_requests > cowork-business.dump
 ```
 
-开发测试入口统一维护在[技术文档](../technical-design.md#开发与测试)。
+业务备份完成后，执行 `docker compose up -d --no-build --pull never --wait` 恢复服务。
 
-### Windows 本机启停与升级
-
-以下命令在 Windows 部署目录执行，沿用 `.env.local` 与 `compose.local.yaml`。
-
-停止与再次启动：
-
-```powershell
-docker compose --env-file .env.local -f compose.local.yaml stop
-powershell -NoProfile -ExecutionPolicy Bypass -File .\start-local.ps1
-```
-
-服务端代码升级时，先构建镜像，再停止应用并完成业务备份，然后启动新服务：
-
-```powershell
-docker compose --env-file .env.local -f compose.local.yaml build platform
-docker compose --env-file .env.local -f compose.local.yaml stop platform
-docker compose --env-file .env.local -f compose.local.yaml up -d --no-deps --wait platform
-```
-
-离线升级时将新包解压到新目录，把原 `.env.local` 原样复制过去；停止原平台并按“日常运维”备份后，运行新包 `start-local.ps1`。保持 Compose 项目名、卷名、账号库和加密密钥一致。回退到较早版本时，应配套恢复升级前的数据库和文件卷。
+**升级。** 备份后，在同一部署目录更新后台源码并执行 `docker compose build platform`；使用 x86_64 离线包则按上文核验新包并重新生成 `compose.images.yaml`。保留原 `.env`、证书、Compose 项目名及卷名，再运行“启动与验收”中的启动和健康检查命令。若需回退数据库迁移，同时恢复升级前的数据库、业务文件和匹配的后台版本。
